@@ -26,9 +26,7 @@ Every stored event must include:
 
 ## Stream types
 
-The typed stream inventory lives in `internal/runtime/events/events.go`. This
-contract highlights the baseline lifecycle streams plus intake streams relevant
-to this document:
+Phase 03 through Phase 14 stream types are:
 
 - `project`
 - `task`
@@ -39,7 +37,6 @@ to this document:
 - `registry_version`
 - `executor_health`
 - `context_packet`
-- `intake_item`
 - `learning_proposal`
 - `learning_evaluation`
 - `learning_promotion`
@@ -48,9 +45,7 @@ to this document:
 
 ## Event types
 
-The typed event inventory lives in `internal/runtime/events/events.go`. This
-contract highlights the baseline lifecycle events plus intake events relevant to
-this document:
+Phase 03 through Phase 14 event types are:
 
 - `project.created`
 - `task.created`
@@ -70,24 +65,10 @@ this document:
 - `registry_version.recorded`
 - `executor_health.recorded`
 - `context_packet.created`
-- `intake.item_created`
-- `intake.processing_started`
-- `intake.classified`
-- `intake.dedupe_reviewed`
-- `intake.routed`
-- `intake.processed`
-- `intake.routed_to_goal`
-- `intake.draft_artifact_created`
-- `intake.clarification_needed`
-- `intake.duplicate_linked_or_suppressed`
-- `intake.review_accepted`
-- `intake.review_rejected`
-- `intake.review_clarification_requested`
-- `intake.review_archived`
-- `intake.review_duplicate_acknowledged`
-- `intake.review_approval_required`
-- `intake.approval_approved`
-- `intake.approval_denied`
+- `memory.summary_recorded`
+- `memory.summary_updated`
+- `memory.proposal_created`
+- `memory.proposal_resolved`
 - `project.transition_changed`
 - `project.shadow_observation_recorded`
 - `project.compare_report_recorded`
@@ -107,6 +88,14 @@ this document:
 - `browser.session_login_requested`
 - `browser.session_login_completed`
 - `browser.session_login_expired`
+- `automation_trigger.created`
+- `automation_trigger.fire_requested`
+- `automation_trigger.evaluated`
+- `automation_trigger.materialized`
+- `automation_trigger.tested`
+- `automation_trigger.deferred`
+- `automation_trigger.errored`
+- `automation_trigger.status_changed`
 
 ## Contract rules
 
@@ -136,6 +125,14 @@ Phase 03 replay support must be able to reconstruct:
 - approval state
 
 This replay is a correctness requirement for lifecycle auditing and restart safety.
+
+## Provenance trail expectation
+
+The SQLite event stream is also the canonical source for operator-facing provenance trails. `odin logs` remains the raw event listing surface. `odin logs show <event-id>` and `odin logs trail --task <id|key>`, `--run <id>`, or `--approval <id>` are read-only projections over the same events table.
+
+Trail rendering may enrich events with existing project and work item identifiers for readability, but it must not create a second event bus, audit table, dashboard-specific evidence store, or synthetic lifecycle authority. JSON trail output may include raw event payloads so operators can inspect the durable evidence behind the human-readable summary.
+
+Read-only provenance commands and `/overview` Activity Log rendering must not append runtime events.
 
 ## Transition expectation
 
@@ -226,6 +223,31 @@ The `goal` stream is the audit trail for goal CLI mutations. Goal state remains 
 
 Goal-derived review queue items use existing goal state as their authority. `intake-goal:<id>`, `goal:<id>`, and `goal-approval:<id>` can approve or reject created/planned goals through the review CLI. `goal-blocker:<id>` items are visible for inspection, but blocker resolution is not implemented until a store-level resolution primitive and lifecycle rule exist; approve/reject attempts must return an unsupported/not-resolved result without mutating goal or blocker state.
 
+## Memory proposal expectation
+
+Durable memory writes that are not already accepted runtime facts must enter
+Odin as reviewable Memory Proposals. `odin memory propose` records a
+`memory_summaries` row with `details_json.schema=memory_proposal.v1`, pending
+status, explicit scope, source/provenance fields, and safety classification.
+
+Proposal creation appends:
+
+- `memory.proposal_created`
+
+Proposal resolution through either `odin memory resolve` or
+`odin review act memory-proposal:<id> ...` appends:
+
+- `memory.proposal_resolved`
+
+Payloads must identify the memory summary ID, scope, scope key, memory type,
+proposal status, decision when resolved, source type, source ID or key,
+sensitivity, reviewer when present, and review reason when present. They must
+not include raw sensitive content.
+
+Pending, rejected, and archived Memory Proposals are audit records only. Normal
+active-memory recall must exclude them unless a command explicitly asks for that
+proposal status.
+
 ## Intake-to-goal expectation
 
 Raw intake processing remains on the `intake_items` SQLite authority. When deterministic processing routes a raw intake item into a reviewable goal, Odin must preserve the intake-to-goal link on the intake row, leave the goal unapproved, and append audit events through the runtime event stream:
@@ -235,12 +257,6 @@ Raw intake processing remains on the `intake_items` SQLite authority. When deter
 - `goal.created`
 
 The processing payload must include the source intake ID, route decision, classification result, and created goal ID when a goal is created. Intake conversion must not approve, run, or mutate external systems.
-
-## Intake-to-proposal expectation
-
-Raw intake processing remains on the `intake_items` SQLite authority. Processing may emit `intake.processing_started`, `intake.classified`, `intake.dedupe_reviewed`, `intake.routed`, `intake.draft_artifact_created`, `intake.clarification_needed`, `intake.duplicate_linked_or_suppressed`, and `intake.processed`.
-
-The processing payload and routing notes must preserve enough evidence to reconstruct the Reviewable Intake Proposal. Intake processing must not create Work Items, Run Attempts, dispatches, approvals, or external mutations by default.
 
 ## Browser session handoff expectation
 
@@ -254,8 +270,35 @@ Manual Huginn browser login and authenticated read-only session reuse are being 
 - `browser.session_login_requested`
 - `browser.session_login_completed`
 - `browser.session_login_expired`
+- `browser.profile_encrypted`
+- `browser.profile_attach_requested`
+- `browser.profile_attached`
+- `browser.profile_attach_failed`
+- `browser.profile_attach_cleaned`
+- `browser.profile_revoked`
+- `browser.profile_expired`
+- `browser.profile_cleaned`
+- `browser.profile_cleanup_failed`
+- `browser.profile_materialized`
+- `browser.profile_materialization_cleaned`
 - `goal.waiting_for_human_login`
 
-Browser session events must not include passwords, cookies, bearer tokens, passkey material, TOTP values, backup codes, profile bytes, or raw credential prompts. Login request events may include a log-safe opaque `handoff_id` and a metadata-only `handoff_url`; neither proves that a handoff HTTP route exists. Metadata-only session verification records operator-attested verification and `last_verified_at`; browser-observed account/domain verification remains future work. Profile preparation records only empty-directory preparation metadata plus `profile_storage_policy`; a prepared directory is not approval to write browser files. Session verification may unblock a waiting goal only through normal policy checks; it must not approve or execute the goal by itself.
+Browser session events must not include passwords, cookies, bearer tokens, passkey material, TOTP values, backup codes, profile bytes, or raw credential prompts. Login request events may include a log-safe opaque `handoff_id` and a metadata-only `handoff_url`; neither proves that a handoff HTTP route exists. Metadata-only session verification records operator-attested verification and `last_verified_at`; browser-observed account/domain verification remains future work. Profile preparation records only empty-directory preparation metadata plus `profile_storage_policy`; a prepared directory is not approval to write browser files. Encrypted profile artifact and attach events record only safe metadata such as artifact ID, session ID, runner ID, relative encrypted artifact path, key reference, relative materialization path, attach status, policy decision, actor, reason, and safe error code/message; they must not include fixture plaintext, key bytes, source fixture path, cookie values, credential stores, or browser profile bytes. Session verification may unblock a waiting goal only through normal policy checks; it must not approve or execute the goal by itself.
 
 `odin browser session handoff show --handoff-id <id>` is intentionally read-only. It validates the handoff ID, login request status, expiration, and linked session status, but emits no runtime event because it performs no state change.
+
+## Automation trigger expectation
+
+Automation Trigger events are the audit trail for scheduled and event-backed work creation. Trigger definitions and evaluations remain in SQLite; registry prompts, YAML policy, and design docs do not count as real automation unless a real `odin trigger` or `odin scheduler` command invokes the path.
+
+Trigger mutation events should preserve enough evidence to reconstruct:
+
+- trigger key and workspace
+- trigger source such as `schedule`, `event`, `manual`, or `test`
+- deterministic `materialization_key`
+- event envelope with `source`, `trigger_type`, `dedupe_key`, `occurred_at`, and `recovery_state`
+- due time or source-event time when applicable
+- execution intent and approval-required posture when present
+- linked Work Item when a real evaluation materializes work
+
+`automation_trigger.tested` is allowed for operator preview commands. It records preview/audit evidence with `mutates=false`, but it must not create Work Items, materialization rows, Run Attempts, Approval Requests, external adapter mutations, or dispatches.

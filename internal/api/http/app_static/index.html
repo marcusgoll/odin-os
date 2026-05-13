@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101820">
+    <link rel="manifest" href="/app/manifest.webmanifest">
+    <link rel="stylesheet" href="/app/styles.css">
+    <title>Odin Operator</title>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel">
+        <div class="topline">
+          <div>
+            <h1>Odin Inbox</h1>
+            <p id="capture-status">Raw capture stores evidence first.</p>
+          </div>
+          <button id="save-token" type="button">Token</button>
+        </div>
+
+        <form id="capture-form" data-api-endpoint="/mobile/intake/raw">
+          <fieldset class="kind-grid" aria-label="Capture type">
+            <label><input type="radio" name="kind" value="note" data-capture-kind="note" checked> Note</label>
+            <label><input type="radio" name="kind" value="prompt" data-capture-kind="prompt"> Prompt</label>
+            <label><input type="radio" name="kind" value="idea" data-capture-kind="idea"> Idea</label>
+            <label><input type="radio" name="kind" value="task" data-capture-kind="task"> Task</label>
+            <label><input type="radio" name="kind" value="bug" data-capture-kind="bug"> Bug</label>
+            <label><input type="radio" name="kind" value="project_note" data-capture-kind="project_note"> Project</label>
+          </fieldset>
+
+          <label class="field">
+            <span>Title</span>
+            <input id="capture-title" name="title" autocomplete="off" placeholder="Optional short title">
+          </label>
+
+          <label class="field">
+            <span>Body</span>
+            <textarea id="capture-body" name="content" rows="7" placeholder="Capture the raw note, prompt, task, or bug."></textarea>
+          </label>
+
+          <div class="media-row">
+            <label class="file-button">
+              <input id="image-input" name="attachment" type="file" accept="image/*" capture="environment">
+              Photo
+            </label>
+            <button id="voice-record" type="button">Record voice</button>
+            <span id="media-state">No media attached</span>
+          </div>
+
+          <label class="field">
+            <span>Transcript placeholder</span>
+            <input id="capture-transcript" name="transcript" placeholder="Optional transcript or pending marker">
+          </label>
+
+          <div class="field-grid">
+            <input id="source-app" name="source_app" placeholder="Source app">
+            <input id="share-url" name="share_url" placeholder="Share URL">
+          </div>
+
+          <button class="primary" type="submit">Capture raw intake</button>
+        </form>
+      </section>
+
+      <section class="panel compact">
+        <div class="topline">
+          <h2>Failed Uploads</h2>
+          <button id="retry-failed" type="button">Retry</button>
+        </div>
+        <ul id="failed-uploads"></ul>
+      </section>
+    </main>
+    <script src="/app/app.js"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/app/service-worker.js');
+      }
+    </script>
+  </body>
+</html>

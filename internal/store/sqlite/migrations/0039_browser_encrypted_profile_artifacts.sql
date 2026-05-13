@@ -9,7 +9,6 @@ CREATE TABLE IF NOT EXISTS browser_encrypted_profile_artifacts (
   updated_at TEXT NOT NULL,
   expires_at TEXT,
   revoked_at TEXT,
-  cleaned_at TEXT,
   error_code TEXT,
   error_message TEXT
 );

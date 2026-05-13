@@ -21,7 +21,10 @@ import (
 	"odin-os/internal/cli/tui"
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/initiatives"
+	"odin-os/internal/prompts"
+	"odin-os/internal/registry"
 	"odin-os/internal/runtime/checkpoints"
+	"odin-os/internal/runtime/jobs"
 	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
@@ -95,6 +98,68 @@ func TestServeDashboardAdminKillSwitchUpdatesReadinessAndRuntimeState(t *testing
 	}
 }
 
+func TestServeDashboardAdminPauseAndResumeIssueMutatesRuntimeTask(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       filepath.Join(t.TempDir(), "alpha"),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "pause-me",
+		Title:       "Pause me",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	admin := serveDashboardAdmin{
+		Jobs: jobs.Service{Store: store},
+	}
+	if err := admin.PauseIssue(ctx, task.ID); err != nil {
+		t.Fatalf("PauseIssue() error = %v", err)
+	}
+	paused, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask(paused) error = %v", err)
+	}
+	if paused.Status != "blocked" || paused.BlockedReason != "operator_paused" {
+		t.Fatalf("paused task status=%q blocked_reason=%q, want blocked/operator_paused", paused.Status, paused.BlockedReason)
+	}
+
+	if err := admin.ResumeIssue(ctx, task.ID); err != nil {
+		t.Fatalf("ResumeIssue() error = %v", err)
+	}
+	resumed, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask(resumed) error = %v", err)
+	}
+	if resumed.Status != "queued" || resumed.BlockedReason != "" {
+		t.Fatalf("resumed task status=%q blocked_reason=%q, want queued with no blocked reason", resumed.Status, resumed.BlockedReason)
+	}
+}
+
 func TestRunReplStartsInteractiveShell(t *testing.T) {
 	t.Parallel()
 
@@ -134,6 +199,21 @@ func TestRunWithoutArgsPrintsUsageInsteadOfStartingShell(t *testing.T) {
 	}
 	if strings.Contains(output, "odin>") {
 		t.Fatalf("stdout = %q, should not contain repl prompt", output)
+	}
+}
+
+func TestRunLeasesCleanupDryRunUsesCanonicalCommandPath(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"leases", "cleanup", "--dry-run"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(leases cleanup --dry-run) error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "no worktree leases") {
+		t.Fatalf("stdout = %q, want no worktree leases", stdout.String())
 	}
 }
 
@@ -177,6 +257,14 @@ func TestRunStatusJSON(t *testing.T) {
 			Blocked int `json:"blocked"`
 			Backlog int `json:"backlog"`
 		} `json:"companion_swarm_counts"`
+		WorkerDispatch struct {
+			Mode     string `json:"mode"`
+			Enabled  bool   `json:"enabled"`
+			DryRun   bool   `json:"dry_run"`
+			ReadOnly bool   `json:"read_only"`
+			Source   string `json:"source"`
+			Reason   string `json:"reason"`
+		} `json:"worker_dispatch"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("status json = %v", err)
@@ -198,6 +286,12 @@ func TestRunStatusJSON(t *testing.T) {
 	}
 	if payload.CompanionSwarmCounts.Backlog < 1 {
 		t.Fatalf("CompanionSwarmCounts.Backlog = %d, want backlog", payload.CompanionSwarmCounts.Backlog)
+	}
+	if payload.WorkerDispatch.Mode != "paused" || payload.WorkerDispatch.Enabled || payload.WorkerDispatch.DryRun || payload.WorkerDispatch.ReadOnly || payload.WorkerDispatch.Source != "runtime_readiness" {
+		t.Fatalf("WorkerDispatch = %+v, want paused non-dry-run non-read-only runtime readiness status", payload.WorkerDispatch)
+	}
+	if payload.WorkerDispatch.Reason == "" {
+		t.Fatalf("WorkerDispatch.Reason is empty, want paused reason")
 	}
 
 	activeFound := false
@@ -384,6 +478,130 @@ func TestRunOverviewJSONUsesCanonicalView(t *testing.T) {
 	}
 }
 
+func TestRunCapabilitiesListAndShowUseGatewayTerminology(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "registry", "commands"), 0o755); err != nil {
+		t.Fatalf("mkdir registry/commands: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "registry", "commands", "project.status.md"), []byte(`---
+apiVersion: odin/v1
+kind: command
+name: project.status
+version: 1.0.0
+availability:
+  scope: global
+permissions:
+  - filesystem
+inputSchema:
+  ref: schema://odin/commands/project.status/input
+  type: object
+outputSchema:
+  ref: schema://odin/commands/project.status/output
+  type: string
+dependencies:
+  - kind: skill
+    name: triage-skill
+    version: 1.0.0
+execution:
+  mode: local
+  timeout: 30s
+implementation:
+  kind: markdown
+  path: registry/commands/project.status.md
+---
+
+# Project Status Command
+
+## Purpose
+Show the current project state in a concise operator-facing form.
+
+## When to Use
+Use this command when the operator needs a quick status readout.
+
+## Inputs
+The command takes the active scope and runtime projection.
+
+## Procedure
+Collect the current context and render the important details.
+
+## Outputs
+A compact status summary with any immediate blockers.
+
+## Constraints
+Do not mutate runtime state.
+
+## Success Criteria
+The operator can decide the next action without extra lookup.
+`), 0o644); err != nil {
+		t.Fatalf("write registry command: %v", err)
+	}
+
+	var listOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"capabilities", "list", "--kind", "command", "--json"}, strings.NewReader(""), &listOutput); err != nil {
+		t.Fatalf("Run(capabilities list --json) error = %v\n%s", err, listOutput.String())
+	}
+
+	var listPayload struct {
+		Source       string `json:"source"`
+		PluginModel  string `json:"plugin_model"`
+		Capabilities []struct {
+			ID      string `json:"id"`
+			Kind    string `json:"kind"`
+			Version string `json:"version"`
+			Scope   string `json:"scope"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(listOutput.Bytes(), &listPayload); err != nil {
+		t.Fatalf("capabilities list json = %v\n%s", err, listOutput.String())
+	}
+	if listPayload.Source != "capability_gateway" {
+		t.Fatalf("Source = %q, want capability_gateway", listPayload.Source)
+	}
+	if listPayload.PluginModel != "plugins_are_packages_not_runtime_kind" {
+		t.Fatalf("PluginModel = %q, want packaging-only plugin model", listPayload.PluginModel)
+	}
+	if strings.Contains(strings.ToLower(listOutput.String()), "plugin manager") {
+		t.Fatalf("capabilities list output = %s, must not expose plugin manager language", listOutput.String())
+	}
+	foundProjectStatus := false
+	for _, card := range listPayload.Capabilities {
+		if card.ID == "project.status" && card.Kind == "command" && card.Version == "1.0.0" && card.Scope == "global" {
+			foundProjectStatus = true
+			break
+		}
+	}
+	if !foundProjectStatus {
+		t.Fatalf("capabilities list output = %s, want project.status command card", listOutput.String())
+	}
+
+	var showOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"capabilities", "show", "project.status", "--json"}, strings.NewReader(""), &showOutput); err != nil {
+		t.Fatalf("Run(capabilities show --json) error = %v\n%s", err, showOutput.String())
+	}
+	var showPayload struct {
+		Capability struct {
+			ID             string `json:"id"`
+			Kind           string `json:"kind"`
+			Version        string `json:"version"`
+			Implementation struct {
+				Kind string `json:"kind"`
+				Path string `json:"path"`
+			} `json:"implementation"`
+		} `json:"capability"`
+	}
+	if err := json.Unmarshal(showOutput.Bytes(), &showPayload); err != nil {
+		t.Fatalf("capabilities show json = %v\n%s", err, showOutput.String())
+	}
+	if showPayload.Capability.ID != "project.status" || showPayload.Capability.Kind != "command" || showPayload.Capability.Version != "1.0.0" {
+		t.Fatalf("capability descriptor = %+v, want project.status command v1.0.0", showPayload.Capability)
+	}
+	if showPayload.Capability.Implementation.Kind != "markdown" || showPayload.Capability.Implementation.Path != "registry/commands/project.status.md" {
+		t.Fatalf("capability implementation = %+v, want registry-backed markdown descriptor", showPayload.Capability.Implementation)
+	}
+}
+
 func TestRunIntakeRawCreateListShowDoesNotCreateTask(t *testing.T) {
 	t.Parallel()
 
@@ -473,62 +691,126 @@ func TestRunIntakeRawCreateListShowDoesNotCreateTask(t *testing.T) {
 	}
 }
 
-func TestRunIntakeProcessCreatesProposalWithoutWorkByDefault(t *testing.T) {
+func TestRunIntakeRawTextShorthandPreservesRawEvidenceAndTimestamps(t *testing.T) {
 	t.Parallel()
 
 	root := testRepoRoot(t)
+	rawText := "Capture this raw operator note with enough detail for later triage."
+
 	var createOutput bytes.Buffer
 	if err := Run(context.Background(), root, []string{
 		"intake", "raw", "create",
-		"--text", "Draft an operator runbook for intake review proposals",
+		"--text", rawText,
 		"--json",
 	}, strings.NewReader(""), &createOutput); err != nil {
 		t.Fatalf("Run(intake raw create --text) error = %v", err)
 	}
 
-	var processOutput bytes.Buffer
-	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &processOutput); err != nil {
-		t.Fatalf("Run(intake process) error = %v", err)
+	var created struct {
+		IntakeItem struct {
+			Key           string          `json:"key"`
+			Status        string          `json:"status"`
+			Source        string          `json:"source"`
+			IntakeType    string          `json:"intake_type"`
+			RequestedBy   string          `json:"requested_by"`
+			CreatedAt     string          `json:"created_at"`
+			ReceivedAt    string          `json:"received_at"`
+			UpdatedAt     string          `json:"updated_at"`
+			PayloadPolicy string          `json:"payload_policy"`
+			Payload       json.RawMessage `json:"payload"`
+		} `json:"intake_item"`
 	}
-	for _, want := range []string{
-		`"status": "review_required"`,
-		`"proposal"`,
-		`"approval_posture": "needs_review"`,
-		`"operator_next_action": "odin intake review show intake-1"`,
-	} {
-		if !strings.Contains(processOutput.String(), want) {
-			t.Fatalf("process output = %s, want %s", processOutput.String(), want)
-		}
+	if err := json.Unmarshal(createOutput.Bytes(), &created); err != nil {
+		t.Fatalf("json.Unmarshal(create) error = %v\n%s", err, createOutput.String())
 	}
-	if proposal := topLevelProposalFromProcessOutput(t, processOutput.Bytes()); len(proposal) == 0 || string(proposal) == "null" {
-		t.Fatalf("process output = %s, want top-level intake_item.proposal", processOutput.String())
+	if created.IntakeItem.Key != "intake-1" || created.IntakeItem.Status != "received" {
+		t.Fatalf("created intake = %+v, want received intake-1", created.IntakeItem)
+	}
+	if created.IntakeItem.Source != "operator" || created.IntakeItem.IntakeType != "request" || created.IntakeItem.RequestedBy != "operator" {
+		t.Fatalf("created provenance = %+v, want operator/request/operator", created.IntakeItem)
+	}
+	if created.IntakeItem.CreatedAt == "" || created.IntakeItem.ReceivedAt == "" || created.IntakeItem.UpdatedAt == "" {
+		t.Fatalf("created timestamps = created %q received %q updated %q, want all populated", created.IntakeItem.CreatedAt, created.IntakeItem.ReceivedAt, created.IntakeItem.UpdatedAt)
+	}
+	if created.IntakeItem.PayloadPolicy != "stored_in_source_facts_json" {
+		t.Fatalf("payload policy = %q, want stored_in_source_facts_json", created.IntakeItem.PayloadPolicy)
+	}
+	var createPayload struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(created.IntakeItem.Payload, &createPayload); err != nil {
+		t.Fatalf("json.Unmarshal(create payload) error = %v\npayload=%s", err, string(created.IntakeItem.Payload))
+	}
+	if createPayload.Text != rawText {
+		t.Fatalf("create payload text = %q, want raw text preserved", createPayload.Text)
 	}
 
-	var workStatus bytes.Buffer
-	if err := Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &workStatus); err != nil {
-		t.Fatalf("Run(work status) error = %v", err)
+	var showOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "raw", "show", "intake-1", "--json"}, strings.NewReader(""), &showOutput); err != nil {
+		t.Fatalf("Run(intake raw show) error = %v", err)
 	}
-	if output := workStatus.String(); !strings.Contains(output, "work_items=0") || !strings.Contains(output, "active_run_attempts=0") {
-		t.Fatalf("work status output = %s, want no work or runs from process", output)
+	var shown struct {
+		IntakeItem struct {
+			ReceivedAt string          `json:"received_at"`
+			UpdatedAt  string          `json:"updated_at"`
+			Payload    json.RawMessage `json:"payload"`
+		} `json:"intake_item"`
+	}
+	if err := json.Unmarshal(showOutput.Bytes(), &shown); err != nil {
+		t.Fatalf("json.Unmarshal(show) error = %v\n%s", err, showOutput.String())
+	}
+	var showPayload struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(shown.IntakeItem.Payload, &showPayload); err != nil {
+		t.Fatalf("json.Unmarshal(show payload) error = %v\npayload=%s", err, string(shown.IntakeItem.Payload))
+	}
+	if showPayload.Text != rawText || shown.IntakeItem.ReceivedAt == "" || shown.IntakeItem.UpdatedAt == "" {
+		t.Fatalf("show item = %+v payload=%+v, want full raw text evidence and timestamps", shown.IntakeItem, showPayload)
+	}
+}
+
+func TestRunIntakeRawBodyAliasPreservesRawEvidence(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	rawBody := "Test intake: create a draft task to review Odin readiness"
+
+	var createOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--source", "cli",
+		"--body", rawBody,
+		"--json",
+	}, strings.NewReader(""), &createOutput); err != nil {
+		t.Fatalf("Run(intake raw create --body) error = %v", err)
 	}
 
-	var logsOutput bytes.Buffer
-	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
-		t.Fatalf("Run(logs --json) error = %v", err)
+	var created struct {
+		IntakeItem struct {
+			Key           string          `json:"key"`
+			Status        string          `json:"status"`
+			Source        string          `json:"source"`
+			IntakeType    string          `json:"intake_type"`
+			RequestedBy   string          `json:"requested_by"`
+			PayloadPolicy string          `json:"payload_policy"`
+			Payload       json.RawMessage `json:"payload"`
+		} `json:"intake_item"`
 	}
-	for _, want := range []string{
-		`"type": "intake.processing_started"`,
-		`"type": "intake.processed"`,
-		`"type": "intake.draft_artifact_created"`,
-	} {
-		if !strings.Contains(logsOutput.String(), want) {
-			t.Fatalf("logs output = %s, want intake proposal processing event %s", logsOutput.String(), want)
-		}
+	if err := json.Unmarshal(createOutput.Bytes(), &created); err != nil {
+		t.Fatalf("json.Unmarshal(create) error = %v\n%s", err, createOutput.String())
 	}
-	for _, forbidden := range []string{`"type": "task.created"`, `"type": "run.started"`, `"type": "approval.requested"`} {
-		if strings.Contains(logsOutput.String(), forbidden) {
-			t.Fatalf("logs output = %s, must not contain %s", logsOutput.String(), forbidden)
-		}
+	if created.IntakeItem.Key != "intake-1" || created.IntakeItem.Status != "received" || created.IntakeItem.Source != "cli" || created.IntakeItem.IntakeType != "request" || created.IntakeItem.RequestedBy != "cli" {
+		t.Fatalf("created intake = %+v, want received intake-1 cli request", created.IntakeItem)
+	}
+	var payload struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(created.IntakeItem.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload) error = %v\npayload=%s", err, string(created.IntakeItem.Payload))
+	}
+	if payload.Text != rawBody || created.IntakeItem.PayloadPolicy != "stored_in_source_facts_json" {
+		t.Fatalf("created item = %+v payload=%+v, want raw body evidence", created.IntakeItem, payload)
 	}
 }
 
@@ -568,9 +850,6 @@ func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 	if output := clearOutput.String(); !strings.Contains(output, `"status": "review_required"`) || !strings.Contains(output, `"routed_outcome": "draft_task"`) {
 		t.Fatalf("clear process output = %s, want review_required draft_task", output)
 	}
-	if category := proposalCategoryFromProcessOutput(t, clearOutput.Bytes()); strings.TrimSpace(category) == "" {
-		t.Fatalf("clear process output = %s, want non-empty proposal category", clearOutput.String())
-	}
 
 	var vagueOutput bytes.Buffer
 	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-2", "--json"}, strings.NewReader(""), &vagueOutput); err != nil {
@@ -578,9 +857,6 @@ func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 	}
 	if output := vagueOutput.String(); !strings.Contains(output, `"status": "needs_clarification"`) || !strings.Contains(output, `"routed_outcome": "needs_clarification"`) {
 		t.Fatalf("vague process output = %s, want needs_clarification", output)
-	}
-	if category := proposalCategoryFromProcessOutput(t, vagueOutput.Bytes()); category != "clarification_needed" {
-		t.Fatalf("vague process output = %s, proposal category = %q, want clarification_needed", vagueOutput.String(), category)
 	}
 
 	var duplicateOutput bytes.Buffer
@@ -639,47 +915,377 @@ func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 	}
 }
 
-func TestRunIntakeProcessProposalCategoryFallsBackWithoutClassificationCategory(t *testing.T) {
+func TestRunIntakeProcessLinksNearDuplicateWithoutCreatingWork(t *testing.T) {
 	t.Parallel()
 
-	item := sqlite.IntakeItem{EventKind: "research"}
-	route := intakeDerivedRoute{RoutingOutcome: "draft_research"}
-	category := intakeProposalCategory(item, intakeClassification{Result: "actionable_request"}, route)
-	if category != "research" {
-		t.Fatalf("intakeProposalCategory() = %q, want research fallback", category)
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"prepare a careful ticket for review"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	createRaw := func(title, dedup string) {
+		t.Helper()
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", "odin-core",
+			"--title", title,
+			"--type", "request",
+			"--dedup-key", dedup,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", title, err)
+		}
+	}
+	createRaw("Build governed intake process review", "near-duplicate-a")
+	createRaw("build governed intake process review.", "near-duplicate-b")
+
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process canonical) error = %v", err)
+	}
+
+	var duplicateOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-2", "--json"}, strings.NewReader(""), &duplicateOutput); err != nil {
+		t.Fatalf("Run(intake process near duplicate) error = %v", err)
+	}
+	for _, want := range []string{
+		`"status": "duplicate_linked_or_suppressed"`,
+		`"canonical_intake_key": "intake-1"`,
+		`"dedupe_result": "near_duplicate_linked"`,
+		`"suppression_reason": "near_duplicate_subject"`,
+	} {
+		if !strings.Contains(duplicateOutput.String(), want) {
+			t.Fatalf("duplicate output = %s, want %s", duplicateOutput.String(), want)
+		}
+	}
+
+	var showOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "raw", "show", "intake-2", "--json"}, strings.NewReader(""), &showOutput); err != nil {
+		t.Fatalf("Run(intake raw show near duplicate) error = %v", err)
+	}
+	if output := showOutput.String(); !strings.Contains(output, `"payload": {`) || !strings.Contains(output, `"canonical_intake_key": "intake-1"`) {
+		t.Fatalf("show output = %s, want preserved raw evidence and canonical link", output)
+	}
+
+	for _, args := range [][]string{{"jobs", "--json"}, {"runs", "--json"}, {"approvals", "all", "--json"}} {
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v", args, err)
+		}
+		if !strings.Contains(output.String(), `[]`) {
+			t.Fatalf("Run(%v) output = %s, want empty list", args, output.String())
+		}
 	}
 }
 
-func proposalCategoryFromProcessOutput(t *testing.T, output []byte) string {
-	t.Helper()
+func TestRunIntakeProcessPersistsReviewableEvidenceAndAuditsStages(t *testing.T) {
+	t.Parallel()
 
-	var view struct {
-		IntakeItem struct {
-			Processing struct {
-				Proposal struct {
-					Category string `json:"category"`
-				} `json:"proposal"`
-			} `json:"processing"`
-		} `json:"intake_item"`
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"prepare stable evidence for review"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
 	}
-	if err := json.Unmarshal(output, &view); err != nil {
-		t.Fatalf("Unmarshal(process output) error = %v; output = %s", err, string(output))
+
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", "odin-core",
+		"--title", "Build stable intake evidence",
+		"--type", "request",
+		"--dedup-key", "stable-evidence:1",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake raw create) error = %v", err)
 	}
-	return view.IntakeItem.Processing.Proposal.Category
+
+	var processOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &processOutput); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+	processView := decodeIntakeEvidenceView(t, processOutput.Bytes())
+	assertReviewableIntakeProcessingEvidence(t, processView.IntakeItem, "process output")
+
+	var showOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "raw", "show", "intake-1", "--json"}, strings.NewReader(""), &showOutput); err != nil {
+		t.Fatalf("Run(intake raw show) error = %v", err)
+	}
+	showView := decodeRawIntakeEvidenceEnvelope(t, showOutput.Bytes())
+	assertReviewableIntakeProcessingEvidence(t, showView.IntakeItem, "raw show output")
+
+	var reviewOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "show", "intake-1", "--json"}, strings.NewReader(""), &reviewOutput); err != nil {
+		t.Fatalf("Run(intake review show) error = %v", err)
+	}
+	reviewView := decodeRawIntakeEvidenceEnvelope(t, reviewOutput.Bytes())
+	assertReviewableIntakeProcessingEvidence(t, reviewView.IntakeItem, "review show output")
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if output := jobsOutput.String(); !strings.Contains(output, `"jobs": []`) {
+		t.Fatalf("jobs output = %s, want processing to leave jobs empty before review acceptance", output)
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	assertIntakeProcessingAuditEvidence(t, logsOutput.Bytes())
 }
 
-func topLevelProposalFromProcessOutput(t *testing.T, output []byte) json.RawMessage {
+func TestRunIntakeProcessPersistsDraftArtifactEvidenceForAllReviewOutcomes(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"prepare non-standard intake evidence"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	createRaw := func(title, dedupKey string) {
+		t.Helper()
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", "odin-core",
+			"--title", title,
+			"--type", "request",
+			"--dedup-key", dedupKey,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", title, err)
+		}
+	}
+
+	createRaw("Build Odin research goals", "draft-artifact:goal")
+	createRaw("Help", "draft-artifact:clarification")
+	createRaw("Build duplicate processing evidence", "draft-artifact:duplicate")
+	createRaw("Build duplicate processing evidence again", "draft-artifact:duplicate")
+
+	for _, id := range []string{"intake-1", "intake-2", "intake-3", "intake-4"} {
+		var processOutput bytes.Buffer
+		if err := Run(context.Background(), root, []string{"intake", "process", "--id", id, "--json"}, strings.NewReader(""), &processOutput); err != nil {
+			t.Fatalf("Run(intake process %s) error = %v", id, err)
+		}
+	}
+
+	cases := []struct {
+		ref              string
+		wantStatus       string
+		wantRoute        string
+		wantArtifactKind string
+		wantReviewState  string
+	}{
+		{
+			ref:              "intake-1",
+			wantStatus:       "review_required",
+			wantRoute:        "draft_goal",
+			wantArtifactKind: "draft_goal",
+			wantReviewState:  "review_required",
+		},
+		{
+			ref:              "intake-2",
+			wantStatus:       "needs_clarification",
+			wantRoute:        "needs_clarification",
+			wantArtifactKind: "clarification_request",
+			wantReviewState:  "needs_clarification",
+		},
+		{
+			ref:              "intake-4",
+			wantStatus:       "duplicate_linked_or_suppressed",
+			wantRoute:        "duplicate_linked_or_suppressed",
+			wantArtifactKind: "duplicate_review",
+			wantReviewState:  "duplicate_linked_or_suppressed",
+		},
+	}
+
+	for _, tc := range cases {
+		var showOutput bytes.Buffer
+		if err := Run(context.Background(), root, []string{"intake", "raw", "show", tc.ref, "--json"}, strings.NewReader(""), &showOutput); err != nil {
+			t.Fatalf("Run(intake raw show %s) error = %v", tc.ref, err)
+		}
+		view := decodeRawIntakeEvidenceEnvelope(t, showOutput.Bytes())
+		assertIntakeOutcomeDraftArtifactEvidence(t, view.IntakeItem, tc.wantStatus, tc.wantRoute, tc.wantArtifactKind, tc.wantReviewState, tc.ref)
+	}
+}
+
+type intakeEvidenceProcessView struct {
+	IntakeItem intakeEvidenceItem `json:"intake_item"`
+}
+
+type rawIntakeEvidenceEnvelope struct {
+	IntakeItem intakeEvidenceItem `json:"intake_item"`
+}
+
+type intakeEvidenceItem struct {
+	Status     string                   `json:"status"`
+	Processing intakeEvidenceProcessing `json:"processing"`
+}
+
+type intakeEvidenceProcessing struct {
+	ProcessingStarted bool                   `json:"processing_started"`
+	Classification    classificationEvidence `json:"classification"`
+	Dedupe            dedupeEvidence         `json:"dedupe"`
+	Routing           routingEvidence        `json:"routing"`
+	DraftArtifact     *draftArtifactEvidence `json:"draft_artifact"`
+}
+
+type classificationEvidence struct {
+	Result string `json:"result"`
+	Reason string `json:"reason"`
+}
+
+type dedupeEvidence struct {
+	Result             string `json:"result"`
+	CanonicalIntakeKey string `json:"canonical_intake_key"`
+}
+
+type routingEvidence struct {
+	Outcome               string `json:"outcome"`
+	ProjectKey            string `json:"project_key"`
+	ExecutionIntent       string `json:"execution_intent"`
+	ExecutionIntentSource string `json:"execution_intent_source"`
+	SkillInvocation       *struct {
+		SkillKey              string          `json:"skill_key"`
+		InputJSON             json.RawMessage `json:"input_json"`
+		SourceType            string          `json:"source_type"`
+		SourceKey             string          `json:"source_key"`
+		Scope                 string          `json:"scope"`
+		ProjectKey            string          `json:"project_key"`
+		ExecutionIntent       string          `json:"execution_intent"`
+		ExecutionIntentSource string          `json:"execution_intent_source"`
+		ReviewState           string          `json:"review_state"`
+	} `json:"skill_invocation,omitempty"`
+}
+
+type draftArtifactEvidence struct {
+	Kind                  string `json:"kind"`
+	Title                 string `json:"title"`
+	ReviewState           string `json:"review_state"`
+	ExecutionIntent       string `json:"execution_intent"`
+	ExecutionIntentSource string `json:"execution_intent_source"`
+}
+
+func decodeIntakeEvidenceView(t *testing.T, raw []byte) intakeEvidenceProcessView {
+	t.Helper()
+
+	var view intakeEvidenceProcessView
+	if err := json.Unmarshal(raw, &view); err != nil {
+		t.Fatalf("json.Unmarshal(process output) error = %v\n%s", err, raw)
+	}
+	return view
+}
+
+func decodeRawIntakeEvidenceEnvelope(t *testing.T, raw []byte) rawIntakeEvidenceEnvelope {
+	t.Helper()
+
+	var view rawIntakeEvidenceEnvelope
+	if err := json.Unmarshal(raw, &view); err != nil {
+		t.Fatalf("json.Unmarshal(raw intake envelope) error = %v\n%s", err, raw)
+	}
+	return view
+}
+
+func assertReviewableIntakeProcessingEvidence(t *testing.T, item intakeEvidenceItem, source string) {
+	t.Helper()
+
+	if item.Status != "review_required" {
+		t.Fatalf("%s status = %q, want review_required", source, item.Status)
+	}
+	if !item.Processing.ProcessingStarted {
+		t.Fatalf("%s processing_started = false, want true", source)
+	}
+	if item.Processing.Classification.Result == "" || item.Processing.Classification.Reason == "" {
+		t.Fatalf("%s classification = %+v, want result and reason", source, item.Processing.Classification)
+	}
+	if item.Processing.Dedupe.Result == "" {
+		t.Fatalf("%s dedupe = %+v, want result", source, item.Processing.Dedupe)
+	}
+	if item.Processing.Routing.Outcome == "" || item.Processing.Routing.ExecutionIntent == "" || item.Processing.Routing.ExecutionIntentSource == "" {
+		t.Fatalf("%s routing = %+v, want outcome and execution intent evidence", source, item.Processing.Routing)
+	}
+	if item.Processing.DraftArtifact == nil {
+		t.Fatalf("%s draft_artifact = nil, want draft artifact evidence", source)
+	}
+	if item.Processing.DraftArtifact.Kind == "" || item.Processing.DraftArtifact.ReviewState != "review_required" || item.Processing.DraftArtifact.ExecutionIntent == "" {
+		t.Fatalf("%s draft_artifact = %+v, want stable review-required draft evidence", source, *item.Processing.DraftArtifact)
+	}
+}
+
+func assertIntakeOutcomeDraftArtifactEvidence(t *testing.T, item intakeEvidenceItem, wantStatus, wantRoute, wantArtifactKind, wantReviewState, source string) {
+	t.Helper()
+
+	if item.Status != wantStatus {
+		t.Fatalf("%s status = %q, want %q", source, item.Status, wantStatus)
+	}
+	if item.Processing.Classification.Result == "" || item.Processing.Dedupe.Result == "" {
+		t.Fatalf("%s processing evidence = %+v, want classification and dedupe", source, item.Processing)
+	}
+	if item.Processing.Routing.Outcome != wantRoute {
+		t.Fatalf("%s route outcome = %q, want %q", source, item.Processing.Routing.Outcome, wantRoute)
+	}
+	if item.Processing.DraftArtifact == nil {
+		t.Fatalf("%s draft_artifact = nil, want persisted draft artifact evidence", source)
+	}
+	if item.Processing.DraftArtifact.Kind != wantArtifactKind || item.Processing.DraftArtifact.ReviewState != wantReviewState {
+		t.Fatalf("%s draft_artifact = %+v, want kind %q review_state %q", source, *item.Processing.DraftArtifact, wantArtifactKind, wantReviewState)
+	}
+}
+
+func assertIntakeProcessingAuditEvidence(t *testing.T, raw []byte) {
 	t.Helper()
 
 	var view struct {
-		IntakeItem struct {
-			Proposal json.RawMessage `json:"proposal"`
-		} `json:"intake_item"`
+		Logs []struct {
+			Type    string `json:"type"`
+			Payload struct {
+				Stage          string                  `json:"stage"`
+				Classification *classificationEvidence `json:"classification"`
+				Dedupe         *dedupeEvidence         `json:"dedupe"`
+				Routing        *routingEvidence        `json:"routing"`
+				DraftArtifact  *draftArtifactEvidence  `json:"draft_artifact"`
+			} `json:"payload"`
+		} `json:"logs"`
 	}
-	if err := json.Unmarshal(output, &view); err != nil {
-		t.Fatalf("Unmarshal(process output) error = %v; output = %s", err, string(output))
+	if err := json.Unmarshal(raw, &view); err != nil {
+		t.Fatalf("json.Unmarshal(logs) error = %v\n%s", err, raw)
 	}
-	return view.IntakeItem.Proposal
+
+	var sawClassification bool
+	var sawDedupe bool
+	var sawRouting bool
+	var sawDraftArtifact bool
+	for _, log := range view.Logs {
+		switch log.Type {
+		case "intake.classified":
+			sawClassification = log.Payload.Classification != nil &&
+				log.Payload.Classification.Result != "" &&
+				log.Payload.Classification.Reason != ""
+		case "intake.dedupe_reviewed":
+			sawDedupe = log.Payload.Dedupe != nil &&
+				log.Payload.Dedupe.Result != ""
+		case "intake.routed":
+			sawRouting = log.Payload.Routing != nil &&
+				log.Payload.Routing.Outcome != "" &&
+				log.Payload.Routing.ExecutionIntent != ""
+		case "intake.draft_artifact_created":
+			sawDraftArtifact = log.Payload.DraftArtifact != nil &&
+				log.Payload.DraftArtifact.Kind != "" &&
+				log.Payload.DraftArtifact.ReviewState == "review_required"
+		}
+	}
+	if !sawClassification || !sawDedupe || !sawRouting || !sawDraftArtifact {
+		t.Fatalf("logs = %s, want stage audit payloads with classification=%v dedupe=%v routing=%v draft_artifact=%v", raw, sawClassification, sawDedupe, sawRouting, sawDraftArtifact)
+	}
 }
 
 func TestRunIntakeProcessDerivesTypeSpecificRoutingAndIntent(t *testing.T) {
@@ -748,6 +1354,199 @@ func TestRunIntakeProcessDerivesTypeSpecificRoutingAndIntent(t *testing.T) {
 	}
 }
 
+func TestRunIntakeProcessClassifiesOperatorTextIntoDesignedCategories(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	cases := []struct {
+		title        string
+		wantCategory string
+		wantRoute    string
+		wantArtifact string
+		wantPriority string
+	}{
+		{title: "Fix failed production deploy", wantCategory: "bug", wantRoute: "draft_incident_review", wantArtifact: "draft_incident_review", wantPriority: "80"},
+		{title: "Idea for someday dashboard", wantCategory: "idea", wantRoute: "draft_idea", wantArtifact: "draft_idea", wantPriority: "30"},
+		{title: "Research calendar adapter options", wantCategory: "research_item", wantRoute: "draft_research", wantArtifact: "draft_research", wantPriority: "40"},
+		{title: "Draft operator handoff memo", wantCategory: "writing_request", wantRoute: "draft_document", wantArtifact: "draft_document", wantPriority: "50"},
+		{title: "Organize admin inbox labels", wantCategory: "admin_item", wantRoute: "draft_admin_task", wantArtifact: "draft_admin_task", wantPriority: "45"},
+		{title: "Remind me every Friday to review backups", wantCategory: "routine", wantRoute: "draft_routine", wantArtifact: "draft_routine", wantPriority: "35"},
+		{title: "Waiting for bank transfer confirmation", wantCategory: "waiting_for_item", wantRoute: "draft_follow_up", wantArtifact: "draft_follow_up", wantPriority: "35"},
+		{title: "FYI no action needed newsletter", wantCategory: "archive_worthy_noise", wantRoute: "archive_candidate", wantArtifact: "archive_candidate", wantPriority: "10"},
+		{title: "Plan the onboarding project", wantCategory: "project", wantRoute: "draft_goal", wantArtifact: "draft_goal", wantPriority: "70"},
+	}
+
+	for _, tc := range cases {
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--text", tc.title,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", tc.title, err)
+		}
+	}
+
+	for i, tc := range cases {
+		id := fmt.Sprintf("intake-%d", i+1)
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, []string{"intake", "process", "--id", id, "--json"}, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(intake process %s) error = %v", id, err)
+		}
+		for _, want := range []string{
+			`"category": "` + tc.wantCategory + `"`,
+			`"priority_score": ` + tc.wantPriority,
+			`"routed_outcome": "` + tc.wantRoute + `"`,
+			`"outcome": "` + tc.wantRoute + `"`,
+		} {
+			if !strings.Contains(output.String(), want) {
+				t.Fatalf("process output for %q = %s, want %s", tc.title, output.String(), want)
+			}
+		}
+		if !strings.Contains(output.String(), `"kind": "`+tc.wantArtifact+`"`) {
+			t.Fatalf("process output for %q = %s, want artifact %s", tc.title, output.String(), tc.wantArtifact)
+		}
+		if tc.wantArtifact == "draft_goal" && strings.Contains(output.String(), `"goal_id": 1`) {
+			t.Fatalf("process output for %q = %s, must draft goal review artifact without creating a goal", tc.title, output.String())
+		}
+	}
+}
+
+func TestRunIntakeSkillInvocationBindingPromotesAndRunsThroughSkillService(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	seedReviewableSkill(t, root, "triage-skill", "triage complete", `{"classification":"triage","next_step":"plan"}`)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--type", "skill",
+		"--title", "Triage this release-readiness note with the skill system",
+		"--dedup-key", "skill-binding-intake",
+		"--json",
+	)
+	processOutput := run("intake", "process", "--id", "intake-1", "--json")
+	view := decodeIntakeEvidenceView(t, []byte(processOutput))
+	if view.IntakeItem.Processing.Routing.SkillInvocation == nil {
+		t.Fatalf("process output = %s, want skill_invocation routing evidence", processOutput)
+	}
+	binding := view.IntakeItem.Processing.Routing.SkillInvocation
+	if binding.SkillKey != "triage-skill" ||
+		binding.SourceType != "intake" ||
+		binding.SourceKey != "intake-1" ||
+		binding.Scope != "project" ||
+		binding.ProjectKey != testProjectKey ||
+		binding.ExecutionIntent != "read_only" ||
+		binding.ExecutionIntentSource != "skill_binding:intake" ||
+		binding.ReviewState != "review_required" ||
+		!strings.Contains(string(binding.InputJSON), "release-readiness") {
+		t.Fatalf("skill invocation binding = %+v input=%s, want project-scoped triage-skill binding", binding, string(binding.InputJSON))
+	}
+
+	if artifacts := run("skills", "artifacts", "--json"); !strings.Contains(artifacts, `"artifacts": []`) {
+		t.Fatalf("skills artifacts before review = %s, want no pre-review skill execution", artifacts)
+	}
+
+	acceptOutput := run("intake", "review", "accept", "intake-1", "--json")
+	if !strings.Contains(acceptOutput, `"work_created": true`) || !strings.Contains(acceptOutput, `"key": "intake-review-1"`) {
+		t.Fatalf("accept output = %s, want promoted skill invocation work item", acceptOutput)
+	}
+	jobsOutput := run("jobs", "--json")
+	for _, want := range []string{
+		`"task_key": "intake-review-1"`,
+		`"work_kind": "skill_invocation"`,
+		`"execution_intent": "read_only"`,
+		`"execution_intent_source": "skill_binding:intake"`,
+	} {
+		if !strings.Contains(jobsOutput, want) {
+			t.Fatalf("jobs output = %s, want %s", jobsOutput, want)
+		}
+	}
+
+	runOutput := run("skills", "run", "intake-review-1", "--json")
+	for _, want := range []string{
+		`"task_key": "intake-review-1"`,
+		`"skill_key": "triage-skill"`,
+		`"status": "ok"`,
+		`"runtime_effect": "durable_reviewable_artifact"`,
+		`"artifact_id": 1`,
+	} {
+		if !strings.Contains(runOutput, want) {
+			t.Fatalf("skills run output = %s, want %s", runOutput, want)
+		}
+	}
+	reviewOutput := run("review", "list", "--json")
+	if !strings.Contains(reviewOutput, `"queue_id": "skill-artifact:1"`) || !strings.Contains(reviewOutput, `"source_type": "skill_artifact"`) {
+		t.Fatalf("review output = %s, want skill artifact in unified review", reviewOutput)
+	}
+}
+
+func TestRunIntakeProcessRecordsNormalizedSubjectDuplicateEvidence(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"same subject but different source object"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	createRaw := func(title, dedupeKey string) {
+		t.Helper()
+		if err := Run(context.Background(), root, []string{
+			"intake", "raw", "create",
+			"--source", "operator",
+			"--project", "odin-core",
+			"--title", title,
+			"--type", "request",
+			"--dedup-key", dedupeKey,
+			"--requested-by", "codex",
+			"--payload-file", payloadPath,
+			"--json",
+		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+			t.Fatalf("Run(intake raw create %q) error = %v", title, err)
+		}
+	}
+	createRaw("Research release readiness constraints", "semantic-a")
+	createRaw("Research release readiness constraints!!!", "semantic-b")
+
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process first) error = %v", err)
+	}
+	var output bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-2", "--json"}, strings.NewReader(""), &output); err != nil {
+		t.Fatalf("Run(intake process second) error = %v", err)
+	}
+	for _, want := range []string{
+		`"status": "duplicate_linked_or_suppressed"`,
+		`"dedupe_result": "near_duplicate_linked"`,
+		`"canonical_intake_key": "intake-1"`,
+		`"suppression_reason": "near_duplicate_subject"`,
+		`"basis": "normalized_subject"`,
+		`"match_reason": "normalized_subject"`,
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("semantic duplicate output = %s, want %s", output.String(), want)
+		}
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	if !strings.Contains(logsOutput.String(), `"type": "intake.duplicate_linked_or_suppressed"`) || !strings.Contains(logsOutput.String(), `"result": "near_duplicate_linked"`) {
+		t.Fatalf("logs output = %s, want normalized-subject duplicate event evidence", logsOutput.String())
+	}
+}
+
 func TestRunIntakeProcessConvertsGoalLikeRawItemToGoal(t *testing.T) {
 	root := testRepoRoot(t)
 
@@ -767,8 +1566,8 @@ func TestRunIntakeProcessConvertsGoalLikeRawItemToGoal(t *testing.T) {
 	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &processOutput); err != nil {
 		t.Fatalf("Run(intake process) error = %v", err)
 	}
-	if output := processOutput.String(); !strings.Contains(output, `"routed_outcome": "goal_created"`) || !strings.Contains(output, `"goal_id": 1`) {
-		t.Fatalf("process output = %s, want goal conversion evidence", output)
+	if output := processOutput.String(); !strings.Contains(output, `"routed_outcome": "draft_goal"`) || strings.Contains(output, `"goal_id": 1`) {
+		t.Fatalf("process output = %s, want draft goal review evidence without goal creation", output)
 	}
 	if output := processOutput.String(); strings.Contains(output, `"status": "approved_for_execution"`) {
 		t.Fatalf("process output = %s, must not auto-approve goal", output)
@@ -778,16 +1577,16 @@ func TestRunIntakeProcessConvertsGoalLikeRawItemToGoal(t *testing.T) {
 	if err := Run(context.Background(), root, []string{"intake", "raw", "show", "intake-1", "--json"}, strings.NewReader(""), &rawShow); err != nil {
 		t.Fatalf("Run(intake raw show) error = %v", err)
 	}
-	if output := rawShow.String(); !strings.Contains(output, `"goal_id": 1`) || !strings.Contains(output, `"processing"`) {
-		t.Fatalf("raw show output = %s, want persisted intake goal link and processing evidence", output)
+	if output := rawShow.String(); strings.Contains(output, `"goal_id": 1`) || !strings.Contains(output, `"processing"`) {
+		t.Fatalf("raw show output = %s, want draft goal processing evidence without goal link", output)
 	}
 
 	var goalList bytes.Buffer
 	if err := Run(context.Background(), root, []string{"goal", "list", "--json"}, strings.NewReader(""), &goalList); err != nil {
 		t.Fatalf("Run(goal list) error = %v", err)
 	}
-	if output := goalList.String(); !strings.Contains(output, `"title": "Build a browser executor for Odin research goals"`) || !strings.Contains(output, `"status": "created"`) {
-		t.Fatalf("goal list output = %s, want created converted goal", output)
+	if output := goalList.String(); strings.Contains(output, `"title": "Build a browser executor for Odin research goals"`) {
+		t.Fatalf("goal list output = %s, want no goal before review acceptance", output)
 	}
 
 	var tickOutput bytes.Buffer
@@ -804,12 +1603,14 @@ func TestRunIntakeProcessConvertsGoalLikeRawItemToGoal(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"type": "intake.processed"`,
-		`"type": "intake.routed_to_goal"`,
-		`"type": "goal.created"`,
+		`"type": "intake.draft_artifact_created"`,
 	} {
 		if !strings.Contains(logsOutput.String(), want) {
 			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
 		}
+	}
+	if strings.Contains(logsOutput.String(), `"type": "goal.created"`) {
+		t.Fatalf("logs output = %s, must not create a goal before review acceptance", logsOutput.String())
 	}
 }
 
@@ -832,16 +1633,16 @@ func TestRunIntakeProcessConvertsProjectLikeRawItemToGoal(t *testing.T) {
 	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &processOutput); err != nil {
 		t.Fatalf("Run(intake process) error = %v", err)
 	}
-	if output := processOutput.String(); !strings.Contains(output, `"routed_outcome": "goal_created"`) || !strings.Contains(output, `"goal_id": 1`) {
-		t.Fatalf("process output = %s, want project-like intake routed to goal", output)
+	if output := processOutput.String(); !strings.Contains(output, `"routed_outcome": "draft_goal"`) || strings.Contains(output, `"goal_id": 1`) {
+		t.Fatalf("process output = %s, want project-like intake routed to draft goal without goal creation", output)
 	}
 
-	var goalShow bytes.Buffer
-	if err := Run(context.Background(), root, []string{"goal", "show", "--id", "1", "--json"}, strings.NewReader(""), &goalShow); err != nil {
-		t.Fatalf("Run(goal show) error = %v", err)
+	var goalList bytes.Buffer
+	if err := Run(context.Background(), root, []string{"goal", "list", "--json"}, strings.NewReader(""), &goalList); err != nil {
+		t.Fatalf("Run(goal list) error = %v", err)
 	}
-	if output := goalShow.String(); !strings.Contains(output, `"status": "created"`) || strings.Contains(output, `"status": "approved_for_execution"`) {
-		t.Fatalf("goal show output = %s, want created unapproved goal", output)
+	if output := goalList.String(); strings.Contains(output, `"Plan the Odin project for browser session handoff"`) {
+		t.Fatalf("goal list output = %s, want no goal before review acceptance", output)
 	}
 }
 
@@ -876,43 +1677,8 @@ func TestRunIntakeProcessDuplicateGoalLikeRawItemDoesNotCreateSecondGoal(t *test
 	if err := Run(context.Background(), root, []string{"goal", "list", "--json"}, strings.NewReader(""), &goalList); err != nil {
 		t.Fatalf("Run(goal list) error = %v", err)
 	}
-	if output := goalList.String(); strings.Count(output, `"title": "Build a browser executor for Odin research goals"`) != 1 {
-		t.Fatalf("goal list output = %s, want exactly one converted goal", output)
-	}
-}
-
-func TestRunIntakeProcessDoesNotLinkToArchivedCanonicalDuplicate(t *testing.T) {
-	t.Parallel()
-
-	root := testRepoRoot(t)
-	createRaw := func() {
-		t.Helper()
-		if err := Run(context.Background(), root, []string{
-			"intake", "raw", "create",
-			"--text", "Prepare weekly intake summary for operator review",
-			"--json",
-		}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
-			t.Fatalf("Run(intake raw create --text) error = %v", err)
-		}
-	}
-	createRaw()
-	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
-		t.Fatalf("Run(intake process intake-1) error = %v", err)
-	}
-	if err := Run(context.Background(), root, []string{"intake", "review", "archive", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
-		t.Fatalf("Run(intake review archive intake-1) error = %v", err)
-	}
-
-	createRaw()
-	var processOutput bytes.Buffer
-	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-2", "--json"}, strings.NewReader(""), &processOutput); err != nil {
-		t.Fatalf("Run(intake process intake-2) error = %v", err)
-	}
-	if output := processOutput.String(); strings.Contains(output, `"canonical_intake_key": "intake-1"`) || strings.Contains(output, `"status": "duplicate_linked_or_suppressed"`) {
-		t.Fatalf("process output = %s, want fresh proposal after archived canonical", output)
-	}
-	if output := processOutput.String(); !strings.Contains(output, `"status": "review_required"`) {
-		t.Fatalf("process output = %s, want review_required", output)
+	if output := goalList.String(); strings.Contains(output, `"title": "Build a browser executor for Odin research goals"`) {
+		t.Fatalf("goal list output = %s, want no converted goal before review acceptance", output)
 	}
 }
 
@@ -959,6 +1725,19 @@ func TestRunIntakeReviewPromotesOnlyOnOperatorAccept(t *testing.T) {
 	if output := listOutput.String(); !strings.Contains(output, `"status": "review_required"`) || !strings.Contains(output, `"status": "needs_clarification"`) || !strings.Contains(output, `"status": "duplicate_linked_or_suppressed"`) {
 		t.Fatalf("review list output = %s, want all reviewable states", output)
 	}
+	for _, want := range []string{
+		`"classification": "actionable_request"`,
+		`"dedupe_result": "unique"`,
+		`"risk": "low"`,
+		`"suggested_route": "draft_task"`,
+		`"evidence": {`,
+		`"payload_policy": "stored_in_source_facts_json"`,
+		`"payload_available": true`,
+	} {
+		if !strings.Contains(listOutput.String(), want) {
+			t.Fatalf("review list output = %s, want review metadata %s", listOutput.String(), want)
+		}
+	}
 
 	var showOutput bytes.Buffer
 	if err := Run(context.Background(), root, []string{"intake", "review", "show", "intake-1", "--json"}, strings.NewReader(""), &showOutput); err != nil {
@@ -966,6 +1745,17 @@ func TestRunIntakeReviewPromotesOnlyOnOperatorAccept(t *testing.T) {
 	}
 	if output := showOutput.String(); !strings.Contains(output, `"draft_artifact"`) || !strings.Contains(output, `"review_state": "review_required"`) {
 		t.Fatalf("review show output = %s, want draft artifact", output)
+	}
+	for _, want := range []string{
+		`"classification": "actionable_request"`,
+		`"dedupe_result": "unique"`,
+		`"risk": "low"`,
+		`"suggested_route": "draft_task"`,
+		`"payload_included": true`,
+	} {
+		if !strings.Contains(showOutput.String(), want) {
+			t.Fatalf("review show output = %s, want review metadata %s", showOutput.String(), want)
+		}
 	}
 
 	var acceptOutput bytes.Buffer
@@ -1105,6 +1895,80 @@ func TestRunIntakeReviewPromotesOnlyOnOperatorAccept(t *testing.T) {
 		if !strings.Contains(output.String(), `[]`) {
 			t.Fatalf("Run(%v) output = %s, want empty list", args, output.String())
 		}
+	}
+}
+
+func TestRunIntakeReviewAcceptsDraftGoalOnlyAfterReview(t *testing.T) {
+	root := testRepoRoot(t)
+
+	if err := Run(context.Background(), root, []string{
+		"intake", "raw", "create",
+		"--text", "Build a browser executor for Odin research goals",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake raw create --text) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(intake process) error = %v", err)
+	}
+
+	var beforeGoalList bytes.Buffer
+	if err := Run(context.Background(), root, []string{"goal", "list", "--json"}, strings.NewReader(""), &beforeGoalList); err != nil {
+		t.Fatalf("Run(goal list before accept) error = %v", err)
+	}
+	if output := beforeGoalList.String(); !strings.Contains(output, `"goals": []`) {
+		t.Fatalf("goal list before accept = %s, want no goal before review", output)
+	}
+
+	var acceptOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"intake", "review", "accept", "intake-1", "--json"}, strings.NewReader(""), &acceptOutput); err != nil {
+		t.Fatalf("Run(intake review accept draft_goal) error = %v", err)
+	}
+	for _, want := range []string{
+		`"decision": "accepted"`,
+		`"work_created": false`,
+		`"goal_id": 1`,
+		`"goal_status": "approved_for_execution"`,
+	} {
+		if !strings.Contains(acceptOutput.String(), want) {
+			t.Fatalf("accept output = %s, want %s", acceptOutput.String(), want)
+		}
+	}
+
+	var goalList bytes.Buffer
+	if err := Run(context.Background(), root, []string{"goal", "list", "--json"}, strings.NewReader(""), &goalList); err != nil {
+		t.Fatalf("Run(goal list after accept) error = %v", err)
+	}
+	if output := goalList.String(); !strings.Contains(output, `"title": "Build a browser executor for Odin research goals"`) || !strings.Contains(output, `"status": "approved_for_execution"`) {
+		t.Fatalf("goal list after accept = %s, want accepted intake goal", output)
+	}
+
+	for _, args := range [][]string{{"jobs", "--json"}, {"runs", "--json"}} {
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v", args, err)
+		}
+		if !strings.Contains(output.String(), `[]`) {
+			t.Fatalf("Run(%v) output = %s, want no task/run objects", args, output.String())
+		}
+	}
+
+	var logsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logsOutput); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "intake.review_accepted"`,
+		`"type": "goal.created"`,
+		`"goal_id": 1`,
+		`"goal_status": "approved_for_execution"`,
+	} {
+		if !strings.Contains(logsOutput.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
+		}
+	}
+	if strings.Contains(logsOutput.String(), `"type": "task.created"`) {
+		t.Fatalf("logs output = %s, must not create task for draft goal", logsOutput.String())
 	}
 }
 
@@ -1530,6 +2394,27 @@ func TestRunUnifiedReviewQueueListsShowsAndRoutesExistingReviewObjects(t *testin
 			t.Fatalf("review list output = %s, want %s", list, want)
 		}
 	}
+	var mixedList struct {
+		Items []struct {
+			QueueID        string   `json:"queue_id"`
+			Type           string   `json:"type"`
+			SourceType     string   `json:"source_type"`
+			Source         string   `json:"source"`
+			Status         string   `json:"status"`
+			Reason         string   `json:"reason"`
+			CreatedAt      string   `json:"created_at"`
+			Risk           string   `json:"risk"`
+			AllowedActions []string `json:"allowed_actions"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(list), &mixedList); err != nil {
+		t.Fatalf("json.Unmarshal(review list) error = %v; output=%s", err, list)
+	}
+	for _, item := range mixedList.Items {
+		if item.QueueID == "" || item.Type == "" || item.SourceType == "" || item.Source == "" || item.Status == "" || item.Reason == "" || item.CreatedAt == "" || item.Risk == "" || item.AllowedActions == nil {
+			t.Fatalf("review list item = %+v, want type/source/status/created/reason/risk/actions", item)
+		}
+	}
 
 	show := run("review", "show", "intake-review:1", "--json")
 	if !strings.Contains(show, `"source_type": "intake_review"`) || !strings.Contains(show, `"review_state": "review_required"`) {
@@ -1537,16 +2422,48 @@ func TestRunUnifiedReviewQueueListsShowsAndRoutesExistingReviewObjects(t *testin
 	}
 
 	accepted := run("review", "act", "intake-review:1", "accept", "--json")
-	if !strings.Contains(accepted, `"decision": "accepted"`) || !strings.Contains(accepted, `"work_created": true`) {
-		t.Fatalf("review act accept output = %s, want accepted intake work", accepted)
+	for _, want := range []string{
+		`"queue_id": "intake-review:1"`,
+		`"source_type": "intake_review"`,
+		`"action": "accept"`,
+		`"status": "resolved"`,
+		`"result": "accepted"`,
+		`"supported": true`,
+		`"mutation_scope": "review_state"`,
+		`"approval_required": false`,
+		`"mutated": true`,
+		`"audit_event": "intake.review_accepted"`,
+		`"source_result": {`,
+		`"decision": "accepted"`,
+		`"work_created": true`,
+	} {
+		if !strings.Contains(accepted, want) {
+			t.Fatalf("review act accept output = %s, want %s", accepted, want)
+		}
 	}
 	deniedIntake := run("review", "act", "intake-approval:2", "deny", "--json")
 	if !strings.Contains(deniedIntake, `"decision": "denied"`) || !strings.Contains(deniedIntake, `"work_created": false`) {
 		t.Fatalf("review act intake deny output = %s, want denied intake approval", deniedIntake)
 	}
 	deniedApproval := run("review", "act", "approval:1", "deny", "--json")
-	if !strings.Contains(deniedApproval, `"status": "denied"`) || !strings.Contains(deniedApproval, `"result": "denied"`) {
-		t.Fatalf("review act approval deny output = %s, want denied task approval", deniedApproval)
+	for _, want := range []string{
+		`"queue_id": "approval:1"`,
+		`"source_type": "task_approval"`,
+		`"action": "deny"`,
+		`"status": "resolved"`,
+		`"result": "denied"`,
+		`"supported": true`,
+		`"mutation_scope": "review_state"`,
+		`"approval_required": true`,
+		`"approval_status": "denied"`,
+		`"resolver_support": "supported"`,
+		`"mutated": true`,
+		`"audit_event": "approval.resolved"`,
+		`"source_result": {`,
+	} {
+		if !strings.Contains(deniedApproval, want) {
+			t.Fatalf("review act approval deny output = %s, want %s", deniedApproval, want)
+		}
 	}
 	archivedArtifact := run("review", "act", "skill-artifact:1", "archive", "--json")
 	if !strings.Contains(archivedArtifact, `"decision": "archived"`) || !strings.Contains(archivedArtifact, `"work_created": false`) {
@@ -1577,6 +2494,354 @@ func TestRunUnifiedReviewQueueListsShowsAndRoutesExistingReviewObjects(t *testin
 	} {
 		if !strings.Contains(overview, want) {
 			t.Fatalf("overview output = %s, want %s", overview, want)
+		}
+	}
+}
+
+func TestRunApprovalGatedReviewHumanOutputExplainsOperatorAction(t *testing.T) {
+	configureLifecycleHarnessDriver(t)
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "human approval UX proof")
+	run("companion", "run", "primary", "--objective", "Prepare approval UX proof", "--trigger", "test", "--json")
+	blocked := run("work", "dispatch", "--task", "1", "--json")
+	if !strings.Contains(blocked, `"reason": "approval_required"`) {
+		t.Fatalf("dispatch output = %s, want approval gate", blocked)
+	}
+
+	approvalList := run("approvals", "all")
+	for _, want := range []string{
+		"approval=1",
+		"source=approval_requests",
+		"risk=governance",
+		"reason=approval_required",
+		"task=prepare-approval-ux-proof-",
+		"status=pending",
+		"resolver=supported",
+		"actions=approve,deny",
+		"next_steps=inspect with odin approvals show 1; resolve with odin approvals resolve 1 <approve|deny> <reason...>",
+		"on_approve=task unblocked or registered continuation starts",
+	} {
+		if !strings.Contains(approvalList, want) {
+			t.Fatalf("approvals output = %q, want %q", approvalList, want)
+		}
+	}
+
+	approvalShow := run("approvals", "show", "1")
+	for _, want := range []string{
+		"approval=1",
+		"source=approval_requests",
+		"risk=governance",
+		"reason=approval_required",
+		"task_status=blocked",
+		"actions=approve,deny",
+		"next_steps=inspect with odin approvals show 1; resolve with odin approvals resolve 1 <approve|deny> <reason...>",
+		"on_approve=task unblocked or registered continuation starts",
+	} {
+		if !strings.Contains(approvalShow, want) {
+			t.Fatalf("approvals show output = %q, want %q", approvalShow, want)
+		}
+	}
+
+	reviewList := run("review", "list")
+	for _, want := range []string{
+		"review=approval:1",
+		"type=task_approval",
+		"source=approval_requests",
+		"risk=governance",
+		"reason=task_approval_pending",
+		"status=pending",
+		"actions=approve,deny",
+		"next_steps=inspect with odin review show approval:1; act with odin review act approval:1 <approve|deny>",
+	} {
+		if !strings.Contains(reviewList, want) {
+			t.Fatalf("review list output = %q, want %q", reviewList, want)
+		}
+	}
+
+	reviewShow := run("review", "show", "approval:1")
+	for _, want := range []string{
+		"review=approval:1",
+		"type=task_approval",
+		"source=approval_requests",
+		"risk=governance",
+		"reason=task_approval_pending",
+		"status=pending",
+		"actions=approve,deny",
+		"next_steps=inspect with odin review show approval:1; act with odin review act approval:1 <approve|deny>",
+	} {
+		if !strings.Contains(reviewShow, want) {
+			t.Fatalf("review show output = %q, want %q", reviewShow, want)
+		}
+	}
+
+	approved := run("review", "act", "approval:1", "approve")
+	for _, want := range []string{
+		"approval=1",
+		"status=resolved",
+		"result=approved",
+		"summary=approval granted; task unblocked",
+	} {
+		if !strings.Contains(approved, want) {
+			t.Fatalf("review act output = %q, want %q", approved, want)
+		}
+	}
+
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "approval.resolved"`,
+		`"task_id": 1`,
+		`"status": "approved"`,
+		`"decision_by": "operator"`,
+		`"reason": "unified review decision"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want %s", logs, want)
+		}
+	}
+}
+
+func TestRunMemoryProposalLifecycleUsesUnifiedReviewQueue(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+	extractMemoryID := func(output string) int64 {
+		t.Helper()
+		var payload struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(output), &payload); err != nil {
+			t.Fatalf("json.Unmarshal(memory output) error = %v\n%s", err, output)
+		}
+		if payload.ID == 0 {
+			t.Fatalf("memory output = %s, want id", output)
+		}
+		return payload.ID
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	if _, err := store.CreateProject(context.Background(), sqlite.CreateProjectParams{
+		Key:           testProjectKey,
+		Name:          "Alpha CLI",
+		Scope:         "project",
+		GitRoot:       filepath.Join(root, testProjectKey),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	}); err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	store.Close()
+
+	proposed := run("memory", "propose",
+		"scope=project",
+		"project="+testProjectKey,
+		"type=operating_note",
+		"source_type=operator",
+		"source_key=manual-proof",
+		"sensitivity=normal",
+		"--summary", "Pilot proof memory",
+		"--json",
+	)
+	memoryID := extractMemoryID(proposed)
+	for _, want := range []string{
+		`"queue_id": "memory-proposal:` + int64String(memoryID) + `"`,
+		`"status": "pending"`,
+		`"approval": "pending"`,
+		`"schema": "memory_proposal.v1"`,
+		`"active": false`,
+		`"source_type": "operator"`,
+		`"source_key": "manual-proof"`,
+	} {
+		if !strings.Contains(proposed, want) {
+			t.Fatalf("memory propose output = %s, want %s", proposed, want)
+		}
+	}
+
+	activeList := run("memory", "list", "--json")
+	if !strings.Contains(activeList, `"items": []`) {
+		t.Fatalf("memory list output = %s, want pending proposal excluded by default", activeList)
+	}
+
+	pendingList := run("memory", "list", "status=pending", "--json")
+	for _, want := range []string{
+		`"queue_id": "memory-proposal:` + int64String(memoryID) + `"`,
+		`"status": "pending"`,
+		`"active": false`,
+	} {
+		if !strings.Contains(pendingList, want) {
+			t.Fatalf("memory list pending output = %s, want %s", pendingList, want)
+		}
+	}
+
+	list := run("review", "list", "--json")
+	for _, want := range []string{
+		`"queue_id": "memory-proposal:` + int64String(memoryID) + `"`,
+		`"source_type": "memory_proposal"`,
+		`"source": "memory_summaries"`,
+		`"risk": "governance"`,
+		`"allowed_actions": [
+        "accept",
+        "reject",
+        "archive"
+      ]`,
+	} {
+		if !strings.Contains(list, want) {
+			t.Fatalf("review list output = %s, want %s", list, want)
+		}
+	}
+
+	show := run("review", "show", "memory-proposal:"+int64String(memoryID), "--json")
+	for _, want := range []string{
+		`"source_type": "memory_proposal"`,
+		`"memory_type": "operating_note"`,
+		`"approval": "pending"`,
+		`"schema": "memory_proposal.v1"`,
+		`"risk": "governance"`,
+	} {
+		if !strings.Contains(show, want) {
+			t.Fatalf("review show output = %s, want %s", show, want)
+		}
+	}
+
+	actionOutput := run("review", "act", "memory-proposal:"+int64String(memoryID), "accept", "--json")
+	for _, want := range []string{
+		`"queue_id": "memory-proposal:` + int64String(memoryID) + `"`,
+		`"source_type": "memory_proposal"`,
+		`"action": "accept"`,
+		`"status": "resolved"`,
+		`"result": "accepted"`,
+		`"supported": true`,
+		`"mutation_scope": "review_state"`,
+		`"approval_required": true`,
+		`"mutated": true`,
+		`"audit_event": "memory.proposal_resolved"`,
+	} {
+		if !strings.Contains(actionOutput, want) {
+			t.Fatalf("review act memory proposal output = %s, want %s", actionOutput, want)
+		}
+	}
+
+	acceptedList := run("memory", "list", "--json")
+	for _, want := range []string{
+		`"queue_id": "memory-proposal:` + int64String(memoryID) + `"`,
+		`"status": "accepted"`,
+		`"approval": "accepted"`,
+		`"active": true`,
+	} {
+		if !strings.Contains(acceptedList, want) {
+			t.Fatalf("memory list output = %s, want %s", acceptedList, want)
+		}
+	}
+
+	showAccepted := run("memory", "show", "memory-proposal:"+int64String(memoryID), "--json")
+	if !strings.Contains(showAccepted, `"review_reason": "unified review decision"`) || !strings.Contains(showAccepted, `"active": true`) {
+		t.Fatalf("memory show accepted output = %s, want accepted provenance", showAccepted)
+	}
+
+	rejectProposed := run("memory", "propose",
+		"scope=project",
+		"project="+testProjectKey,
+		"type=operating_note",
+		"source_type=operator",
+		"source_key=reject-proof",
+		"sensitivity=normal",
+		"--summary", "Rejected proof memory",
+		"--json",
+	)
+	rejectedID := extractMemoryID(rejectProposed)
+	rejectOutput := run("memory", "resolve", "memory-proposal:"+int64String(rejectedID), "reject", "because", "not durable enough", "--json")
+	for _, want := range []string{
+		`"status": "rejected"`,
+		`"approval": "rejected"`,
+		`"active": false`,
+		`"review_reason": "not durable enough"`,
+	} {
+		if !strings.Contains(rejectOutput, want) {
+			t.Fatalf("memory resolve reject output = %s, want %s", rejectOutput, want)
+		}
+	}
+
+	archiveProposed := run("memory", "propose",
+		"scope=project",
+		"project="+testProjectKey,
+		"type=operating_note",
+		"source_type=operator",
+		"source_key=archive-proof",
+		"sensitivity=normal",
+		"--summary", "Archived proof memory",
+		"--json",
+	)
+	archivedID := extractMemoryID(archiveProposed)
+	archiveOutput := run("review", "act", "memory-proposal:"+int64String(archivedID), "archive", "--json")
+	for _, want := range []string{
+		`"result": "archived"`,
+		`"status": "archived"`,
+		`"approval": "archived"`,
+		`"active": false`,
+	} {
+		if !strings.Contains(archiveOutput, want) {
+			t.Fatalf("review act archive output = %s, want %s", archiveOutput, want)
+		}
+	}
+
+	repeatedOutput := run("memory", "resolve", "memory-proposal:"+int64String(memoryID), "accept", "because", "already accepted", "--json")
+	if !strings.Contains(repeatedOutput, `"repeated": true`) || !strings.Contains(repeatedOutput, `"status": "accepted"`) {
+		t.Fatalf("memory resolve repeated output = %s, want repeated accepted result", repeatedOutput)
+	}
+
+	activeAfterTerminal := run("memory", "list", "--json")
+	for _, blockedID := range []int64{rejectedID, archivedID} {
+		if strings.Contains(activeAfterTerminal, `"queue_id": "memory-proposal:`+int64String(blockedID)+`"`) {
+			t.Fatalf("memory list output = %s, want rejected/archived proposal %d excluded from active memory", activeAfterTerminal, blockedID)
+		}
+	}
+	rejectedList := run("memory", "list", "status=rejected", "--json")
+	if !strings.Contains(rejectedList, `"queue_id": "memory-proposal:`+int64String(rejectedID)+`"`) || !strings.Contains(rejectedList, `"active": false`) {
+		t.Fatalf("memory list rejected output = %s, want rejected proposal visible only by explicit status", rejectedList)
+	}
+	archivedList := run("memory", "list", "status=archived", "--json")
+	if !strings.Contains(archivedList, `"queue_id": "memory-proposal:`+int64String(archivedID)+`"`) || !strings.Contains(archivedList, `"active": false`) {
+		t.Fatalf("memory list archived output = %s, want archived proposal visible only by explicit status", archivedList)
+	}
+
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "memory.proposal_created"`,
+		`"type": "memory.proposal_resolved"`,
+		`"status": "accepted"`,
+		`"decision": "accept"`,
+		`"status": "rejected"`,
+		`"decision": "reject"`,
+		`"status": "archived"`,
+		`"decision": "archive"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want %s", logs, want)
 		}
 	}
 }
@@ -1615,7 +2880,6 @@ func TestRunReviewQueueIncludesGoalReviewItems(t *testing.T) {
 	for _, want := range []string{
 		`"review_id": "intake-goal:1"`,
 		`"source_type": "intake_goal_conversion"`,
-		`"goal_id": 1`,
 		`"review_id": "goal:` + int64String(manualCreatedID) + `"`,
 		`"source_type": "goal"`,
 		`"title": "Manual created goal review"`,
@@ -1653,8 +2917,8 @@ func TestRunReviewQueueIncludesGoalReviewItems(t *testing.T) {
 	}
 
 	show := run("review", "show", "--id", convertedReviewID, "--json")
-	if !strings.Contains(show, `"review_id": "`+convertedReviewID+`"`) || !strings.Contains(show, `"source_type": "intake_goal_conversion"`) || !strings.Contains(show, `"goal_id": 1`) {
-		t.Fatalf("review show output = %s, want one converted intake goal item", show)
+	if !strings.Contains(show, `"review_id": "`+convertedReviewID+`"`) || !strings.Contains(show, `"source_type": "intake_goal_conversion"`) || !strings.Contains(show, `"suggested_route": "draft_goal"`) {
+		t.Fatalf("review show output = %s, want one draft intake goal item", show)
 	}
 }
 
@@ -1904,6 +3168,7 @@ func TestRunReviewGoalBlockerActionsAreExplicitUnsupportedJSON(t *testing.T) {
 
 func TestRunUnifiedReviewQueueSurfacesFailedWorkRetryPolicy(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"failed","output":"failed work review proof"}`)
 	t.Setenv("HOME", t.TempDir())
 
 	root := testRepoRoot(t)
@@ -1938,7 +3203,7 @@ func TestRunUnifiedReviewQueueSurfacesFailedWorkRetryPolicy(t *testing.T) {
 		"intake", "raw", "create",
 		"--source", "operator",
 		"--project", testProjectKey,
-		"--title", "run this exact command: printf 'failed work review proof' >&2; exit 42",
+		"--title", "failed work review proof",
 		"--type", "request",
 		"--dedup-key", "failed-work-review-proof",
 		"--requested-by", "codex",
@@ -2022,6 +3287,98 @@ func TestRunUnifiedReviewQueueSurfacesFailedWorkRetryPolicy(t *testing.T) {
 	}
 }
 
+func TestRunReviewActFailedWorkFollowUpRequiresExplicitApproval(t *testing.T) {
+	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"failed","output":"failed work follow-up proof"}`)
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	installRepoCodexDriverScript(t, root)
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, []byte(`{"body":"failed work follow-up proof"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "failed work follow-up proof")
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "failed work follow-up proof",
+		"--type", "request",
+		"--dedup-key", "failed-work-follow-up-proof",
+		"--requested-by", "codex",
+		"--payload-file", payloadPath,
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+	run("review", "act", "intake-review:1", "accept", "--json")
+	run("work", "dispatch", "--task", "intake-review-1", "--json")
+	run("work", "execute", "--task", "intake-review-1", "--json")
+
+	show := run("review", "show", "failed-work:1", "--json")
+	for _, want := range []string{
+		`"allowed_actions": [`,
+		`"follow-up"`,
+		`"follow_up"`,
+		`"approval_required": true`,
+		`"destination": "odin_follow_up_obligation"`,
+		`"github_issue"`,
+		`"status": "not_created"`,
+	} {
+		if !strings.Contains(show, want) {
+			t.Fatalf("review show output = %s, want %s", show, want)
+		}
+	}
+
+	dryRun := run("review", "act", "failed-work:1", "follow-up", "--dry-run", "--json")
+	for _, want := range []string{
+		`"action": "follow-up"`,
+		`"dry_run": true`,
+		`"created": false`,
+		`"approval_required": true`,
+		`"github_issue_created": false`,
+		`"status": "not_created"`,
+	} {
+		if !strings.Contains(dryRun, want) {
+			t.Fatalf("review follow-up dry-run output = %s, want %s", dryRun, want)
+		}
+	}
+	emptyFollowUps := run("followup", "list", "--json")
+	if !strings.Contains(emptyFollowUps, `"obligations": []`) {
+		t.Fatalf("followup list after dry-run = %s, want no persisted obligations", emptyFollowUps)
+	}
+
+	created := run("review", "act", "failed-work:1", "follow-up", "--json")
+	for _, want := range []string{
+		`"action": "follow-up"`,
+		`"dry_run": false`,
+		`"created": true`,
+		`"approval_required": true`,
+		`"github_issue_created": false`,
+		`"status": "not_created"`,
+		`"follow_up"`,
+		`"title": "Follow up on failed work: intake-review-1"`,
+	} {
+		if !strings.Contains(created, want) {
+			t.Fatalf("review follow-up create output = %s, want %s", created, want)
+		}
+	}
+	followUps := run("followup", "list", "--json")
+	if strings.Count(followUps, `"title": "Follow up on failed work: intake-review-1"`) != 1 || !strings.Contains(followUps, `"cadence": "once"`) {
+		t.Fatalf("followup list output = %s, want one persisted failed-work follow-up", followUps)
+	}
+}
+
 func TestRunLogsIncludeProjectScopedIntakeEventsForOdinCoreScope(t *testing.T) {
 	t.Parallel()
 
@@ -2063,6 +3420,136 @@ func TestRunLogsIncludeProjectScopedIntakeEventsForOdinCoreScope(t *testing.T) {
 		if !strings.Contains(logsOutput, want) {
 			t.Fatalf("logs output = %s, want %s", logsOutput, want)
 		}
+	}
+}
+
+func TestRunLogsShowAndTrailRenderProvenance(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("work", "start", "--project", "odin-core", "--title", "Evidence trail proof", "--intent", "governance", "--json")
+	run("work", "dispatch", "--task", "1", "--json")
+
+	beforeLogs := run("logs", "--json")
+	showOutput := run("logs", "show", "3")
+	for _, want := range []string{
+		"event=3",
+		"type=approval.requested",
+		"approval=1",
+		"work_item=evidence-trail-proof-",
+		"summary=approval requested",
+		"requested_by=system",
+	} {
+		if !strings.Contains(showOutput, want) {
+			t.Fatalf("logs show output = %s, want %s", showOutput, want)
+		}
+	}
+
+	taskTrail := run("logs", "trail", "--task", "1")
+	for _, want := range []string{
+		"type=task.created",
+		"type=approval.requested",
+		"type=task.queue_state_changed",
+		"type=context_packet.created",
+		"blocked_reason=approval_required",
+		"work_item=evidence-trail-proof-",
+	} {
+		if !strings.Contains(taskTrail, want) {
+			t.Fatalf("logs trail --task output = %s, want %s", taskTrail, want)
+		}
+	}
+
+	approvalTrailJSON := run("logs", "trail", "--approval", "1", "--json")
+	var trail struct {
+		Items []struct {
+			EventID     int64           `json:"event_id"`
+			EventType   string          `json:"event_type"`
+			ApprovalID  *int64          `json:"approval_id"`
+			WorkItemKey string          `json:"work_item_key"`
+			Summary     string          `json:"summary"`
+			Payload     json.RawMessage `json:"payload"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(approvalTrailJSON), &trail); err != nil {
+		t.Fatalf("logs trail --approval --json output = %s, unmarshal error = %v", approvalTrailJSON, err)
+	}
+	var foundApproval bool
+	for _, item := range trail.Items {
+		if item.EventType == "approval.requested" && item.ApprovalID != nil && *item.ApprovalID == 1 {
+			foundApproval = true
+			if !strings.HasPrefix(item.WorkItemKey, "evidence-trail-proof-") || item.Summary == "" || len(item.Payload) == 0 {
+				t.Fatalf("approval trail item = %+v, want work item, summary, and payload", item)
+			}
+		}
+	}
+	if !foundApproval {
+		t.Fatalf("logs trail --approval --json output = %s, want approval.requested item for approval 1", approvalTrailJSON)
+	}
+	if afterLogs := run("logs", "--json"); afterLogs != beforeLogs {
+		t.Fatalf("logs show/trail mutated event stream\nbefore=%s\nafter=%s", beforeLogs, afterLogs)
+	}
+}
+
+func TestRunOverviewIncludesActivityLog(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	run("work", "start", "--project", "odin-core", "--title", "Evidence trail overview", "--intent", "governance", "--json")
+	run("work", "dispatch", "--task", "1", "--json")
+
+	overviewOutput := run("overview")
+	for _, want := range []string{
+		"Activity Log",
+		"event=",
+		"type=approval.requested",
+		"work_item=evidence-trail-overview-",
+		"summary=approval requested",
+	} {
+		if !strings.Contains(overviewOutput, want) {
+			t.Fatalf("overview output = %s, want %s", overviewOutput, want)
+		}
+	}
+
+	overviewJSON := run("overview", "--json")
+	var view struct {
+		Observability struct {
+			ActivityLog []struct {
+				EventID     int64  `json:"event_id"`
+				EventType   string `json:"event_type"`
+				WorkItemKey string `json:"work_item_key"`
+				Summary     string `json:"summary"`
+			} `json:"activity_log"`
+		} `json:"observability"`
+	}
+	if err := json.Unmarshal([]byte(overviewJSON), &view); err != nil {
+		t.Fatalf("overview --json output = %s, unmarshal error = %v", overviewJSON, err)
+	}
+	var found bool
+	for _, item := range view.Observability.ActivityLog {
+		if item.EventType == "approval.requested" && strings.HasPrefix(item.WorkItemKey, "evidence-trail-overview-") && item.Summary != "" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("overview --json output = %s, want activity_log approval.requested item", overviewJSON)
 	}
 }
 
@@ -2142,6 +3629,9 @@ func TestRunIntakeLifecycleIsVisibleInProjectLogsAndOverview(t *testing.T) {
 
 	overviewOutput := run("overview", "--json")
 	for _, want := range []string{
+		`"review_queue":`,
+		`"total_count": 2`,
+		`"intake_count": 2`,
 		`"intake_inbox":`,
 		`"wiring": "live"`,
 		`"raw_item_count": 5`,
@@ -2174,26 +3664,65 @@ func TestRunHelpIncludesOverviewCommand(t *testing.T) {
 	if !strings.Contains(stdout.String(), "overview") {
 		t.Fatalf("help output = %q, want overview command", stdout.String())
 	}
-	if strings.Contains(stdout.String(), "scheduler") {
-		t.Fatalf("help output = %q, should not claim scheduler command", stdout.String())
+	if !strings.Contains(stdout.String(), "runs show <id>") {
+		t.Fatalf("help output = %q, want top-level runs show command", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "scheduler") {
+		t.Fatalf("help output = %q, want scheduler command", stdout.String())
 	}
 }
 
-func TestRunSchedulerCommandIsNotClaimedSurface(t *testing.T) {
+func TestRunSchedulerTickUsesExistingRuntimePaths(t *testing.T) {
 	t.Parallel()
 
 	root := testRepoRoot(t)
-	var stdout bytes.Buffer
 
-	err := Run(context.Background(), root, []string{"scheduler", "--help"}, strings.NewReader(""), &stdout)
-	if err == nil {
-		t.Fatal("Run(scheduler --help) error = nil, want unknown command")
+	if err := Run(context.Background(), root, []string{
+		"trigger", "upsert", "scheduler-proof",
+		"initiative=odin-core",
+		"kind=schedule",
+		"status=enabled",
+		"next=2026-05-02T00:00:00Z",
+		"title=Scheduler_proof",
+		"--json",
+	}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(trigger upsert) error = %v", err)
 	}
-	if got := err.Error(); got != "unknown command: scheduler" {
-		t.Fatalf("Run(scheduler --help) error = %q, want unknown command: scheduler", got)
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"scheduler", "tick",
+		"now=2026-05-02T00:00:00Z",
+		"recovery=false",
+		"--json",
+	}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(scheduler tick) error = %v", err)
 	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, want empty output", stdout.String())
+	for _, want := range []string{
+		`"now": "2026-05-02T00:00:00Z"`,
+		`"trigger_evaluation"`,
+		`"evaluated": 1`,
+		`"materialized": 1`,
+		`"supervision"`,
+		`"recovery_ran": false`,
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("scheduler tick output = %s, want %s", stdout.String(), want)
+		}
+	}
+
+	var logs bytes.Buffer
+	if err := Run(context.Background(), root, []string{"logs", "--json"}, strings.NewReader(""), &logs); err != nil {
+		t.Fatalf("Run(logs --json) error = %v", err)
+	}
+	for _, want := range []string{
+		`"type": "automation_trigger.fire_requested"`,
+		`"type": "automation_trigger.materialized"`,
+		`"key": "scheduler-proof"`,
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("logs output = %s, want %s", logs.String(), want)
+		}
 	}
 }
 
@@ -2230,6 +3759,128 @@ func TestRunWorkStartAndStatusUseCanonicalCommandPath(t *testing.T) {
 		if !strings.Contains(statusOutput.String(), want) {
 			t.Fatalf("Run(work status) output = %q, want %q", statusOutput.String(), want)
 		}
+	}
+}
+
+func TestRunWorkProfilesExposeManagedProjectDeliveryProfile(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+
+	var profilesOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "profiles"}, strings.NewReader(""), &profilesOutput); err != nil {
+		t.Fatalf("Run(work profiles) error = %v", err)
+	}
+	for _, want := range []string{
+		"managed-project-delivery-workflow",
+		"local-deterministic-workflow",
+		"review-only-workflow",
+		"codex-code-workflow",
+		"scheduler-created-workflow",
+		"approval-required-external-mutation-workflow",
+		"status=active",
+		"entrypoint=skill:triage-skill",
+	} {
+		if !strings.Contains(profilesOutput.String(), want) {
+			t.Fatalf("Run(work profiles) output = %q, want %q", profilesOutput.String(), want)
+		}
+	}
+
+	var statusOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "status"}, strings.NewReader(""), &statusOutput); err != nil {
+		t.Fatalf("Run(work status) error = %v", err)
+	}
+	if !strings.Contains(statusOutput.String(), "delivery_profiles=6") {
+		t.Fatalf("Run(work status) output = %q, want delivery_profiles=6", statusOutput.String())
+	}
+}
+
+func TestRunWorkStatusJSONBackfillsOpenIntentAndFlagsLegacyFallback(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := testRepoRoot(t)
+	if err := Run(ctx, root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(ctx, root, []string{"work", "start", "--project", testProjectKey, "--title", "Bootstrap explicit intent"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(work start) error = %v", err)
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	project, err := store.GetProjectByKey(ctx, testProjectKey)
+	if err != nil {
+		t.Fatalf("GetProjectByKey() error = %v", err)
+	}
+	openTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:     project.ID,
+		Key:           "legacy-open",
+		Title:         "Fix JSON output",
+		Status:        "queued",
+		Scope:         "project",
+		RequestedBy:   "test",
+		WorkKind:      "project",
+		ArtifactsJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(open) error = %v", err)
+	}
+	_, err = store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:     project.ID,
+		Key:           "legacy-terminal",
+		Title:         "Old terminal item",
+		Status:        "completed",
+		Scope:         "project",
+		RequestedBy:   "test",
+		WorkKind:      "project",
+		ArtifactsJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(terminal) error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := Run(ctx, root, []string{"work", "status", "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(work status --json) error = %v", err)
+	}
+
+	var payload struct {
+		DeliveryProfiles          int `json:"delivery_profiles"`
+		ExplicitIntentWorkItems   int `json:"explicit_intent_work_items"`
+		FallbackIntentWorkItems   int `json:"fallback_intent_work_items"`
+		IntentBackfilledWorkItems int `json:"intent_backfilled_work_items"`
+		LegacyFallbackWorkItems   int `json:"legacy_fallback_work_items"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(%q) error = %v", stdout.String(), err)
+	}
+	if payload.DeliveryProfiles != 6 {
+		t.Fatalf("delivery_profiles = %d, want 6", payload.DeliveryProfiles)
+	}
+	if payload.ExplicitIntentWorkItems != 2 || payload.FallbackIntentWorkItems != 1 {
+		t.Fatalf("intent counts = explicit %d fallback %d, want 2/1", payload.ExplicitIntentWorkItems, payload.FallbackIntentWorkItems)
+	}
+	if payload.IntentBackfilledWorkItems != 1 || payload.LegacyFallbackWorkItems != 1 {
+		t.Fatalf("backfill counts = updated %d legacy %d, want 1/1", payload.IntentBackfilledWorkItems, payload.LegacyFallbackWorkItems)
+	}
+
+	store, err = sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open(reload) error = %v", err)
+	}
+	defer store.Close()
+	updatedOpenTask, err := store.GetTask(ctx, openTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask(open) error = %v", err)
+	}
+	if updatedOpenTask.ExecutionIntent != "mutation" || updatedOpenTask.ExecutionIntentSource != "backfill:delivery_profile:codex_code" {
+		t.Fatalf("open intent = %q/%q, want mutation/backfill:delivery_profile:codex_code", updatedOpenTask.ExecutionIntent, updatedOpenTask.ExecutionIntentSource)
 	}
 }
 
@@ -2420,9 +4071,44 @@ func TestRunWorkDispatchFailsClosedForEmptyTaskArgument(t *testing.T) {
 	}
 }
 
-func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
+func TestRunWorkDispatchFailsClosedForUnknownGoalArgument(t *testing.T) {
 	t.Parallel()
 
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "unknown dispatch goal proof")
+	run("work", "start", "--project", testProjectKey, "--title", "Neutral status proof", "--intent", "read_only")
+
+	var dispatchOutput bytes.Buffer
+	err := Run(context.Background(), root, []string{"work", "dispatch", "--goal", "1", "--json"}, strings.NewReader(""), &dispatchOutput)
+	if err == nil {
+		t.Fatalf("Run(work dispatch --goal) error = nil output=%s, want fail-closed unknown argument error", dispatchOutput.String())
+	}
+	if !strings.Contains(err.Error(), "unknown work dispatch argument: goal") {
+		t.Fatalf("Run(work dispatch --goal) error = %v, want unknown goal argument", err)
+	}
+
+	jobsOutput := run("jobs", "--json")
+	if !strings.Contains(jobsOutput, `"status": "queued"`) || strings.Contains(jobsOutput, `"status": "running"`) {
+		t.Fatalf("jobs output = %s, want queued task untouched by invalid dispatch", jobsOutput)
+	}
+	runsOutput := run("runs", "--json")
+	if !strings.Contains(runsOutput, `"runs": []`) {
+		t.Fatalf("runs output = %s, want no run from invalid dispatch", runsOutput)
+	}
+}
+
+func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
 	run := func(args ...string) string {
 		t.Helper()
@@ -2453,19 +4139,19 @@ func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
 
 	mutationKey := parseTaskKey(run("work", "start", "--project", testProjectKey, "--title", "Neutral repo task", "--intent", "mutation"))
 	mutationDispatch := run("work", "dispatch", "--task", mutationKey, "--json")
-	if !strings.Contains(mutationDispatch, `"dispatched": false`) || !strings.Contains(mutationDispatch, `"reason": "mutation_requires_isolated_worktree"`) || !strings.Contains(mutationDispatch, `"status": "blocked"`) || !strings.Contains(mutationDispatch, `"execution_intent": "mutation"`) || !strings.Contains(mutationDispatch, `"execution_intent_source": "operator"`) {
-		t.Fatalf("mutation dispatch output = %s, want direct mutation blocked by persisted operator intent", mutationDispatch)
+	if !strings.Contains(mutationDispatch, `"dispatched": true`) || !strings.Contains(mutationDispatch, `"reason": "dispatched"`) || !strings.Contains(mutationDispatch, `"status": "running"`) || !strings.Contains(mutationDispatch, `"execution_intent": "mutation"`) || !strings.Contains(mutationDispatch, `"execution_intent_source": "operator"`) {
+		t.Fatalf("mutation dispatch output = %s, want isolated mutating task dispatched by persisted operator intent", mutationDispatch)
 	}
 	runsAfterMutation := run("runs", "--json")
-	if strings.Count(runsAfterMutation, `"task_key": "`) != 1 {
-		t.Fatalf("runs output = %s, want only the read-only dispatch run", runsAfterMutation)
+	if strings.Count(runsAfterMutation, `"task_key": "`) != 2 {
+		t.Fatalf("runs output = %s, want read-only and isolated mutation dispatch runs", runsAfterMutation)
 	}
-	if !strings.Contains(runsAfterMutation, `"project_key": "alpha-cli"`) || !strings.Contains(runsAfterMutation, `"repo_root": "`) || !strings.Contains(runsAfterMutation, `"worktree_path": "`) || !strings.Contains(runsAfterMutation, `"branch_name": "main"`) {
+	if !strings.Contains(runsAfterMutation, `"project_key": "alpha-cli"`) || !strings.Contains(runsAfterMutation, `"repo_root": "`) || !strings.Contains(runsAfterMutation, `"worktree_path": "`) || !strings.Contains(runsAfterMutation, `"branch_name": "main"`) || !strings.Contains(runsAfterMutation, `"branch_name": "odin/alpha-cli/task-2/run-2/try-`) {
 		t.Fatalf("runs output = %s, want project/worktree/branch execution context", runsAfterMutation)
 	}
 	mutationLogs := run("logs", "--json")
-	if !strings.Contains(mutationLogs, `"type": "task.queue_state_changed"`) || !strings.Contains(mutationLogs, `"blocked_reason": "mutation_requires_isolated_worktree"`) || !strings.Contains(mutationLogs, `"execution_intent": "mutation"`) || !strings.Contains(mutationLogs, `"execution_intent_source": "operator"`) {
-		t.Fatalf("mutation logs output = %s, want mutation policy block evidence with persisted intent", mutationLogs)
+	if !strings.Contains(mutationLogs, `"type": "task.dispatch_requested"`) || !strings.Contains(mutationLogs, `"execution_intent": "mutation"`) || !strings.Contains(mutationLogs, `"execution_intent_source": "operator"`) {
+		t.Fatalf("mutation logs output = %s, want mutation dispatch evidence with persisted intent", mutationLogs)
 	}
 
 	run("project", "select", "odin-core")
@@ -2491,13 +4177,89 @@ func TestRunWorkDispatchEnforcesProjectExecutionPolicy(t *testing.T) {
 	for _, want := range []string{
 		"work_items=3",
 		"open_work_items=3",
-		"active_run_attempts=1",
+		"active_run_attempts=2",
 		"pending_approvals=1",
 		"explicit_intent_work_items=3",
 	} {
 		if !strings.Contains(statusOutput, want) {
 			t.Fatalf("work status output = %s, want %s", statusOutput, want)
 		}
+	}
+}
+
+func TestRunWorkReadOnlyHighRiskCategoriesRequireApprovalThroughOperatorPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+	parseTaskKey := func(output string) string {
+		t.Helper()
+		for _, field := range strings.Fields(output) {
+			if value, ok := strings.CutPrefix(field, "key="); ok {
+				return value
+			}
+		}
+		t.Fatalf("work start output = %q, want task key", output)
+		return ""
+	}
+
+	run("project", "select", testProjectKey)
+	run("transition", "set", "cutover", "confirm", "because", "approval parity high risk proof")
+
+	tests := []struct {
+		name       string
+		title      string
+		wantIntent string
+	}{
+		{name: "sending messages", title: "Send message to customer", wantIntent: "governance"},
+		{name: "deleting data", title: "Delete data from customer records", wantIntent: "destructive"},
+		{name: "deployment", title: "Deploy code to production", wantIntent: "governance"},
+		{name: "calendar mutation", title: "Change calendar event with client", wantIntent: "governance"},
+		{name: "public posting", title: "Publish public launch post", wantIntent: "governance"},
+		{name: "production changes", title: "Modify production system config", wantIntent: "governance"},
+		{name: "purchases", title: "Make purchase of subscription", wantIntent: "governance"},
+		{name: "permissions", title: "Change permissions for repository", wantIntent: "governance"},
+		{name: "financial records", title: "Update financial record", wantIntent: "governance"},
+		{name: "legal records", title: "Update legal records", wantIntent: "governance"},
+		{name: "medical records", title: "Update medical record", wantIntent: "governance"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			key := parseTaskKey(run("work", "start", "--project", testProjectKey, "--title", tt.title, "--intent", "read_only"))
+			dispatchOutput := run("work", "dispatch", "--task", key, "--json")
+			for _, want := range []string{
+				`"dispatched": false`,
+				`"reason": "approval_required"`,
+				`"status": "blocked"`,
+				`"execution_intent": "` + tt.wantIntent + `"`,
+				`"execution_intent_source": "safety_classifier"`,
+			} {
+				if !strings.Contains(dispatchOutput, want) {
+					t.Fatalf("%s dispatch output = %s, want %s", tt.name, dispatchOutput, want)
+				}
+			}
+		})
+	}
+
+	approvalsOutput := run("approvals", "all", "--json")
+	if count := strings.Count(approvalsOutput, `"status": "pending"`); count != len(tests) {
+		t.Fatalf("approvals output = %s, want %d pending approval requests", approvalsOutput, len(tests))
+	}
+
+	logsOutput := run("logs", "--json")
+	if count := strings.Count(logsOutput, `"type": "approval.requested"`); count != len(tests) {
+		t.Fatalf("logs output = %s, want %d approval.requested audit events", logsOutput, len(tests))
+	}
+	if !strings.Contains(logsOutput, `"execution_intent_source": "safety_classifier"`) {
+		t.Fatalf("logs output = %s, want safety classifier audit evidence", logsOutput)
 	}
 }
 
@@ -2530,6 +4292,7 @@ func TestRunWorkExplicitTriggerIntentDoesNotDependOnTitleInference(t *testing.T)
 	var fire struct {
 		WorkItem struct {
 			Key                   string `json:"key"`
+			Status                string `json:"status"`
 			ExecutionIntent       string `json:"execution_intent"`
 			ExecutionIntentSource string `json:"execution_intent_source"`
 		} `json:"work_item"`
@@ -2540,10 +4303,13 @@ func TestRunWorkExplicitTriggerIntentDoesNotDependOnTitleInference(t *testing.T)
 	if fire.WorkItem.Key == "" || fire.WorkItem.ExecutionIntent != "governance" || fire.WorkItem.ExecutionIntentSource != "trigger" {
 		t.Fatalf("trigger fire output = %+v, want trigger-persisted governance intent", fire)
 	}
+	if fire.WorkItem.Status != "blocked" {
+		t.Fatalf("trigger fire work status = %q, want blocked by materialization admission", fire.WorkItem.Status)
+	}
 
 	dispatchOutput := run("work", "dispatch", "--task", fire.WorkItem.Key, "--json")
-	if !strings.Contains(dispatchOutput, `"dispatched": false`) || !strings.Contains(dispatchOutput, `"reason": "approval_required"`) || !strings.Contains(dispatchOutput, `"execution_intent": "governance"`) || !strings.Contains(dispatchOutput, `"execution_intent_source": "trigger"`) {
-		t.Fatalf("dispatch output = %s, want approval gated by trigger intent without risky title wording", dispatchOutput)
+	if !strings.Contains(dispatchOutput, `"dispatched": false`) || !strings.Contains(dispatchOutput, `"reason": "task_not_queued"`) || !strings.Contains(dispatchOutput, `"status": "blocked"`) || !strings.Contains(dispatchOutput, `"execution_intent": "governance"`) || !strings.Contains(dispatchOutput, `"execution_intent_source": "trigger"`) {
+		t.Fatalf("dispatch output = %s, want already-blocked trigger intent work", dispatchOutput)
 	}
 	jobsOutput := run("jobs", "--json")
 	if !strings.Contains(jobsOutput, `"execution_intent": "governance"`) || !strings.Contains(jobsOutput, `"execution_intent_source": "trigger"`) || !strings.Contains(jobsOutput, `"blocked_reason": "approval_required"`) {
@@ -2552,6 +4318,63 @@ func TestRunWorkExplicitTriggerIntentDoesNotDependOnTitleInference(t *testing.T)
 	overviewOutput := run("overview", "--json")
 	if !strings.Contains(overviewOutput, `"execution_intent": "governance"`) || !strings.Contains(overviewOutput, `"execution_intent_source": "trigger"`) {
 		t.Fatalf("overview output = %s, want trigger-created work intent visibility", overviewOutput)
+	}
+}
+
+func TestRunTriggerSkillInvocationBindingMaterializesRequestWithoutRunningHandler(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	seedReviewableSkill(t, root, "triage-skill", "scheduled triage complete", `{"classification":"scheduled","next_step":"review"}`)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	ruleJSON := `{"summary":"scheduled skill proof","cadence":"1h","execution_intent":"read_only","skill_invocation":{"skill_key":"triage-skill","input_json":{"message":"scheduled triage"},"scope":"project","project_key":"` + testProjectKey + `"}}`
+	run("trigger", "upsert", "scheduled-skill-triage",
+		"initiative="+testProjectKey,
+		"kind=schedule",
+		"status=enabled",
+		"next=2026-05-05T00:00:00Z",
+		"title=Scheduled_skill_triage",
+		"rule_json="+ruleJSON,
+		"--json",
+	)
+
+	fireOutput := run("trigger", "fire", "scheduled-skill-triage", "reason=skill-binding-proof", "--json")
+	var fire struct {
+		WorkItem struct {
+			Key                   string `json:"key"`
+			WorkKind              string `json:"work_kind"`
+			ExecutionIntent       string `json:"execution_intent"`
+			ExecutionIntentSource string `json:"execution_intent_source"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal([]byte(fireOutput), &fire); err != nil {
+		t.Fatalf("json.Unmarshal(fire output) error = %v\n%s", err, fireOutput)
+	}
+	if fire.WorkItem.Key == "" || fire.WorkItem.WorkKind != "skill_invocation" || fire.WorkItem.ExecutionIntent != "read_only" || fire.WorkItem.ExecutionIntentSource != "skill_binding:trigger" {
+		t.Fatalf("fire output = %+v, want read-only skill invocation work item", fire.WorkItem)
+	}
+	if artifacts := run("skills", "artifacts", "--json"); !strings.Contains(artifacts, `"artifacts": []`) {
+		t.Fatalf("skills artifacts after trigger fire = %s, want no trigger-side handler execution", artifacts)
+	}
+
+	runOutput := run("skills", "run", fire.WorkItem.Key, "--json")
+	for _, want := range []string{
+		`"task_key": "` + fire.WorkItem.Key + `"`,
+		`"skill_key": "triage-skill"`,
+		`"status": "ok"`,
+		`"artifact_id": 1`,
+	} {
+		if !strings.Contains(runOutput, want) {
+			t.Fatalf("skills run output = %s, want %s", runOutput, want)
+		}
 	}
 }
 
@@ -2664,8 +4487,8 @@ func TestRunTriggerMVPUsesLiveOperatorLifecycle(t *testing.T) {
 	if err := json.Unmarshal([]byte(fireOutput), &fire); err != nil {
 		t.Fatalf("json.Unmarshal(fire) error = %v\n%s", err, fireOutput)
 	}
-	if !fire.CreatedWorkItem || fire.WorkItem.Status != "queued" || fire.Materialization.MaterializationKey == "" {
-		t.Fatalf("trigger fire output = %+v, want queued risky work item with materialization key", fire)
+	if !fire.CreatedWorkItem || fire.WorkItem.Status != "blocked" || fire.Materialization.MaterializationKey == "" {
+		t.Fatalf("trigger fire output = %+v, want blocked risky work item with materialization key", fire)
 	}
 	repeatFireOutput := run("trigger", "fire", "risky-trigger", "reason=approval-proof", "--json")
 	if !strings.Contains(repeatFireOutput, `"created_work_item": false`) || !strings.Contains(repeatFireOutput, fire.WorkItem.Key) {
@@ -2673,8 +4496,8 @@ func TestRunTriggerMVPUsesLiveOperatorLifecycle(t *testing.T) {
 	}
 
 	dispatchOutput := run("work", "dispatch", "--task", fire.WorkItem.Key, "--json")
-	if !strings.Contains(dispatchOutput, `"dispatched": false`) || !strings.Contains(dispatchOutput, `"reason": "approval_required"`) || !strings.Contains(dispatchOutput, `"status": "blocked"`) {
-		t.Fatalf("dispatch risky trigger work output = %s, want approval-required block", dispatchOutput)
+	if !strings.Contains(dispatchOutput, `"dispatched": false`) || !strings.Contains(dispatchOutput, `"reason": "task_not_queued"`) || !strings.Contains(dispatchOutput, `"status": "blocked"`) {
+		t.Fatalf("dispatch risky trigger work output = %s, want already-blocked approval-required work", dispatchOutput)
 	}
 	approvalsOutput := run("approvals", "all", "--json")
 	if !strings.Contains(approvalsOutput, `"status": "pending"`) || !strings.Contains(approvalsOutput, fmt.Sprintf(`"task_key": "%s"`, fire.WorkItem.Key)) {
@@ -2835,8 +4658,8 @@ func TestRunTriggerHumanizedTimingDefersQuietHoursAndCoalescesMissedRuns(t *test
 		t.Fatalf("risky release = %+v, want one trigger-created work item", risky)
 	}
 	dispatch := run("work", "dispatch", "--task", risky.Results[0].WorkItem.Key, "--json")
-	if !strings.Contains(dispatch, `"reason": "approval_required"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
-		t.Fatalf("risky dispatch output = %s, want approval-required block after timing release", dispatch)
+	if !strings.Contains(dispatch, `"reason": "task_not_queued"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
+		t.Fatalf("risky dispatch output = %s, want already-blocked approval-required work after timing release", dispatch)
 	}
 
 	logsOutput := run("logs", "--json")
@@ -2854,6 +4677,325 @@ func TestRunTriggerHumanizedTimingDefersQuietHoursAndCoalescesMissedRuns(t *test
 	overviewOutput := run("overview", "--json")
 	if !strings.Contains(overviewOutput, `"key": "risky-timing"`) || !strings.Contains(overviewOutput, `"pending_approval_count": 1`) {
 		t.Fatalf("overview output = %s, want risky timing trigger and pending approval", overviewOutput)
+	}
+}
+
+func TestRunTriggerBatchingGroupsSchedulesAndPreservesApproval(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "batched trigger approval proof")
+	for _, item := range []struct {
+		key  string
+		next string
+	}{
+		{key: "batch-cli-first", next: "2026-05-05T09:05:00Z"},
+		{key: "batch-cli-second", next: "2026-05-05T09:20:00Z"},
+	} {
+		run("trigger", "upsert", item.key,
+			"initiative=odin-core",
+			"kind=schedule",
+			"status=enabled",
+			"next="+item.next,
+			"title="+item.key,
+			"batch=ops-review",
+			"batch_window=1h",
+			"intent=governance",
+			"--json",
+		)
+	}
+
+	tickOutput := run("scheduler", "tick", "now=2026-05-05T09:30:00Z", "recovery=false", "--json")
+	var tick struct {
+		TriggerEvaluation struct {
+			Evaluated    int `json:"evaluated"`
+			Materialized int `json:"materialized"`
+		} `json:"trigger_evaluation"`
+	}
+	if err := json.Unmarshal([]byte(tickOutput), &tick); err != nil {
+		t.Fatalf("json.Unmarshal(scheduler tick) error = %v\n%s", err, tickOutput)
+	}
+	if tick.TriggerEvaluation.Evaluated != 2 || tick.TriggerEvaluation.Materialized != 1 {
+		t.Fatalf("scheduler tick = %+v, want two evaluated triggers and one batched work item", tick)
+	}
+
+	var list struct {
+		Triggers []struct {
+			Key             string `json:"key"`
+			LastWorkItemKey string `json:"last_work_item_key"`
+		} `json:"triggers"`
+	}
+	if err := json.Unmarshal([]byte(run("trigger", "list", "--json")), &list); err != nil {
+		t.Fatalf("json.Unmarshal(trigger list) error = %v", err)
+	}
+	var sharedWorkItem string
+	for _, trigger := range list.Triggers {
+		if trigger.Key != "batch-cli-first" && trigger.Key != "batch-cli-second" {
+			continue
+		}
+		if trigger.LastWorkItemKey == "" {
+			t.Fatalf("trigger %s has no last work item in %+v", trigger.Key, list.Triggers)
+		}
+		if sharedWorkItem == "" {
+			sharedWorkItem = trigger.LastWorkItemKey
+			continue
+		}
+		if trigger.LastWorkItemKey != sharedWorkItem {
+			t.Fatalf("batched trigger work item = %s, want shared %s", trigger.LastWorkItemKey, sharedWorkItem)
+		}
+	}
+	if sharedWorkItem == "" {
+		t.Fatalf("trigger list = %+v, want batched work item", list.Triggers)
+	}
+
+	dispatch := run("work", "dispatch", "--task", sharedWorkItem, "--json")
+	if !strings.Contains(dispatch, `"reason": "task_not_queued"`) ||
+		!strings.Contains(dispatch, `"status": "blocked"`) ||
+		!strings.Contains(dispatch, `"execution_intent": "governance"`) ||
+		!strings.Contains(dispatch, `"blocked_reason": "approval_required"`) {
+		t.Fatalf("batched dispatch output = %s, want already-blocked governance approval-required work", dispatch)
+	}
+
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"key": "batch-cli-first"`,
+		`"key": "batch-cli-second"`,
+		`"requested_by": "automation_trigger_batch_evaluator"`,
+		`"type": "approval.requested"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want %s", logs, want)
+		}
+	}
+}
+
+func TestRunTriggerOperatorWorkflowCreateShowTestAndAudit(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", testProjectKey)
+	createOutput := run("trigger", "create", "operator-daily",
+		"initiative="+testProjectKey,
+		"kind=schedule",
+		"status=enabled",
+		"cadence=1h",
+		"next=2026-05-05T03:00:00Z",
+		"title=Operator_daily_review",
+		"summary=operator_review",
+		"quiet=02:00-06:00",
+		"batch=ops-review",
+		"batch_window=1h",
+		"intent=governance",
+		"--json",
+	)
+	if !strings.Contains(createOutput, `"key": "operator-daily"`) || !strings.Contains(createOutput, `"status": "enabled"`) {
+		t.Fatalf("trigger create output = %s, want enabled operator trigger", createOutput)
+	}
+
+	showOutput := run("trigger", "show", "operator-daily")
+	for _, want := range []string{
+		"trigger=operator-daily",
+		"type=schedule",
+		"schedule=cadence:1h",
+		"next_run=2026-05-05T03:00:00Z",
+		"last_run=none",
+		"quiet_hours=02:00-06:00",
+		"quiet_hour_effect=pending",
+		"batch=ops-review window=1h",
+		"approval_required=true",
+		"recovery_state=not_started",
+		"audit_events=1",
+	} {
+		if !strings.Contains(showOutput, want) {
+			t.Fatalf("trigger show output = %s, want %s", showOutput, want)
+		}
+	}
+
+	testOutput := run("trigger", "test", "operator-daily", "now=2026-05-05T03:30:00Z", "--json")
+	for _, want := range []string{
+		`"key": "operator-daily"`,
+		`"decision": "defer"`,
+		`"quiet_hour_effect": "deferred_until:2026-05-05T06:00:00Z"`,
+		`"approval_required": true`,
+		`"mutates": false`,
+	} {
+		if !strings.Contains(testOutput, want) {
+			t.Fatalf("trigger test output = %s, want %s", testOutput, want)
+		}
+	}
+	if jobsOutput := run("jobs", "--json"); !strings.Contains(jobsOutput, `"jobs": []`) {
+		t.Fatalf("jobs output after trigger test = %s, want no materialized work", jobsOutput)
+	}
+
+	auditOutput := run("trigger", "audit", "operator-daily", "--json")
+	for _, want := range []string{
+		`"trigger_key": "operator-daily"`,
+		`"event_type": "automation_trigger.created"`,
+		`"event_type": "automation_trigger.tested"`,
+		`"decision": "defer"`,
+		`"audit_events"`,
+	} {
+		if !strings.Contains(auditOutput, want) {
+			t.Fatalf("trigger audit output = %s, want %s", auditOutput, want)
+		}
+	}
+}
+
+func TestRunTriggerMaterializeAliasesFireAndDedupes(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", testProjectKey)
+	run("trigger", "create", "operator-materialize",
+		"initiative="+testProjectKey,
+		"kind=schedule",
+		"status=enabled",
+		"next=2026-05-05T09:00:00Z",
+		"title=Operator_materialize",
+		"summary=operator_materialize",
+		"intent=read_only",
+		"--json",
+	)
+
+	first := run("trigger", "materialize", "operator-materialize", "reason=operator-proof", "--json")
+	for _, want := range []string{
+		`"key": "operator-materialize"`,
+		`"materialization_key": "default:operator-materialize:manual:operator-proof"`,
+		`"created_work_item": true`,
+		`"execution_intent": "read_only"`,
+		`"execution_intent_source": "trigger"`,
+	} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("trigger materialize output = %s, want %s", first, want)
+		}
+	}
+
+	repeat := run("trigger", "materialize", "operator-materialize", "reason=operator-proof", "--json")
+	if !strings.Contains(repeat, `"created_work_item": false`) {
+		t.Fatalf("repeat trigger materialize output = %s, want deduped materialization", repeat)
+	}
+}
+
+func TestRunSchedulerTickDryRunExplainsDecisionsWithoutMutation(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run("project", "select", "odin-core")
+	run("transition", "set", "cutover", "confirm", "because", "scheduler dry-run approval proof")
+	run("trigger", "create", "dry-run-single",
+		"initiative=odin-core",
+		"kind=schedule",
+		"status=enabled",
+		"next=2026-05-05T09:00:00Z",
+		"title=Dry_run_single",
+		"summary=single_run",
+		"intent=read_only",
+		"--json",
+	)
+	run("trigger", "create", "dry-run-defer",
+		"initiative=odin-core",
+		"kind=schedule",
+		"status=enabled",
+		"next=2026-05-05T09:00:00Z",
+		"title=Dry_run_defer",
+		"summary=quiet_defer",
+		"quiet=08:00-10:00",
+		"--json",
+	)
+	for _, key := range []string{"dry-run-batch-a", "dry-run-batch-b"} {
+		run("trigger", "create", key,
+			"initiative=odin-core",
+			"kind=schedule",
+			"status=enabled",
+			"next=2026-05-05T09:05:00Z",
+			"title="+key,
+			"summary=batch_run",
+			"batch=ops-review",
+			"batch_window=1h",
+			"intent=governance",
+			"--json",
+		)
+	}
+
+	jsonOutput := run("scheduler", "tick", "now=2026-05-05T09:30:00Z", "recovery=false", "--dry-run", "--json")
+	for _, want := range []string{
+		`"dry_run": true`,
+		`"would_run": 1`,
+		`"would_defer": 1`,
+		`"would_batch": 2`,
+		`"approval_required": 2`,
+		`"decision": "run"`,
+		`"decision": "defer"`,
+		`"decision": "batch"`,
+		`"mutates": false`,
+	} {
+		if !strings.Contains(jsonOutput, want) {
+			t.Fatalf("scheduler dry-run JSON = %s, want %s", jsonOutput, want)
+		}
+	}
+	if jobsOutput := run("jobs", "--json"); !strings.Contains(jobsOutput, `"jobs": []`) {
+		t.Fatalf("jobs output after scheduler dry-run = %s, want no materialized work", jobsOutput)
+	}
+	logsOutput := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "scheduler.tick_evaluated"`,
+		`"dry_run": true`,
+		`"would_batch": 2`,
+		`"approval_required": 2`,
+	} {
+		if !strings.Contains(logsOutput, want) {
+			t.Fatalf("logs output after scheduler dry-run = %s, want %s", logsOutput, want)
+		}
+	}
+
+	humanOutput := run("scheduler", "tick", "now=2026-05-05T09:30:00Z", "recovery=false", "--dry-run")
+	for _, want := range []string{
+		"scheduler tick dry_run=true",
+		"would_run=1",
+		"would_defer=1",
+		"would_batch=2",
+		"approval_required=2",
+	} {
+		if !strings.Contains(humanOutput, want) {
+			t.Fatalf("scheduler dry-run output = %s, want %s", humanOutput, want)
+		}
 	}
 }
 
@@ -2981,8 +5123,8 @@ func TestRunTriggerEventMVPUsesInternalEventsWithDedupeAndApprovalGates(t *testi
 		t.Fatalf("repeat risky event evaluate output = %s, want duplicate suppressed with existing work", repeatRiskyEvents)
 	}
 	dispatchRisky := run("work", "dispatch", "--task", riskyWorkKey, "--json")
-	if !strings.Contains(dispatchRisky, `"reason": "approval_required"`) || !strings.Contains(dispatchRisky, `"status": "blocked"`) {
-		t.Fatalf("risky event dispatch output = %s, want approval required", dispatchRisky)
+	if !strings.Contains(dispatchRisky, `"reason": "task_not_queued"`) || !strings.Contains(dispatchRisky, `"status": "blocked"`) {
+		t.Fatalf("risky event dispatch output = %s, want already-blocked approval-required work", dispatchRisky)
 	}
 	approvals := run("approvals", "all", "--json")
 	if !strings.Contains(approvals, `"status": "pending"`) || !strings.Contains(approvals, riskyWorkKey) {
@@ -3009,6 +5151,7 @@ func TestRunTriggerEventMVPUsesInternalEventsWithDedupeAndApprovalGates(t *testi
 
 func TestRunTriggerProducedFailedWorkSurfacesSelfHealingGuidance(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"failed","output":"trigger fixture failure proof"}`)
 	t.Setenv("HOME", t.TempDir())
 
 	root := testRepoRoot(t)
@@ -3061,12 +5204,12 @@ func TestRunTriggerProducedFailedWorkSurfacesSelfHealingGuidance(t *testing.T) {
 		"kind=schedule",
 		"status=enabled",
 		"next=2026-05-04T00:00:00Z",
-		"title=run this exact command: printf 'trigger schedule failure proof' >&2; exit 42",
+		"title=trigger schedule failure proof",
 		"summary=trigger_failure_recovery",
 		"--json",
 	)
 	scheduledTaskKey := extractAutomationTaskKey(run("trigger", "evaluate", "now=2026-05-04T01:00:00Z", "--json"), "fail-schedule")
-	failTask(scheduledTaskKey, 1, "trigger schedule failure proof")
+	failTask(scheduledTaskKey, 1, "trigger fixture failure proof")
 
 	show := run("review", "show", "failed-work:1", "--json")
 	for _, want := range []string{
@@ -3104,9 +5247,9 @@ func TestRunTriggerProducedFailedWorkSurfacesSelfHealingGuidance(t *testing.T) {
 	}
 
 	run("review", "act", "failed-work:1", "retry", "--json")
-	failTask(scheduledTaskKey, 2, "trigger schedule failure proof")
+	failTask(scheduledTaskKey, 2, "trigger fixture failure proof")
 	run("review", "act", "failed-work:1", "retry", "--json")
-	failTask(scheduledTaskKey, 3, "trigger schedule failure proof")
+	failTask(scheduledTaskKey, 3, "trigger fixture failure proof")
 	blockedShow := run("review", "show", "failed-work:1", "--json")
 	for _, want := range []string{
 		`"decision": "retry_blocked_max_attempts"`,
@@ -3147,13 +5290,13 @@ func TestRunTriggerProducedFailedWorkSurfacesSelfHealingGuidance(t *testing.T) {
 		"event=task.status_changed",
 		"match_status=running",
 		fmt.Sprintf("match_task_id=%d", eventSourceID),
-		"title=run this exact command: printf 'trigger event failure proof' >&2; exit 42",
+		"title=trigger event failure proof",
 		"summary=trigger_event_failure_recovery",
 		"--json",
 	)
 	run("work", "dispatch", "--task", eventSourceKey, "--json")
 	eventTaskKey := extractAutomationTaskKey(run("trigger", "evaluate", "source=events", "--json"), "fail-event")
-	failTask(eventTaskKey, 1, "trigger event failure proof")
+	failTask(eventTaskKey, 1, "trigger fixture failure proof")
 	eventReviewList := run("review", "list", "--json")
 	if !strings.Contains(eventReviewList, `"object_key": "`+eventTaskKey+`"`) || !strings.Contains(eventReviewList, `"source": "automation_trigger"`) {
 		t.Fatalf("review list output = %s, want event-trigger failed work guidance", eventReviewList)
@@ -3283,8 +5426,8 @@ func TestRunTriggerGitHubIssueExternalEventAdapterMVP(t *testing.T) {
 	riskyEvaluate := run("trigger", "evaluate", "source=events", "--json")
 	riskyTaskKey := extractCreatedTaskKey(riskyEvaluate, "automation-github-risky-")
 	dispatch := run("work", "dispatch", "--task", riskyTaskKey, "--json")
-	if !strings.Contains(dispatch, `"reason": "approval_required"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
-		t.Fatalf("risky dispatch output = %s, want approval gate", dispatch)
+	if !strings.Contains(dispatch, `"reason": "task_not_queued"`) || !strings.Contains(dispatch, `"status": "blocked"`) {
+		t.Fatalf("risky dispatch output = %s, want already-blocked approval gate", dispatch)
 	}
 	approvals := run("approvals", "all", "--json")
 	if !strings.Contains(approvals, `"status": "pending"`) || !strings.Contains(approvals, riskyTaskKey) {
@@ -3523,8 +5666,16 @@ func TestRunKnowledgeContextPackProposalReviewLifecycle(t *testing.T) {
 		t.Fatalf("review show = %s, want context pack detail", reviewShow)
 	}
 	acceptOutput := run("review", "act", queueID, "accept", "--json")
-	if !strings.Contains(acceptOutput, `"decision": "accept"`) || !strings.Contains(acceptOutput, `"status": "active"`) {
-		t.Fatalf("accept output = %s, want active accepted proposal", acceptOutput)
+	for _, want := range []string{
+		`"decision": "accept"`,
+		`"status": "active"`,
+		`"memory_summary"`,
+		`"memory_type": "context_pack"`,
+		`"source_context_pack_id": ` + fmt.Sprint(proposalID),
+	} {
+		if !strings.Contains(acceptOutput, want) {
+			t.Fatalf("accept output = %s, want %s", acceptOutput, want)
+		}
 	}
 	repeatAccept := run("review", "act", queueID, "accept", "--json")
 	if !strings.Contains(repeatAccept, `"repeated": true`) || !strings.Contains(repeatAccept, `"status": "active"`) {
@@ -3554,6 +5705,7 @@ func TestRunKnowledgeContextPackProposalReviewLifecycle(t *testing.T) {
 	for _, want := range []string{
 		`"type": "context_packet.created"`,
 		`"type": "context_packet.reviewed"`,
+		`"type": "memory.summary_recorded"`,
 		`"decision": "accept"`,
 		`"decision": "reject"`,
 		`"decision": "archive"`,
@@ -3831,8 +5983,9 @@ func TestRunWorkExecuteSurfacesFailedDispatchedRun(t *testing.T) {
 	}
 }
 
-func TestRunWorkExecuteFailsExactCommandThroughRepoDriver(t *testing.T) {
+func TestRunWorkExecuteSurfacesRepoDriverFailure(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"failed","output":"operator visible failure proof"}`)
 	t.Setenv("HOME", t.TempDir())
 
 	root := testRepoRoot(t)
@@ -3856,7 +6009,7 @@ func TestRunWorkExecuteFailsExactCommandThroughRepoDriver(t *testing.T) {
 		"intake", "raw", "create",
 		"--source", "operator",
 		"--project", testProjectKey,
-		"--title", "run this exact command: printf 'operator visible failure proof' >&2; exit 42",
+		"--title", "operator visible failure proof",
 		"--type", "request",
 		"--dedup-key", "exact-command-failure-intake",
 		"--requested-by", "codex",
@@ -3903,6 +6056,7 @@ func TestRunWorkExecuteFailsExactCommandThroughRepoDriver(t *testing.T) {
 
 func TestRunWorkRetryRequeuesTerminalFailedWorkOnce(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"failed","output":"operator retry failure proof"}`)
 	t.Setenv("HOME", t.TempDir())
 
 	root := testRepoRoot(t)
@@ -3926,7 +6080,7 @@ func TestRunWorkRetryRequeuesTerminalFailedWorkOnce(t *testing.T) {
 		"intake", "raw", "create",
 		"--source", "operator",
 		"--project", testProjectKey,
-		"--title", "run this exact command: printf 'operator retry failure proof' >&2; exit 42",
+		"--title", "operator retry failure proof",
 		"--type", "request",
 		"--dedup-key", "retry-failure-intake",
 		"--requested-by", "codex",
@@ -3967,6 +6121,7 @@ func TestRunWorkRetryRequeuesTerminalFailedWorkOnce(t *testing.T) {
 
 func TestRunWorkRetryBlocksAtMaxAttemptsWithGuidance(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", "")
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_RESPONSE", `{"status":"failed","output":"operator retry policy failure proof"}`)
 	t.Setenv("HOME", t.TempDir())
 
 	root := testRepoRoot(t)
@@ -3990,7 +6145,7 @@ func TestRunWorkRetryBlocksAtMaxAttemptsWithGuidance(t *testing.T) {
 		"intake", "raw", "create",
 		"--source", "operator",
 		"--project", testProjectKey,
-		"--title", "run this exact command: printf 'operator retry policy failure proof' >&2; exit 42",
+		"--title", "operator retry policy failure proof",
 		"--type", "request",
 		"--dedup-key", "retry-policy-intake",
 		"--requested-by", "codex",
@@ -5166,8 +7321,20 @@ func TestRunApprovalsResolveTaskBackedCompanionWork(t *testing.T) {
 	}
 
 	approvalList := run("approvals", "all", "--json")
-	if !strings.Contains(approvalList, `"approval_id": 1`) || !strings.Contains(approvalList, `"resolver_support": "supported"`) {
-		t.Fatalf("approval list output = %s, want supported task-backed approval", approvalList)
+	for _, want := range []string{
+		`"approval_id": 1`,
+		`"resolver_support": "supported"`,
+		`"source": "approval_requests"`,
+		`"risk": "governance"`,
+		`"reason": "approval_required"`,
+		`"allowed_actions": [`,
+		`"approve"`,
+		`"next_steps": "inspect with odin approvals show 1; resolve with odin approvals resolve 1 \u003capprove|deny\u003e \u003creason...\u003e"`,
+		`"on_approve": "task unblocked or registered continuation starts"`,
+	} {
+		if !strings.Contains(approvalList, want) {
+			t.Fatalf("approval list output = %s, want %s", approvalList, want)
+		}
 	}
 
 	show := run("approvals", "show", "1", "--json")
@@ -5177,6 +7344,13 @@ func TestRunApprovalsResolveTaskBackedCompanionWork(t *testing.T) {
 		`"task_id": 1`,
 		`"task_status": "blocked"`,
 		`"resolver_support": "supported"`,
+		`"source": "approval_requests"`,
+		`"risk": "governance"`,
+		`"reason": "approval_required"`,
+		`"allowed_actions": [`,
+		`"approve"`,
+		`"next_steps": "inspect with odin approvals show 1; resolve with odin approvals resolve 1 \u003capprove|deny\u003e \u003creason...\u003e"`,
+		`"on_approve": "task unblocked or registered continuation starts"`,
 	} {
 		if !strings.Contains(show, want) {
 			t.Fatalf("approval show output = %s, want %s", show, want)
@@ -5940,6 +8114,29 @@ func TestNewJobServiceIncludesSupervisor(t *testing.T) {
 	if _, ok := service.Supervisor.(supervision.Service); !ok {
 		t.Fatalf("newJobService() Supervisor = %T, want supervision.Service", service.Supervisor)
 	}
+	if service.PromptRenderer != nil {
+		t.Fatalf("newJobService() PromptRenderer = %T, want nil for unconfigured app", service.PromptRenderer)
+	}
+	if service.PromptTemplateName != "" {
+		t.Fatalf("newJobService() PromptTemplateName = %q, want empty for unconfigured app", service.PromptTemplateName)
+	}
+}
+
+func TestNewJobServicePropagatesPromptConfiguration(t *testing.T) {
+	t.Parallel()
+
+	renderer := prompts.FileRenderer{Root: filepath.Join(t.TempDir(), "prompts", "workers")}
+	service := newJobService(bootstrap.App{
+		PromptRenderer:     renderer,
+		PromptTemplateName: "go-orchestrator",
+	})
+
+	if service.PromptRenderer != renderer {
+		t.Fatalf("PromptRenderer was not propagated")
+	}
+	if service.PromptTemplateName != "go-orchestrator" {
+		t.Fatalf("PromptTemplateName = %q, want %q", service.PromptTemplateName, "go-orchestrator")
+	}
 }
 
 func TestInvokeServedProjectStatusFallsBackToScopeAndMode(t *testing.T) {
@@ -5981,6 +8178,51 @@ func TestInvokeServedProjectStatusFallsBackToProjectScopeLabel(t *testing.T) {
 	}
 }
 
+func TestNewServeCapabilityGatewayIncludesRegistryAndBuiltinTools(t *testing.T) {
+	t.Parallel()
+
+	gateway := newServeCapabilityGateway(bootstrap.App{
+		RegistrySnapshot: registry.Snapshot{
+			Items: []registry.Item{
+				{
+					Kind:         registry.KindCommand,
+					Key:          "project.status",
+					Name:         "project.status",
+					Version:      "1.0.0",
+					Title:        "Project Status",
+					Summary:      "Show the current project state.",
+					Availability: registry.Availability{Scope: "global"},
+					InputSchema:  registry.SchemaRef{Type: "object"},
+					OutputSchema: registry.SchemaRef{Type: "string"},
+					Execution:    registry.ExecutionPolicy{Mode: "local"},
+				},
+			},
+		},
+	})
+	if gateway == nil {
+		t.Fatal("newServeCapabilityGateway() = nil, want gateway")
+	}
+
+	command, err := gateway.GetCapability("project.status", "1.0.0")
+	if err != nil {
+		t.Fatalf("GetCapability(project.status) error = %v", err)
+	}
+	if command.Kind != registry.KindCommand {
+		t.Fatalf("project.status kind = %q, want command", command.Kind)
+	}
+
+	tool, err := gateway.GetCapability("project_status", "1.0.0")
+	if err != nil {
+		t.Fatalf("GetCapability(project_status) error = %v", err)
+	}
+	if tool.Kind != registry.KindTool {
+		t.Fatalf("project_status kind = %q, want tool", tool.Kind)
+	}
+	if tool.Implementation.Kind != "builtin_tool" {
+		t.Fatalf("project_status implementation = %+v, want builtin_tool", tool.Implementation)
+	}
+}
+
 func testRepoRoot(t *testing.T) string {
 	t.Helper()
 
@@ -6000,7 +8242,7 @@ func testRepoRoot(t *testing.T) string {
 
 	mustMkdirAll(filepath.Join(root, "config"))
 	mustMkdirAll(filepath.Join(root, "data"))
-	mustMkdirAll(filepath.Join(root, "registry"))
+	mustMkdirAll(filepath.Join(root, "registry", "workflows"))
 	mustMkdirAll(filepath.Join(root, "state", "cache"))
 	mustMkdirAll(filepath.Join(root, "alpha"))
 
@@ -6082,6 +8324,88 @@ service:
   http_addr: 127.0.0.1:9443
   startup_recovery: true
 `)
+	mustWriteFile(filepath.Join(root, "registry", "workflows", "managed-project-delivery-workflow.md"), `---
+kind: workflow
+key: managed-project-delivery-workflow
+title: Managed Project Delivery Workflow
+summary: Guides Odin-native software delivery for managed projects from intake through close.
+status: active
+tags:
+  - managed-project
+  - delivery
+  - delivery_profile
+entrypoint: skill:triage-skill
+composes:
+  - triage-skill
+---
+
+# Managed Project Delivery Workflow
+
+## Purpose
+Define the reusable Odin-owned delivery workflow for Git-governed managed projects.
+
+## When to Use
+Use this workflow when a managed project request needs governed software delivery.
+
+## Inputs
+The workflow takes the active managed project, operator request, project policy, and runtime evidence.
+
+## Procedure
+Classify the request, clarify missing context, create a spec or ticket, execute governed work, validate, review, and ship through the approved project path.
+
+## Outputs
+The workflow outputs a scoped delivery plan, task breakdown, implementation evidence, validation evidence, and shipping evidence.
+
+## Constraints
+Do not bypass managed-project governance, branches, worktrees, approvals, or runtime evidence.
+
+## Success Criteria
+Operators can inspect this profile through odin work profiles while Odin runtime state remains authoritative.
+`)
+	writeTestDeliveryProfile := func(key, title, summary, entrypoint, composedKey string) {
+		t.Helper()
+		mustWriteFile(filepath.Join(root, "registry", "workflows", key+".md"), fmt.Sprintf(`---
+kind: workflow
+key: %s
+title: %s
+summary: %s
+status: active
+tags:
+  - delivery_profile
+entrypoint: %s
+composes:
+  - %s
+---
+
+# %s
+
+## Purpose
+Fixture delivery profile for work status and profile selection tests.
+
+## When to Use
+Use this fixture when tests need multiple delivery profile workflows.
+
+## Inputs
+The fixture takes test runtime state and registry content.
+
+## Procedure
+Load the profile from the test registry and expose it through work profile commands.
+
+## Outputs
+The fixture outputs a visible delivery profile item.
+
+## Constraints
+Do not perform runtime execution from this fixture.
+
+## Success Criteria
+The profile is loaded and counted by work status.
+`, key, title, summary, entrypoint, composedKey, title))
+	}
+	writeTestDeliveryProfile("local-deterministic-workflow", "Local Deterministic Workflow", "Runs deterministic local checks without external mutation.", "command:status", "status-command")
+	writeTestDeliveryProfile("review-only-workflow", "Review Only Workflow", "Keeps ambiguous or review-only work in a non-mutating review lane.", "agent:review-agent", "review-agent")
+	writeTestDeliveryProfile("codex-code-workflow", "Codex Code Workflow", "Routes bounded code work through the canonical executor seam.", "skill:go-orchestration-feature", "go-orchestration-feature")
+	writeTestDeliveryProfile("scheduler-created-workflow", "Scheduler Created Workflow", "Materializes scheduled work without immediate execution.", "agent:automation-candidate-finder-agent", "automation-candidate-finder-agent")
+	writeTestDeliveryProfile("approval-required-external-mutation-workflow", "Approval Required External Mutation Workflow", "Requires approval before external mutation.", "agent:risk-review-agent", "risk-review-agent")
 
 	mustWriteFile(filepath.Join(root, "README.md"), "alpha test repo\n")
 	mustWriteFile(filepath.Join(root, "alpha", "README.md"), "alpha nested repo\n")
@@ -6321,6 +8645,88 @@ func cleanupTaskRunWorktree(t *testing.T, projectKey string) {
 	})
 	if err := os.RemoveAll(path); err != nil {
 		t.Fatalf("RemoveAll(%s) error = %v", path, err)
+	}
+}
+
+func TestRunRunsShowRendersFailureAnalysis(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	ctx := context.Background()
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha-cli",
+		Name:          "Alpha CLI",
+		Scope:         "project",
+		GitRoot:       root,
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "failure-task",
+		Title:       "Failure task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	const artifactJSON = `{"failure_analysis":{"category":"test_failure","suggested_fix":"Inspect failing test output and repair the regression.","next_step_target":"test","retry_recommended":true,"follow_up":{"recommended":true,"title":"Fix flaky test","reason":"needs a focused repair"}}}`
+	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:          run.ID,
+		Status:         "failed",
+		Summary:        "test failed",
+		TerminalReason: "failed",
+		ArtifactsJSON:  artifactJSON,
+	}); err != nil {
+		t.Fatalf("FinishRun() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"runs", "show", strconv.FormatInt(run.ID, 10)}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(runs show) error = %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{
+		"run=1",
+		"task=failure-task",
+		"status=failed",
+		"artifacts_json=" + artifactJSON,
+		"failure_analysis_category=test_failure",
+		"failure_analysis_suggested_fix=Inspect failing test output and repair the regression.",
+		"failure_analysis_next_step_target=test",
+		"failure_analysis_retry_recommended=true",
+		"failure_analysis_follow_up_recommended=true",
+		"failure_analysis_follow_up_title=Fix flaky test",
+		"failure_analysis_follow_up_reason=needs a focused repair",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("runs show output = %q, want substring %q", output, want)
+		}
 	}
 }
 

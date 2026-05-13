@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"odin-os/internal/executors/contract"
+	"odin-os/internal/executors/drivers"
 )
 
 type DriverRequest struct {
@@ -102,6 +103,7 @@ func (executor driverExecutor) RunTask(ctx context.Context, spec contract.TaskSp
 	}
 
 	cmd := exec.CommandContext(ctx, commandParts[0], commandParts[1:]...)
+	cmd.Env = drivers.AllowlistedEnvironment()
 	cmd.Stdin = bytes.NewReader(requestBytes)
 
 	var stdout bytes.Buffer

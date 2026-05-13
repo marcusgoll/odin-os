@@ -9,7 +9,8 @@ const (
 	LabelHumanReview = "odin:human-review"
 	LabelFailed      = "odin:failed"
 	LabelDone        = "odin:done"
-	LabelPaused      = "odin:paused"
+	// LabelPaused is projection-only; GitHub labels must not become runtime pause authority.
+	LabelPaused = "odin:paused"
 )
 
 const (

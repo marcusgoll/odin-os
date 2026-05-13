@@ -110,11 +110,58 @@ func TestSQLiteRepositoryReportsUnmigratedTargetRepositoriesExplicitly(t *testin
 	defer store.Close()
 
 	repository := NewSQLiteRepository(store)
-	if _, err := repository.ListPullRequests(ctx, PullRequestFilter{}); !errors.Is(err, ErrRepositoryNotMigrated) {
-		t.Fatalf("ListPullRequests() error = %v, want %v", err, ErrRepositoryNotMigrated)
-	}
 	if _, err := repository.ListLocks(ctx, LockFilter{}); !errors.Is(err, ErrRepositoryNotMigrated) {
 		t.Fatalf("ListLocks() error = %v, want %v", err, ErrRepositoryNotMigrated)
+	}
+}
+
+func TestSQLiteRepositoryListsPersistedPullRequests(t *testing.T) {
+	ctx := context.Background()
+	store := openMigratedStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "odin-os",
+		Name:          "Odin OS",
+		Scope:         "project",
+		GitRoot:       "/tmp/odin-os",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/odin-os",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	if _, err := store.UpsertPullRequestHandoff(ctx, sqlite.UpsertPullRequestHandoffParams{
+		ProjectID:     project.ID,
+		Provider:      "github",
+		Repo:          "acme/odin-os",
+		Number:        75,
+		URL:           "https://github.example/acme/odin-os/pull/75",
+		State:         "open",
+		IssueURL:      "https://github.example/acme/odin-os/issues/75",
+		Branch:        "issue/75-pr-review-persistence",
+		Title:         "Persist PR state",
+		Summary:       "SQLite persistence.",
+		Tests:         []string{"go test ./internal/store/sqlite -count=1"},
+		Risks:         []string{"live review dispatch deferred"},
+		Blockers:      []string{"human review required"},
+		SelectedRoles: []string{"reviewer", "qa"},
+		ReviewState:   "reviewing",
+	}); err != nil {
+		t.Fatalf("UpsertPullRequestHandoff() error = %v", err)
+	}
+
+	repository := NewSQLiteRepository(store)
+	pullRequests, err := repository.ListPullRequests(ctx, PullRequestFilter{Repo: "acme/odin-os", Status: "reviewing"})
+	if err != nil {
+		t.Fatalf("ListPullRequests() error = %v", err)
+	}
+	if len(pullRequests) != 1 {
+		t.Fatalf("ListPullRequests() len = %d, want 1: %+v", len(pullRequests), pullRequests)
+	}
+	if pullRequests[0].Repo != "acme/odin-os" || pullRequests[0].Number != 75 || pullRequests[0].Status != "reviewing" || pullRequests[0].URL == "" {
+		t.Fatalf("PullRequest = %+v, want persisted pull request handoff", pullRequests[0])
 	}
 }
 
@@ -146,6 +193,7 @@ func TestSQLiteRepositoryListsPersistedExternalIssues(t *testing.T) {
 		State:      "open",
 		LabelsJSON: `["odin:ready"]`,
 		SyncStatus: "eligible",
+		SyncCursor: "github:issue:acme/alpha:7",
 	}); err != nil {
 		t.Fatalf("UpsertExternalIssue() error = %v", err)
 	}
@@ -158,7 +206,7 @@ func TestSQLiteRepositoryListsPersistedExternalIssues(t *testing.T) {
 	if len(issues) != 1 {
 		t.Fatalf("ListIssues() len = %d, want 1: %+v", len(issues), issues)
 	}
-	if issues[0].Provider != "github" || issues[0].Repo != "acme/alpha" || issues[0].Number != 7 || issues[0].Status != "eligible" {
+	if issues[0].Provider != "github" || issues[0].Repo != "acme/alpha" || issues[0].Number != 7 || issues[0].Status != "eligible" || issues[0].Cursor != "github:issue:acme/alpha:7" {
 		t.Fatalf("Issue = %+v, want persisted external issue", issues[0])
 	}
 }

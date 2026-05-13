@@ -1,6 +1,8 @@
 package sqlite
 
 import (
+	"encoding/json"
+	"strings"
 	"time"
 
 	runtimeevents "odin-os/internal/runtime/events"
@@ -20,20 +22,56 @@ type Project struct {
 }
 
 type ExternalIssue struct {
-	ID           int64
-	ProjectID    int64
-	Provider     string
-	Repo         string
-	Number       int
-	Title        string
-	BodyHash     string
-	URL          string
-	State        string
-	LabelsJSON   string
-	SyncStatus   string
-	LastSyncedAt time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID                 int64
+	ProjectID          int64
+	Provider           string
+	Repo               string
+	Number             int
+	Title              string
+	BodyHash           string
+	URL                string
+	State              string
+	LabelsJSON         string
+	SyncStatus         string
+	SyncCursor         string
+	AcceptanceCriteria []string
+	LastSyncedAt       time.Time
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+type PullRequestHandoff struct {
+	ID            int64
+	ProjectID     int64
+	Provider      string
+	Repo          string
+	Number        int
+	URL           string
+	State         string
+	IssueURL      string
+	Branch        string
+	Title         string
+	Summary       string
+	Tests         []string
+	Risks         []string
+	Blockers      []string
+	SelectedRoles []string
+	ReviewState   string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+type PullRequestReviewResult struct {
+	ID        int64
+	HandoffID int64
+	Role      string
+	State     string
+	Summary   string
+	Comments  []string
+	Blockers  []string
+	Outcome   string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type Initiative struct {
@@ -79,16 +117,52 @@ type CreateProjectParams struct {
 type UpsertProjectParams = CreateProjectParams
 
 type UpsertExternalIssueParams struct {
-	ProjectID  int64
-	Provider   string
-	Repo       string
-	Number     int
-	Title      string
-	BodyHash   string
-	URL        string
-	State      string
-	LabelsJSON string
-	SyncStatus string
+	ProjectID          int64
+	Provider           string
+	Repo               string
+	Number             int
+	Title              string
+	BodyHash           string
+	URL                string
+	State              string
+	LabelsJSON         string
+	SyncStatus         string
+	SyncCursor         string
+	AcceptanceCriteria []string
+}
+
+type UpsertPullRequestHandoffParams struct {
+	ProjectID     int64
+	Provider      string
+	Repo          string
+	Number        int
+	URL           string
+	State         string
+	IssueURL      string
+	Branch        string
+	Title         string
+	Summary       string
+	Tests         []string
+	Risks         []string
+	Blockers      []string
+	SelectedRoles []string
+	ReviewState   string
+}
+
+type ListPullRequestHandoffsParams struct {
+	Repo        string
+	ReviewState string
+	ProjectID   *int64
+}
+
+type UpsertPullRequestReviewResultParams struct {
+	HandoffID int64
+	Role      string
+	State     string
+	Summary   string
+	Comments  []string
+	Blockers  []string
+	Outcome   string
 }
 
 type RecordExternalGitHubIssueEventParams struct {
@@ -230,6 +304,7 @@ type Task struct {
 	ProjectID             int64
 	Key                   string
 	Title                 string
+	AcceptanceCriteria    []string
 	ActionKey             string
 	Status                string
 	Scope                 string
@@ -291,6 +366,20 @@ type IntakeItem struct {
 	UpdatedAt                time.Time
 }
 
+type IntakeAttachment struct {
+	ID           int64
+	IntakeItemID int64
+	Kind         string
+	Filename     string
+	ContentType  string
+	SizeBytes    int64
+	SHA256       string
+	Status       string
+	Bytes        []byte
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 type AutomationTrigger struct {
 	ID                     int64
 	WorkspaceID            string
@@ -327,6 +416,7 @@ type CreateTaskParams struct {
 	ProjectID             int64
 	Key                   string
 	Title                 string
+	AcceptanceCriteria    []string
 	ActionKey             string
 	Status                string
 	Scope                 string
@@ -339,6 +429,74 @@ type CreateTaskParams struct {
 	WorkKind              string
 	ExecutionIntent       string
 	ExecutionIntentSource string
+	ArtifactsJSON         string
+}
+
+func EncodeAcceptanceCriteriaJSON(criteria []string) string {
+	normalized := NormalizeAcceptanceCriteria(criteria)
+	if len(normalized) == 0 {
+		return "[]"
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
+}
+
+func DecodeAcceptanceCriteriaJSON(raw string) []string {
+	var criteria []string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &criteria); err != nil {
+		return nil
+	}
+	return NormalizeAcceptanceCriteria(criteria)
+}
+
+func EncodeStringListJSON(values []string) string {
+	normalized := NormalizeStringList(values)
+	if len(normalized) == 0 {
+		return "[]"
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
+}
+
+func DecodeStringListJSON(raw string) []string {
+	var values []string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &values); err != nil {
+		return nil
+	}
+	return NormalizeStringList(values)
+}
+
+func NormalizeStringList(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			normalized = append(normalized, trimmed)
+		}
+	}
+	return normalized
+}
+
+func NormalizeAcceptanceCriteria(criteria []string) []string {
+	normalized := make([]string, 0, len(criteria))
+	seen := make(map[string]struct{}, len(criteria))
+	for _, criterion := range criteria {
+		criterion = strings.TrimSpace(criterion)
+		if criterion == "" {
+			continue
+		}
+		if _, ok := seen[criterion]; ok {
+			continue
+		}
+		seen[criterion] = struct{}{}
+		normalized = append(normalized, criterion)
+	}
+	return normalized
 }
 
 type CreateTaskIntakeParams struct {
@@ -368,6 +526,21 @@ type CreateIntakeItemParams struct {
 	SuppressionReason        string
 	RoutingNotes             string
 	ReceivedAt               time.Time
+}
+
+type CreateIntakeAttachmentParams struct {
+	IntakeItemID int64
+	Kind         string
+	Filename     string
+	ContentType  string
+	SizeBytes    int64
+	SHA256       string
+	Status       string
+	Bytes        []byte
+}
+
+type ListIntakeAttachmentsParams struct {
+	IntakeItemID int64
 }
 
 type ListIntakeItemsParams struct {
@@ -401,6 +574,8 @@ type ReviewIntakeItemParams struct {
 	PolicyReason     string
 	WorkItemID       *int64
 	WorkItemKey      string
+	GoalID           *int64
+	GoalStatus       string
 }
 
 type IntakeItemProcessingEvent struct {
@@ -436,8 +611,13 @@ type FireAutomationTriggerParams struct {
 	RequestedBy       string
 	SetNextEligibleAt bool
 	NextEligibleAt    *time.Time
+	DueAt             *time.Time
+	SourceOccurredAt  *time.Time
 	SourceEventID     *int64
 	SourceEventType   string
+	ReuseTaskID       *int64
+	WorkKind          string
+	ArtifactsJSON     string
 }
 
 type FireAutomationTriggerResult struct {
@@ -445,6 +625,41 @@ type FireAutomationTriggerResult struct {
 	Materialization AutomationTriggerMaterialization
 	WorkItem        Task
 	CreatedWorkItem bool
+}
+
+type RecordAutomationTriggerTestParams struct {
+	WorkspaceID        string
+	Key                string
+	Decision           string
+	Reason             string
+	Source             string
+	MaterializationKey string
+	DueAt              *time.Time
+	SourceOccurredAt   *time.Time
+	NextRun            *time.Time
+	QuietHourEffect    string
+	BatchKey           string
+	BatchWindow        string
+	ApprovalRequired   bool
+	RecoveryState      string
+	Mutates            bool
+}
+
+type RecordSchedulerTickParams struct {
+	Now              time.Time
+	Scope            string
+	ProjectID        *int64
+	DryRun           bool
+	Mutates          bool
+	Evaluated        int
+	Materialized     int
+	Deferred         int
+	Errored          int
+	WouldRun         int
+	WouldDefer       int
+	WouldBatch       int
+	ApprovalRequired int
+	RecoveryRan      bool
 }
 
 type DeferAutomationTriggerParams struct {
@@ -480,6 +695,12 @@ type UpdateTaskQueueStateParams struct {
 	RetryCount     int
 	MaxAttempts    int
 	BlockedReason  string
+}
+
+type UpdateTaskExecutionIntentParams struct {
+	TaskID                int64
+	ExecutionIntent       string
+	ExecutionIntentSource string
 }
 
 type BlockTaskParams struct {
@@ -752,13 +973,14 @@ type CompleteRecoveryParams struct {
 }
 
 type RecordRecoveryActionParams struct {
-	RecoveryID  int64
-	Playbook    string
-	FaultKey    string
-	ActionName  string
-	Attempt     int
-	Result      string
-	Description string
+	RecoveryID        int64
+	Playbook          string
+	FaultKey          string
+	ActionName        string
+	Attempt           int
+	Result            string
+	Description       string
+	ContractViolation *runtimeevents.RecoveryActionContractViolation
 }
 
 type RegistryVersion struct {
@@ -920,6 +1142,17 @@ type ReviewContextPacketParams struct {
 type ReviewContextPacketResult struct {
 	Packet   ContextPacket
 	Repeated bool
+}
+
+type ReviewContextPacketAndRecordMemorySummaryParams struct {
+	Review                ReviewContextPacketParams
+	Memory                RecordMemorySummaryParams
+	SourceContextPacketID int64
+}
+
+type ReviewContextPacketAndRecordMemorySummaryResult struct {
+	Review ReviewContextPacketResult
+	Memory *MemorySummary
 }
 
 type ConversationTranscript struct {

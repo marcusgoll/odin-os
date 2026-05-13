@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -85,7 +84,7 @@ func TestFetchEligibleIssuesFiltersReadyOpenIssuesAndSkipsBlockedAndPullRequests
 	}
 }
 
-func TestDryRunTrackerMutationsDoNotWriteToGitHub(t *testing.T) {
+func TestTrackerMutationsFailClosedWithoutCallingGitHub(t *testing.T) {
 	t.Parallel()
 
 	requests := 0
@@ -99,30 +98,34 @@ func TestDryRunTrackerMutationsDoNotWriteToGitHub(t *testing.T) {
 		BaseURL: server.URL,
 		Owner:   "acme",
 		Repo:    "widgets",
-		DryRun:  true,
 	})
 	id := tracker.IssueID{Provider: "github", Repo: "acme/widgets", Number: 7}
 
-	if err := client.MarkInProgress(context.Background(), id); err != nil {
-		t.Fatalf("MarkInProgress() error = %v", err)
-	}
-	if err := client.AddComment(context.Background(), id, "dry run comment"); err != nil {
-		t.Fatalf("AddComment() error = %v", err)
-	}
-	issue, err := client.CreateFollowUpIssue(context.Background(), tracker.FollowUpIssue{
-		Repo:   "acme/widgets",
-		Title:  "Follow up",
-		Body:   "details",
-		Labels: []string{"odin:ready"},
-	})
-	if err != nil {
-		t.Fatalf("CreateFollowUpIssue() error = %v", err)
+	for name, run := range map[string]func() error{
+		"MarkInProgress": func() error { return client.MarkInProgress(context.Background(), id) },
+		"MarkBlocked":    func() error { return client.MarkBlocked(context.Background(), id, "blocked by policy") },
+		"MarkFailed":     func() error { return client.MarkFailed(context.Background(), id, "tests failed") },
+		"MarkReadyForReview": func() error {
+			return client.MarkReadyForReview(context.Background(), id)
+		},
+		"MarkDone":   func() error { return client.MarkDone(context.Background(), id) },
+		"AddComment": func() error { return client.AddComment(context.Background(), id, "comment") },
+		"CreateFollowUpIssue": func() error {
+			_, err := client.CreateFollowUpIssue(context.Background(), tracker.FollowUpIssue{
+				Repo:   "acme/widgets",
+				Title:  "Follow up",
+				Body:   "details",
+				Labels: []string{"odin:ready"},
+			})
+			return err
+		},
+	} {
+		if err := run(); !errors.Is(err, tracker.ErrMutationUnsupported) {
+			t.Fatalf("%s error = %v, want ErrMutationUnsupported", name, err)
+		}
 	}
 	if requests != 0 {
-		t.Fatalf("dry-run requests = %d, want 0", requests)
-	}
-	if issue.Provider != "github" || issue.Repo != "acme/widgets" || issue.Title != "Follow up" {
-		t.Fatalf("dry-run follow-up issue = %#v, want projected issue", issue)
+		t.Fatalf("mutation requests = %d, want 0", requests)
 	}
 }
 
@@ -155,18 +158,13 @@ func TestGitHubErrorsRedactTokenLikeStrings(t *testing.T) {
 	}
 }
 
-func TestLifecycleMarkersUseCanonicalOdinLabelsAndIssueEndpoints(t *testing.T) {
+func TestLifecycleMarkersReturnMutationUnsupported(t *testing.T) {
 	t.Parallel()
 
-	var requests []string
+	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		body, err := io.ReadAll(request.Body)
-		if err != nil {
-			t.Fatalf("ReadAll() error = %v", err)
-		}
-		requests = append(requests, request.Method+" "+request.URL.Path+" "+string(body))
-		response.WriteHeader(http.StatusOK)
-		fmt.Fprint(response, `{}`)
+		requests++
+		t.Fatalf("mutation unexpectedly called GitHub: %s %s", request.Method, request.URL.Path)
 	}))
 	defer server.Close()
 
@@ -186,40 +184,18 @@ func TestLifecycleMarkersUseCanonicalOdinLabelsAndIssueEndpoints(t *testing.T) {
 		"ready_for_review": client.MarkReadyForReview,
 		"done":             client.MarkDone,
 	} {
-		if err := run(context.Background(), id); err != nil {
-			t.Fatalf("%s marker error = %v", name, err)
+		if err := run(context.Background(), id); !errors.Is(err, tracker.ErrMutationUnsupported) {
+			t.Fatalf("%s marker error = %v, want ErrMutationUnsupported", name, err)
 		}
 	}
-
-	wantFragments := []string{
-		`POST /repos/acme/widgets/issues/7/labels {"labels":["odin:running"]}`,
-		`POST /repos/acme/widgets/issues/7/labels {"labels":["odin:blocked"]}`,
-		`POST /repos/acme/widgets/issues/7/comments {"body":"blocked by policy"}`,
-		`POST /repos/acme/widgets/issues/7/labels {"labels":["odin:failed"]}`,
-		`POST /repos/acme/widgets/issues/7/comments {"body":"tests failed"}`,
-		`POST /repos/acme/widgets/issues/7/labels {"labels":["odin:human-review"]}`,
-		`POST /repos/acme/widgets/issues/7/labels {"labels":["odin:done"]}`,
-		`PATCH /repos/acme/widgets/issues/7 {"state":"closed"}`,
-	}
-	for _, want := range wantFragments {
-		if !containsString(requests, want) {
-			t.Fatalf("requests = %#v, want fragment %q", requests, want)
-		}
+	if requests != 0 {
+		t.Fatalf("mutation requests = %d, want 0", requests)
 	}
 }
 
 func containsLabel(labels []string, want string) bool {
 	for _, label := range labels {
 		if label == want {
-			return true
-		}
-	}
-	return false
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
 			return true
 		}
 	}

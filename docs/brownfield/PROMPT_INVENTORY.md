@@ -14,20 +14,20 @@ This inventory covers authored prompt assets, prompt-like registry instructions,
 
 | Path | Name | Role / use case | Inputs | Outputs | Valid | Overlap | Recommendation |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `prompts/templates/agency-builder.md` | Agency builder template | Builder prompt for one Work Item in one worktree. | Work Item context and assigned worktree, once renderer exists. | Structured summary, verification evidence, risks, human handoff state. | Draft-valid Markdown with simple frontmatter; not validated by current registry compiler. | Overlaps `prompts/workers/agency-builder.md`. | Refactor. Keep safety language but choose one canonical builder prompt. |
-| `prompts/workers/agency-builder.md` | Agency builder worker prompt | Worker prompt for build role. | Assigned Work Item, task branch, worktree, constraints. | Changed files, verification run, risks, handoff notes. | Draft-valid Markdown with simple frontmatter; not validated by current registry compiler. | Overlaps `prompts/templates/agency-builder.md`. | Refactor as canonical builder worker prompt if prompt loader is built. |
+| `prompts/templates/agency-builder.md` | Agency builder template | Deprecated duplicate retained for provenance only. | None for renderer dispatch. | Historical structured summary, verification evidence, risks, human handoff state. | Deprecated Markdown with frontmatter pointing to the canonical worker prompt. | Overlaps `prompts/workers/agency-builder.md`. | Do not use for new work; remove only after separate cleanup approval. |
+| `prompts/workers/agency-builder.md` | Agency builder worker prompt | Canonical builder prompt for the current file renderer. | Assigned Work Item, task branch, worktree, constraints. | Changed files, verification run, risks, human handoff state, handoff notes. | Draft-valid Markdown with frontmatter validated by `internal/prompts` tests when rendered as an implementation prompt. | Preserves useful safety wording from `prompts/templates/agency-builder.md`. | Keep as canonical `prompts/workers/<template>.md` builder prompt. |
 | `prompts/workers/agency-qa.md` | Agency QA worker prompt | QA checks and failure reporting. | Requested checks and worker output/artifacts. | Concise handoff summary with failures. | Draft-valid Markdown with simple frontmatter; not validated by current registry compiler. | Overlaps verification model and future QA worker. | Refactor. Tie to `docs/contracts/verification-model.md`. |
 | `prompts/workers/agency-reviewer.md` | Agency review worker prompt | Review worker prompt. | Worker diff/output and verification evidence. | Bugs, regressions, missing tests, policy violations, unclear handoff evidence. | Draft-valid Markdown with simple frontmatter; not validated by current registry compiler. | Overlaps future reviewer agent and code review skills. | Refactor. Preserve human-approval boundary. |
-| `prompts/system/.gitkeep` | Placeholder | Reserves system prompt directory. | None. | None. | Valid placeholder. | None. | Keep until prompt layout decision. |
-| `prompts/templates/.gitkeep` | Placeholder | Reserves template prompt directory. | None. | None. | Valid placeholder. | None. | Keep until prompt layout decision. |
-| `prompts/workers/.gitkeep` | Placeholder | Reserves worker prompt directory. | None. | None. | Valid placeholder. | None. | Keep until prompt layout decision. |
+| `prompts/system/.gitkeep` | Placeholder | Reserves system prompt directory. | None. | None. | Valid placeholder. | None. | Keep until a system-prompt contract exists. |
+| `prompts/templates/.gitkeep` | Placeholder | Reserves template prompt directory. | None. | None. | Valid placeholder. | None. | Keep as an empty provenance/placeholder directory until cleanup approval. |
+| `prompts/workers/.gitkeep` | Placeholder | Reserves worker prompt directory. | None. | None. | Valid placeholder. | None. | Keep with canonical worker prompts. |
 
 ## Prompt Renderers And Prompt-Like Scaffolds
 
 | Path | Purpose | Inputs | Outputs | Valid | Overlap | Recommendation |
 | --- | --- | --- | --- | --- | --- | --- |
-| `internal/prompts/renderer.go` | Go interface for rendering Odin-owned prompt templates into worker prompts. | Template name and `TemplateData` with WorkItemID and Role. | Rendered prompt string. | Compiles as scaffold if included, but is uncommitted and not wired to active runtime. | Overlaps TypeScript prompt renderer and current file-based prompts. | Refactor. Useful seam if connected to canonical prompt directory and executor contract. |
-| `src/prompts/index.ts` | TypeScript prompt renderer scaffold. | `WorkItem` and `RunAttempt` from TS orchestrator types. | Joined role/work item/boundary string. | TypeScript scaffold only; not Go-native. | Overlaps Go prompt renderer and prompt files. | Remove with TypeScript scaffold after explicit cleanup approval. |
+| `internal/prompts/renderer.go` | Go interface for rendering Odin-owned prompt templates into worker prompts. | Template name and `TemplateData` with WorkItemID and Role. | Rendered prompt string. | Compiles and is covered by `internal/prompts` tests; the default file renderer resolves templates from `prompts/workers`. | Current authority for file-based worker prompt rendering. | Keep `prompts/workers/<template>.md` as the canonical layout for rendered worker prompts. |
+| `src/prompts/index.ts` | Removed TypeScript prompt renderer scaffold. | Historical inputs were `WorkItem` and `RunAttempt` from TS orchestrator types. | Prior inventory preserved its useful summary as a joined role/work item/boundary string. | Absent from the current tree; no active TypeScript prompt source remains to migrate. | No active runtime overlap remains. | Keep removed; do not recreate a TypeScript prompt renderer. |
 
 ## Registry Instructions With Prompt Content
 
@@ -65,8 +65,8 @@ Registry assets are not prompt templates, but they include durable instructions 
 
 ## Prompt Consolidation Recommendations
 
-1. Choose one canonical builder prompt: keep either `prompts/templates/agency-builder.md` or `prompts/workers/agency-builder.md`, not both.
-2. Define a prompt frontmatter contract before adding more worker prompts.
-3. Wire prompts through a Go renderer only after the canonical executor role vocabulary is settled.
+1. Canonical builder prompt decision: `prompts/workers/agency-builder.md` is the active builder prompt for the current Go file renderer.
+2. Keep `prompts/templates/agency-builder.md` only as deprecated provenance until a separate cleanup ticket confirms no callers and removal approval.
+3. Continue tightening the prompt frontmatter contract before adding more implementation prompt kinds.
 4. Keep safety boundaries in typed policy and executor launch checks; prompts can repeat them but must not be the only enforcement.
 5. Treat registry assets as authored instructions, not free-form prompt blobs.

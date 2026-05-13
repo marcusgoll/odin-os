@@ -28,6 +28,8 @@ type TaskStatusView struct {
 	ExecutionIntentSource string
 	Status                string
 	Scope                 string
+	CreatedAt             string
+	UpdatedAt             string
 	CurrentRunID          *int64
 	CurrentRunStatus      string
 	NextEligibleAt        string
@@ -59,6 +61,7 @@ type PendingApprovalView struct {
 	ApprovalID    int64   `json:"approval_id"`
 	TaskID        int64   `json:"task_id"`
 	TaskKey       string  `json:"task_key"`
+	WorkKind      string  `json:"work_kind,omitempty"`
 	ProjectKey    string  `json:"project_key"`
 	TaskScope     string  `json:"task_scope"`
 	WorkspaceKey  string  `json:"workspace_key"`
@@ -173,23 +176,25 @@ type BlockedItemView struct {
 }
 
 type IncidentView struct {
-	IncidentID int64
-	RunID      int64
-	TaskID     int64
-	TaskKey    string
-	ProjectKey string
-	Severity   string
-	Status     string
-	Summary    string
-	OpenedAt   string
+	IncidentID  int64
+	RunID       int64
+	TaskID      int64
+	TaskKey     string
+	ProjectKey  string
+	Severity    string
+	Status      string
+	Summary     string
+	DetailsJSON string
+	OpenedAt    string
 }
 
 type RecoveryView struct {
-	RecoveryID int64
-	RunID      int64
-	Status     string
-	Strategy   string
-	StartedAt  string
+	RecoveryID  int64
+	RunID       int64
+	Status      string
+	Strategy    string
+	DetailsJSON string
+	StartedAt   string
 }
 
 type FreshnessView struct {
@@ -352,6 +357,8 @@ func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView
 			COALESCE(t.execution_intent_source, ''),
 			t.status,
 			t.scope,
+			t.created_at,
+			t.updated_at,
 			t.current_run_id,
 			COALESCE(r.status, ''),
 			t.next_eligible_at,
@@ -386,6 +393,8 @@ func ListTaskStatusViews(ctx context.Context, queryer Queryer) ([]TaskStatusView
 			&view.ExecutionIntentSource,
 			&view.Status,
 			&view.Scope,
+			&view.CreatedAt,
+			&view.UpdatedAt,
 			&currentRunID,
 			&view.CurrentRunStatus,
 			&view.NextEligibleAt,
@@ -455,6 +464,7 @@ func ListPendingApprovalViews(ctx context.Context, queryer Queryer) ([]PendingAp
 			a.id,
 			a.task_id,
 			t.key,
+			COALESCE(t.work_kind, ''),
 			p.key,
 			t.scope,
 			COALESCE(w.key, ''),
@@ -485,6 +495,7 @@ func ListPendingApprovalViews(ctx context.Context, queryer Queryer) ([]PendingAp
 			&view.ApprovalID,
 			&view.TaskID,
 			&view.TaskKey,
+			&view.WorkKind,
 			&view.ProjectKey,
 			&view.TaskScope,
 			&view.WorkspaceKey,
@@ -1173,7 +1184,7 @@ func ListStalledRunViews(ctx context.Context, queryer Queryer, cutoff time.Time)
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		JOIN projects p ON p.id = t.project_id
-		WHERE r.status = 'running'
+		WHERE r.status IN ('running', 'executing')
 		  AND r.started_at < ?
 		ORDER BY r.started_at ASC, r.id ASC
 	`, cutoff.UTC().Format(time.RFC3339Nano))
@@ -1450,18 +1461,19 @@ func ListIncidentViews(ctx context.Context, queryer Queryer) ([]IncidentView, er
 	rows, err := queryer.QueryContext(ctx, `
 		SELECT
 			i.id,
-			r.id,
-			t.id,
-			t.key,
-			p.key,
+			COALESCE(r.id, 0),
+			COALESCE(t.id, 0),
+			COALESCE(t.key, ''),
+			COALESCE(p.key, ''),
 			i.severity,
 			i.status,
 			i.summary,
+			i.details_json,
 			i.opened_at
 		FROM incidents i
-		JOIN runs r ON r.id = i.run_id
-		JOIN tasks t ON t.id = r.task_id
-		JOIN projects p ON p.id = t.project_id
+		LEFT JOIN runs r ON r.id = i.run_id
+		LEFT JOIN tasks t ON t.id = r.task_id
+		LEFT JOIN projects p ON p.id = t.project_id
 		ORDER BY i.id ASC
 	`)
 	if err != nil {
@@ -1481,6 +1493,7 @@ func ListIncidentViews(ctx context.Context, queryer Queryer) ([]IncidentView, er
 			&view.Severity,
 			&view.Status,
 			&view.Summary,
+			&view.DetailsJSON,
 			&view.OpenedAt,
 		); err != nil {
 			return nil, err
@@ -1492,7 +1505,7 @@ func ListIncidentViews(ctx context.Context, queryer Queryer) ([]IncidentView, er
 
 func ListRecoveryViews(ctx context.Context, queryer Queryer) ([]RecoveryView, error) {
 	rows, err := queryer.QueryContext(ctx, `
-		SELECT id, COALESCE(run_id, 0), status, strategy, started_at
+		SELECT id, COALESCE(run_id, 0), status, strategy, details_json, started_at
 		FROM recoveries
 		ORDER BY id ASC
 	`)
@@ -1504,7 +1517,7 @@ func ListRecoveryViews(ctx context.Context, queryer Queryer) ([]RecoveryView, er
 	var views []RecoveryView
 	for rows.Next() {
 		var view RecoveryView
-		if err := rows.Scan(&view.RecoveryID, &view.RunID, &view.Status, &view.Strategy, &view.StartedAt); err != nil {
+		if err := rows.Scan(&view.RecoveryID, &view.RunID, &view.Status, &view.Strategy, &view.DetailsJSON, &view.StartedAt); err != nil {
 			return nil, err
 		}
 		views = append(views, view)

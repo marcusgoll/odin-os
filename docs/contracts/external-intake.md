@@ -1,9 +1,6 @@
 # External Intake Contract
 
 `odin-os` accepts normalized external task intake through `odin intake enqueue`.
-That is the legacy task-intake path. Universal Intake v1 external adapters should
-target the raw/source-envelope lane so captured inputs remain reviewable before
-any Work Item is created.
 
 The normalized payload shape is:
 
@@ -33,21 +30,12 @@ Field rules:
 - `requested_by` defaults to `source` when the caller does not supply a more specific actor.
 - `payload` is a required JSON object in the normalized intake envelope.
 
-## Universal Source Envelope
-
-External sources normalize into `source_family`, `external_object_id`, `event_kind`, `observed_at`, `subject`, `body` or `summary`, `actor`, `source_uri`, `evidence_refs`, and namespaced `adapter_facts`.
-
-Source adapters normalize source facts. Odin core owns `dedupe_key`, `dedupe_recipe_version`, lifecycle state, and promotion boundaries.
-
-Raw intake processing may create a Reviewable Intake Proposal. It must not create executable Work Items, Run Attempts, dispatches, approvals, or external mutations by default.
-
 CLI flags:
 
-- Legacy task-intake path: `odin intake enqueue --source <source> --project <key> --title <title> --type <type>`
-- Universal Intake raw lane: `odin intake raw create --text <text> --json`
+- `odin intake enqueue --source <source> --project <key> --title <title> --type <type>`
 - Optional flags: `--action-key`, `--dedup-key`, `--requested-by`, `--payload-file <path|->`, `--json`
 
-Legacy task-intake validation rules:
+Validation rules:
 
 - `--source`, `--project`, `--title`, and `--type` are required.
 - `--dedup-key` must be free of whitespace and control characters.
@@ -55,8 +43,16 @@ Legacy task-intake validation rules:
 - This parser validates file-backed `--payload-file` inputs only; stdin-backed payload validation happens in the intake execution stage.
 - A file-backed `--payload-file` must contain a valid JSON object.
 
-Universal Intake raw-lane validation rules:
+## GitHub `odin:paused` Labels
 
-- `--text` is sufficient for manual raw capture; Odin supplies default source, event kind, and requested-by facts for that operator lane.
-- Raw source-envelope adapters should provide stable source facts when available, but Odin core still derives the dedupe key and lifecycle state.
-- `--project` is optional for raw capture; routing may remain unresolved until processing or operator review.
+Inbound tracker labels are source facts. `odin:paused` does not pause or resume
+runtime work when it appears on an external GitHub issue. The pause/resume
+contract in `docs/contracts/pause-resume.md` keeps runtime pause authority in
+SQLite and permits GitHub labels only as outbound projections or stored external
+evidence.
+
+## External Adapter Rule
+
+External adapter rule:
+
+- External adapters may create Intake Items, external event records, or read-only evidence. They must not create executable Work Items, resolve approvals, send messages, change calendar events, publish content, purchase, delete, deploy, or mutate production systems until a source-specific resolver contract and approval policy are implemented and proven through real `odin` commands.

@@ -58,6 +58,40 @@ func TestAnalyzeFailureClassifiesTestFailuresWithImplementationFollowUp(t *testi
 	}
 }
 
+func TestAnalyzeFailurePrefersTypedFailureCode(t *testing.T) {
+	t.Parallel()
+
+	analysis := recovery.AnalyzeFailure(recovery.FailureInput{
+		Step:                  "codex_run",
+		TicketTitle:           "Run implementation",
+		ExistingBehaviorKnown: true,
+		ErrorText:             "ambiguous executor failure",
+		Code:                  recovery.FailureCodeTestFailure,
+	})
+
+	if analysis.Category != recovery.FailureTestFailure {
+		t.Fatalf("Category = %q, want %q", analysis.Category, recovery.FailureTestFailure)
+	}
+	if analysis.NextStepTarget != recovery.NextStepImplementation {
+		t.Fatalf("NextStepTarget = %q, want implementation", analysis.NextStepTarget)
+	}
+}
+
+func TestAnalyzeFailureFallsBackToStringClassificationWithoutCode(t *testing.T) {
+	t.Parallel()
+
+	analysis := recovery.AnalyzeFailure(recovery.FailureInput{
+		Step:                  "codex_run",
+		TicketTitle:           "Run implementation",
+		ExistingBehaviorKnown: true,
+		ErrorText:             "go test ./internal/runtime/jobs failed",
+	})
+
+	if analysis.Category != recovery.FailureTestFailure {
+		t.Fatalf("Category = %q, want %q", analysis.Category, recovery.FailureTestFailure)
+	}
+}
+
 func TestAnalyzeFailureClassifiesUnsafeShimBeforeUnknown(t *testing.T) {
 	t.Parallel()
 

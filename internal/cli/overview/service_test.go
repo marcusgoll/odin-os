@@ -14,6 +14,7 @@ import (
 	coreprojects "odin-os/internal/core/projects"
 	knowledgememory "odin-os/internal/memory/knowledge"
 	"odin-os/internal/registry"
+	runtimeknowledge "odin-os/internal/runtime/knowledge"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -45,23 +46,22 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 		t.Fatalf("CreateTaskIntake() error = %v", err)
 	}
 	notificationsEnabled := true
-	batching := "quiet_hours"
 	quietHours := "22:00-07:00"
-	if _, err := (coreprofile.Service{Store: env.store, WorkspaceKey: coreprofile.DefaultWorkspaceKey}).Update(ctx, coreprofile.UpdateParams{
-		QuietHours:           &quietHours,
+	batching := "quiet_hours"
+	if _, err := (coreprofile.Service{Store: env.store}).Update(ctx, coreprofile.UpdateParams{
 		NotificationsEnabled: &notificationsEnabled,
+		QuietHours:           &quietHours,
 		NotificationBatching: &batching,
 	}); err != nil {
-		t.Fatalf("profile.Update(notifications) error = %v", err)
+		t.Fatalf("profile Update(notifications) error = %v", err)
 	}
 	if _, err := env.store.UpsertNotificationDevice(ctx, sqlite.UpsertNotificationDeviceParams{
 		WorkspaceID: env.workspaceID,
-		DeviceKey:   "iphone-home-screen",
-		Label:       "iPhone Home Screen",
-		Endpoint:    "https://push.example.test/overview",
+		DeviceKey:   "desktop",
+		Label:       "Desktop",
+		Endpoint:    "https://push.example.test/desktop",
 		P256DH:      "public",
 		Auth:        "auth",
-		UserAgent:   "test",
 	}); err != nil {
 		t.Fatalf("UpsertNotificationDevice() error = %v", err)
 	}
@@ -83,9 +83,6 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	if view.Workspace.WorkspaceKey != "default" {
 		t.Fatalf("Workspace key = %q, want default", view.Workspace.WorkspaceKey)
 	}
-	if view.Notifications.Wiring != WiringLive || !view.Notifications.NotificationsEnabled || view.Notifications.ActiveDeviceCount != 1 || view.Notifications.QuietHours != quietHours || view.Notifications.Batching != batching {
-		t.Fatalf("Notifications lane = %+v, want enabled quiet-hours projection with one active device", view.Notifications)
-	}
 	if len(view.Initiatives) != 1 {
 		t.Fatalf("Initiatives len = %d, want 1", len(view.Initiatives))
 	}
@@ -103,6 +100,28 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	}
 	if view.CapabilityCatalog.ToolCount == 0 {
 		t.Fatalf("Tool count = 0, want builtin tools")
+	}
+	if view.CapabilityTruth.AuthoredAssetCount <= view.CapabilityCatalog.AgentDefinitionCount {
+		t.Fatalf("CapabilityTruth.AuthoredAssetCount = %d, want registry assets plus builtin tools", view.CapabilityTruth.AuthoredAssetCount)
+	}
+	if view.CapabilityTruth.AuthoredInventory.AgentDefinitionCount != view.CapabilityCatalog.AgentDefinitionCount {
+		t.Fatalf("Capability truth agent inventory = %d, want catalog agent definitions %d", view.CapabilityTruth.AuthoredInventory.AgentDefinitionCount, view.CapabilityCatalog.AgentDefinitionCount)
+	}
+	if view.CapabilityTruth.RuntimeProvenCount != 0 {
+		t.Fatalf("CapabilityTruth.RuntimeProvenCount = %d, want 0 for authored-only registry fixture", view.CapabilityTruth.RuntimeProvenCount)
+	}
+	var agentTruth *CapabilityTruthSummary
+	for index := range view.CapabilityTruth.Items {
+		if view.CapabilityTruth.Items[index].Key == "finance-advisor" {
+			agentTruth = &view.CapabilityTruth.Items[index]
+			break
+		}
+	}
+	if agentTruth == nil {
+		t.Fatalf("Capability truth items missing finance-advisor: %+v", view.CapabilityTruth.Items)
+	}
+	if agentTruth.TruthLevel != "authored_asset" || agentTruth.CountsAsImplemented {
+		t.Fatalf("finance-advisor truth = %+v, want authored_asset not counted as implemented", *agentTruth)
 	}
 	if len(view.WorkItems) != 1 {
 		t.Fatalf("Work items len = %d, want 1", len(view.WorkItems))
@@ -190,122 +209,39 @@ func TestBuildReturnsCanonicalOverviewFromCurrentAuthority(t *testing.T) {
 	if trigger.NextDueAt != "2026-04-25T09:00:00Z" {
 		t.Fatalf("Automation trigger next due = %q, want 2026-04-25T09:00:00Z", trigger.NextDueAt)
 	}
+	if view.Notifications.Wiring != WiringLive || !view.Notifications.NotificationsEnabled || view.Notifications.ActiveDeviceCount != 1 || view.Notifications.QuietHours != quietHours || view.Notifications.Batching != batching {
+		t.Fatalf("Notifications lane = %+v, want live enabled lane with one device", view.Notifications)
+	}
 }
 
-func TestOverviewIntakeInboxMapsCompatibilityStatuses(t *testing.T) {
+func TestBuildIncludesBrowserEvidenceInObservabilityLane(t *testing.T) {
 	ctx := context.Background()
 	env := newOverviewTestEnvironment(t)
-
-	statuses := []struct {
-		name    string
-		status  string
-		subject string
-	}{
-		{name: "duplicate", status: "duplicate_linked_or_suppressed", subject: "Duplicate proposal"},
-		{name: "canonical_duplicate", status: "duplicate_linked", subject: "Canonical duplicate proposal"},
-		{name: "accepted", status: "accepted", subject: "Accepted proposal"},
-		{name: "canonical_accepted", status: "accepted_for_promotion", subject: "Canonical accepted proposal"},
-		{name: "approval_required", status: "approval_required", subject: "Approval required proposal"},
-		{name: "rejected", status: "rejected", subject: "Rejected proposal"},
-		{name: "approval_denied", status: "approval_denied", subject: "Approval denied proposal"},
-		{name: "archived", status: "archived", subject: "Archived proposal"},
-	}
-	for _, entry := range statuses {
-		if _, err := env.store.CreateIntakeItem(ctx, sqlite.CreateIntakeItemParams{
-			WorkspaceID:         "default",
-			SourceFamily:        "cli",
-			EventKind:           "request",
-			Subject:             entry.subject,
-			DedupeKey:           "overview-alias-" + entry.name,
-			DedupeRecipeVersion: "test-v1",
-			SourceFactsJSON:     `{}`,
-			Status:              entry.status,
-			Scope:               "project",
-			ScopeKey:            "alpha",
-			Summary:             entry.subject,
-		}); err != nil {
-			t.Fatalf("CreateIntakeItem(%s) error = %v", entry.name, err)
-		}
+	if _, err := env.store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        env.runID,
+		ArtifactType: "browser_evidence",
+		Summary:      "Browser evidence summary",
+		DetailsJSON:  `{"page_title":"Docs","url":"https://example.com/docs","selected_links":[{"text":"Docs","url":"https://example.com/docs"}],"confidence":"deterministic_test","limitations":["fixture"]}`,
+	}); err != nil {
+		t.Fatalf("RecordRunArtifact() error = %v", err)
 	}
 
 	view, err := Service{
 		Store:            env.store,
 		RegistrySnapshot: env.snapshot,
-		Now:              time.Now,
 	}.Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	if view.IntakeInbox.DuplicateLinkedCount != 2 {
-		t.Fatalf("DuplicateLinkedCount = %d, want 2", view.IntakeInbox.DuplicateLinkedCount)
+	if len(view.Observability.BrowserEvidence) != 1 {
+		t.Fatalf("BrowserEvidence len = %d, want 1", len(view.Observability.BrowserEvidence))
 	}
-	if view.IntakeInbox.AcceptedCount != 2 {
-		t.Fatalf("AcceptedCount = %d, want 2", view.IntakeInbox.AcceptedCount)
+	evidence := view.Observability.BrowserEvidence[0]
+	if evidence.RunID != env.runID || evidence.TaskID != env.taskID || evidence.WorkItemKey != "alpha-task" || evidence.Confidence != "deterministic_test" {
+		t.Fatalf("BrowserEvidence = %+v, want alpha-task deterministic evidence", evidence)
 	}
-	if view.IntakeInbox.ReviewRequiredCount != 1 {
-		t.Fatalf("ReviewRequiredCount = %d, want approval_required to map to review_required", view.IntakeInbox.ReviewRequiredCount)
-	}
-	if view.IntakeInbox.ReviewQueueCount != 2 {
-		t.Fatalf("ReviewQueueCount = %d, want only literal review-list statuses", view.IntakeInbox.ReviewQueueCount)
-	}
-	if view.IntakeInbox.IntakeApprovalRequiredCount != 1 {
-		t.Fatalf("IntakeApprovalRequiredCount = %d, want approval_required compatibility count", view.IntakeInbox.IntakeApprovalRequiredCount)
-	}
-	if view.IntakeInbox.RejectedCount != 1 {
-		t.Fatalf("RejectedCount = %d, want rejected compatibility count", view.IntakeInbox.RejectedCount)
-	}
-	if view.IntakeInbox.ApprovalDeniedCount != 1 {
-		t.Fatalf("ApprovalDeniedCount = %d, want approval_denied compatibility count", view.IntakeInbox.ApprovalDeniedCount)
-	}
-	if view.IntakeInbox.ArchivedCount != 3 {
-		t.Fatalf("ArchivedCount = %d, want archived canonical count for archived/rejected/approval_denied", view.IntakeInbox.ArchivedCount)
-	}
-}
-
-func TestRawIntakeSummaryReadsSourceEnvelopeFacts(t *testing.T) {
-	item := sqlite.IntakeItem{
-		ID:              7,
-		SourceFamily:    "operator",
-		EventKind:       "request",
-		DedupeKey:       "odin-intake:abc",
-		Subject:         "Capture governed intake",
-		Status:          "received",
-		Summary:         "Capture governed intake",
-		CreatedAt:       time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
-		UpdatedAt:       time.Date(2026, 5, 10, 12, 1, 0, 0, time.UTC),
-		SourceFactsJSON: `{"source_family":"operator","event_kind":"request","actor":"operator","adapter_facts":{"operator":{"requested_by":"codex","payload_policy":"stored_in_source_facts_json"}}}`,
-	}
-
-	summary := rawIntakeSummary(item)
-
-	if summary.RequestedBy != "codex" {
-		t.Fatalf("RequestedBy = %q, want adapter requested_by", summary.RequestedBy)
-	}
-	if summary.PayloadPolicy != "stored_in_source_facts_json" {
-		t.Fatalf("PayloadPolicy = %q, want adapter payload policy", summary.PayloadPolicy)
-	}
-}
-
-func TestRawIntakeSummaryPreservesTopLevelSourceFactsCompatibility(t *testing.T) {
-	item := sqlite.IntakeItem{
-		ID:              7,
-		SourceFamily:    "operator",
-		EventKind:       "request",
-		DedupeKey:       "governed-intake:1",
-		Subject:         "Capture governed intake",
-		Status:          "received",
-		CreatedAt:       time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
-		UpdatedAt:       time.Date(2026, 5, 10, 12, 1, 0, 0, time.UTC),
-		SourceFactsJSON: `{"requested_by":"codex","payload_policy":"stored_in_source_facts_json"}`,
-	}
-
-	summary := rawIntakeSummary(item)
-
-	if summary.RequestedBy != "codex" {
-		t.Fatalf("RequestedBy = %q, want top-level requested_by", summary.RequestedBy)
-	}
-	if summary.PayloadPolicy != "stored_in_source_facts_json" {
-		t.Fatalf("PayloadPolicy = %q, want top-level payload policy", summary.PayloadPolicy)
+	if len(evidence.SelectedLinks) != 1 || evidence.SelectedLinks[0].URL != "https://example.com/docs" {
+		t.Fatalf("SelectedLinks = %+v, want docs link", evidence.SelectedLinks)
 	}
 }
 
@@ -335,6 +271,175 @@ func TestBuildWorkItemsExposeBlockedReason(t *testing.T) {
 	}
 	if view.WorkItems[0].BlockedReason != "mutation_requires_isolated_worktree" {
 		t.Fatalf("Work item blocked reason = %q, want mutation_requires_isolated_worktree", view.WorkItems[0].BlockedReason)
+	}
+}
+
+func TestOverviewShowsUnifiedReviewAndDecisionCounts(t *testing.T) {
+	ctx := context.Background()
+	env := newOverviewTestEnvironment(t)
+	seedOverviewReviewFixture(t, ctx, env)
+
+	view, err := Service{
+		Store:            env.store,
+		RegistrySnapshot: env.snapshot,
+	}.Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if view.ReviewQueue.Wiring != WiringLive {
+		t.Fatalf("ReviewQueue wiring = %q, want live", view.ReviewQueue.Wiring)
+	}
+	if view.ReviewQueue.IntakeCount != 2 {
+		t.Fatalf("ReviewQueue.IntakeCount = %d, want 2", view.ReviewQueue.IntakeCount)
+	}
+	if view.ReviewQueue.ApprovalCount != 1 {
+		t.Fatalf("ReviewQueue.ApprovalCount = %d, want 1", view.ReviewQueue.ApprovalCount)
+	}
+	if view.ReviewQueue.KnowledgeCount != 1 {
+		t.Fatalf("ReviewQueue.KnowledgeCount = %d, want 1", view.ReviewQueue.KnowledgeCount)
+	}
+	if view.ReviewQueue.SkillArtifactCount != 1 {
+		t.Fatalf("ReviewQueue.SkillArtifactCount = %d, want 1", view.ReviewQueue.SkillArtifactCount)
+	}
+	if view.ReviewQueue.FailedWorkCount != 1 {
+		t.Fatalf("ReviewQueue.FailedWorkCount = %d, want 1", view.ReviewQueue.FailedWorkCount)
+	}
+	if view.ReviewQueue.TotalCount != 6 {
+		t.Fatalf("ReviewQueue.TotalCount = %d, want 6", view.ReviewQueue.TotalCount)
+	}
+}
+
+func TestBuildSummarizesActualUseReadinessAndSourceAlignment(t *testing.T) {
+	ctx := context.Background()
+	env := newOverviewTestEnvironment(t)
+	seedOverviewReviewFixture(t, ctx, env)
+	env.snapshot.Items = append(env.snapshot.Items, registry.Item{
+		Kind:  registry.KindWorkflow,
+		Key:   "delivery-profile-fixture",
+		Title: "Delivery Profile Fixture",
+		Tags:  []string{"delivery_profile"},
+	})
+
+	if _, err := env.store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:             env.projectID,
+		Key:                   "explicit-intent-task",
+		Title:                 "Explicit intent task",
+		Status:                "queued",
+		Scope:                 "project",
+		RequestedBy:           "test",
+		ExecutionIntent:       "deliver_with_evidence",
+		ExecutionIntentSource: "test",
+	}); err != nil {
+		t.Fatalf("CreateTask(explicit intent) error = %v", err)
+	}
+
+	view, err := (Service{
+		Store:            env.store,
+		RegistrySnapshot: env.snapshot,
+		ReadinessStatus:  "ready",
+		HealthStatus:     "healthy",
+		BinaryPath:       "/tmp/odin/bin/odin",
+		SourceRoot:       "/tmp/odin",
+	}).Build(ctx, scope.Resolution{})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if view.Readiness.Status != "ready" || view.Readiness.HealthStatus != "healthy" || !view.Readiness.Ready {
+		t.Fatalf("Readiness = %+v, want ready healthy", view.Readiness)
+	}
+	if view.ActualUse.Wiring != WiringLive || view.ActualUse.ReviewQueueCount != view.ReviewQueue.TotalCount || view.ActualUse.ActionRequiredCount < view.ReviewQueue.TotalCount {
+		t.Fatalf("ActualUse = %+v, ReviewQueue = %+v, want live review/action summary", view.ActualUse, view.ReviewQueue)
+	}
+	if view.ActualUse.PendingApprovalCount != 1 || view.ActualUse.BlockedWorkItemCount != 1 || view.ActualUse.FailedWorkItemCount != 1 {
+		t.Fatalf("ActualUse = %+v, want pending approval, blocked work, and failed work counts", view.ActualUse)
+	}
+	if view.ActualUse.WorkItemCount < view.ActualUse.OpenWorkItemCount+view.ActualUse.FailedWorkItemCount {
+		t.Fatalf("ActualUse = %+v, want work item count to include open and failed action-required work", view.ActualUse)
+	}
+	if view.DeliveryProfiles.ProfileCount != 1 || view.ActualUse.DeliveryProfileCount != 1 {
+		t.Fatalf("DeliveryProfiles = %+v ActualUse = %+v, want delivery profile count", view.DeliveryProfiles, view.ActualUse)
+	}
+	if view.ExecutionIntent.ExplicitWorkItemCount != 1 || view.ExecutionIntent.FallbackWorkItemCount == 0 {
+		t.Fatalf("ExecutionIntent = %+v, want explicit and fallback work item counts", view.ExecutionIntent)
+	}
+	if view.BinarySource.Status != "aligned" {
+		t.Fatalf("BinarySource = %+v, want aligned source/binary status", view.BinarySource)
+	}
+}
+
+func seedOverviewReviewFixture(t *testing.T, ctx context.Context, env overviewTestEnvironment) {
+	t.Helper()
+
+	for _, item := range []struct {
+		externalID string
+		subject    string
+		status     string
+	}{
+		{externalID: "review-intake", subject: "Review an intake item", status: "review_required"},
+		{externalID: "approval-intake", subject: "Approve an intake item", status: "approval_required"},
+	} {
+		if _, err := env.store.CreateIntakeItem(ctx, sqlite.CreateIntakeItemParams{
+			WorkspaceID:         "default",
+			SourceFamily:        "operator",
+			ExternalObjectID:    item.externalID,
+			EventKind:           "request",
+			Subject:             item.subject,
+			DedupeKey:           item.externalID,
+			DedupeRecipeVersion: "test",
+			SourceFactsJSON:     `{}`,
+			Status:              item.status,
+			Scope:               "project",
+			ScopeKey:            "alpha",
+			Summary:             item.subject,
+		}); err != nil {
+			t.Fatalf("CreateIntakeItem(%s) error = %v", item.externalID, err)
+		}
+	}
+	if _, err := env.store.CreateSkillArtifact(ctx, sqlite.CreateSkillArtifactParams{
+		SkillKey:         "review-fixture-skill",
+		Scope:            "project",
+		ProjectID:        &env.projectID,
+		Status:           "review_required",
+		ArtifactType:     "proposal",
+		Summary:          "Review fixture skill artifact",
+		OutputJSON:       `{"title":"Review fixture skill artifact"}`,
+		RawOutput:        `{"title":"Review fixture skill artifact"}`,
+		HandlerRef:       "fixture",
+		ExecutionProfile: "test",
+		PermissionsJSON:  `[]`,
+	}); err != nil {
+		t.Fatalf("CreateSkillArtifact() error = %v", err)
+	}
+
+	contextTask, err := env.store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   env.projectID,
+		Key:         "context-task",
+		Title:       "Context task",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(context) error = %v", err)
+	}
+	if _, err := (runtimeknowledge.Service{Store: env.store}).ProposeContextPack(ctx, runtimeknowledge.ContextPackParams{
+		TaskRef:    contextTask.Key,
+		ProjectKey: "alpha",
+	}); err != nil {
+		t.Fatalf("ProposeContextPack() error = %v", err)
+	}
+
+	if _, err := env.store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   env.projectID,
+		Key:         "failed-task",
+		Title:       "Failed task",
+		Status:      "failed",
+		Scope:       "project",
+		RequestedBy: "test",
+	}); err != nil {
+		t.Fatalf("CreateTask(failed) error = %v", err)
 	}
 }
 

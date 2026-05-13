@@ -43,6 +43,18 @@ PY
 		_ = os.RemoveAll(driverDir)
 		os.Exit(1)
 	}
+	if err := os.Setenv("ODIN_ENV_FILE", filepath.Join(driverDir, "missing-odin-os.env")); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "set ODIN_ENV_FILE: %v\n", err)
+		_ = os.RemoveAll(driverDir)
+		os.Exit(1)
+	}
+	if os.Getenv("ODIN_SQLITE_FAST_TEST_PRAGMAS") == "" {
+		if err := os.Setenv("ODIN_SQLITE_FAST_TEST_PRAGMAS", "1"); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "set ODIN_SQLITE_FAST_TEST_PRAGMAS: %v\n", err)
+			_ = os.RemoveAll(driverDir)
+			os.Exit(1)
+		}
+	}
 
 	code := m.Run()
 	_ = os.RemoveAll(driverDir)

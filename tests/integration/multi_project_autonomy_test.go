@@ -444,6 +444,10 @@ func (git *recordingGitAdapter) RemoveWorktree(context.Context, string, string) 
 	return nil
 }
 
+func (git *recordingGitAdapter) WorktreeDirty(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 func findWorktreeLeaseByTaskID(leases []sqlite.WorktreeLease, taskID int64) (sqlite.WorktreeLease, bool) {
 	for _, lease := range leases {
 		if lease.TaskID == taskID {

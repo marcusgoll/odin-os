@@ -11,7 +11,8 @@ date: 2026-04-30
 Odin-OS has one active registry skill, one active registry agent, several active workflow/command registry assets, a working planner service, thin shell scripts, and a large legacy migration inventory. It also has uncommitted agency scaffold assets that duplicate existing Go seams:
 
 - `internal/runner` duplicates `internal/executors`.
-- `internal/workspace` duplicates `internal/vcs`.
+- The historical `internal/workspace` duplicate is removed; `internal/vcs`
+  remains canonical.
 - `internal/agents/roles.go` duplicates executor task kinds and worker directories.
 - `src/*`, `package.json`, and prompt scaffolds duplicate the Go-native target.
 - `config/agency.example.yaml` and `configs/*.yaml` duplicate the active `config/` root.
@@ -40,8 +41,8 @@ Odin-OS has one active registry skill, one active registry agent, several active
 
 ### Refactor
 
-- `prompts/workers/*.md` and `prompts/templates/agency-builder.md`: choose one prompt layout and add a prompt contract.
-- `internal/prompts/renderer.go`: keep only if wired to canonical prompt assets.
+- `prompts/workers/*.md` and `prompts/templates/agency-builder.md`: keep `prompts/workers/<template>.md` as the canonical rendered worker prompt layout; add a fuller prompt contract before expanding prompt kinds.
+- `internal/prompts/renderer.go`: keep wired to canonical worker prompt assets.
 - `internal/security/policy.go`: move enforcement into the canonical executor launch path before real subprocess execution.
 - `scripts/dev/install-systemd-service.sh`: add hardening review before production use.
 - high-value migration drafts such as `odin-control-plane-contract-checks`, `odin-github-auth-boundaries`, and `incident-commander`: rewrite into current contracts or registry entries.
@@ -50,7 +51,8 @@ Odin-OS has one active registry skill, one active registry agent, several active
 
 - `internal/runner/*`: replace with `internal/executors` implementations.
 - `internal/tracker/github`: replace/refactor into one canonical GitHub intake adapter after package root decision.
-- `internal/workspace/manager.go`: replace with `internal/vcs` leases/worktrees.
+- Historical `internal/workspace/manager.go`: removed; keep using
+  `internal/vcs` leases/worktrees.
 - `configs/*.yaml` and `config/agency.example.yaml`: merge useful examples into the active `config/` convention or remove.
 
 ### Remove
@@ -88,18 +90,21 @@ Use one vocabulary across registry, prompts, workers, and executors:
    - Keep real `codex exec` future work behind `internal/executors/contract`.
 
 4. **Collapse workspace seam**
-   - Replace `internal/workspace/manager.go` concept with `internal/vcs` worktree leases.
+   - Keep the removed `internal/workspace/manager.go` concept collapsed into
+     `internal/vcs` worktree leases.
    - Add characterization tests before changing lease behavior.
 
-5. **Decide prompt layout**
-   - Choose `prompts/workers/` or `prompts/templates/` as canonical, add a prompt contract, and remove duplicate builder prompt after approval.
+5. **Tighten prompt contract**
+   - Keep `prompts/workers/` as canonical for rendered worker prompts, add a fuller prompt contract, and remove duplicate builder prompt only after separate approval.
 
 6. **Promote only one migration skill**
    - Start with `odin-control-plane-contract-checks`.
    - Rewrite into current `docs/contracts/` or `registry/skills/`; do not copy legacy source directly.
 
-7. **Define GitHub intake adapter root**
-   - Pick one package root and remove placeholder duplication.
+7. **Preserve the GitHub intake adapter root**
+   - Use `internal/tracker` for GitHub issue/PR tracker behavior and keep
+     `internal/adapters/github` empty unless a later ADR assigns a non-tracker
+     responsibility.
    - Keep GitHub read-only until approval gates and tokens are reviewed.
 
 8. **Add executor security review contract**

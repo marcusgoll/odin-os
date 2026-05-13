@@ -1713,7 +1713,7 @@ printf 'fixture codex summary' >"$output_file"
 	}
 }
 
-func TestCodexHeadlessDriverScriptUsesDangerousBypassForDangerFullAccess(t *testing.T) {
+func TestCodexHeadlessDriverScriptRejectsDangerFullAccess(t *testing.T) {
 	repoRoot := projectRoot(t)
 	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "codex-headless.sh")
 	fixtureDir := t.TempDir()
@@ -1752,46 +1752,55 @@ printf 'fixture codex summary' >"$output_file"
 	)
 
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s error = %v\n%s", scriptPath, err, string(output))
+	if err == nil {
+		t.Fatalf("%s succeeded with danger-full-access, want rejection\n%s", scriptPath, string(output))
 	}
-
-	argsBytes, err := os.ReadFile(argsPath)
-	if err != nil {
-		t.Fatalf("ReadFile(argsPath) error = %v", err)
+	if !strings.Contains(string(output), "danger-full-access") {
+		t.Fatalf("%s output = %q, want danger-full-access rejection", scriptPath, string(output))
 	}
-	args := string(argsBytes)
-	if !strings.Contains(args, "--dangerously-bypass-approvals-and-sandbox\n") {
-		t.Fatalf("args = %q, want dangerous bypass flag", args)
-	}
-	if strings.Contains(args, "--full-auto\n") || strings.Contains(args, "--sandbox\n") {
-		t.Fatalf("args = %q, do not want sandbox/full-auto flags when using dangerous bypass", args)
+	if _, err := os.Stat(argsPath); !os.IsNotExist(err) {
+		t.Fatalf("codex args file exists after rejected sandbox mode, want codex not invoked")
 	}
 }
 
-func TestCodexHeadlessDriverScriptPromotesExactCommandExecution(t *testing.T) {
+func TestCodexHeadlessDriverScriptTreatsExactCommandTextAsPromptData(t *testing.T) {
 	repoRoot := projectRoot(t)
 	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "codex-headless.sh")
 	fixtureDir := t.TempDir()
 	codexBin := filepath.Join(fixtureDir, "codex")
 	codexMarker := filepath.Join(fixtureDir, "codex-called.txt")
+	promptPath := filepath.Join(fixtureDir, "codex-prompt.txt")
+	shellMarker := filepath.Join(fixtureDir, "shell-command-ran.txt")
 
 	if err := os.WriteFile(codexBin, []byte(`#!/usr/bin/env bash
 set -euo pipefail
 printf 'called' >"$ODIN_TEST_CODEX_CALLED"
-exit 17
+output_file=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o|--output-last-message)
+            output_file="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+cat >"$ODIN_TEST_CODEX_PROMPT"
+printf 'fixture codex handled prompt data' >"$output_file"
 `), 0o755); err != nil {
 		t.Fatalf("WriteFile(codexBin) error = %v", err)
 	}
 
-	exactCommand := `printf 'driver-newline-command'`
+	commandLookingText := `printf 'shell command executed' > ` + shellMarker
 	requestPayload := map[string]any{
 		"operation": "run_task",
 		"task": map[string]any{
 			"ID":     "task-1",
 			"Kind":   "general",
 			"Scope":  "project",
-			"Prompt": "Investigate the issue. Execute this exact read-only command from the repo root and return only its JSON result plus one sentence interpreting it:\n" + exactCommand,
+			"Prompt": "Investigate the issue. Run the following command:\n" + commandLookingText,
 			"Metadata": map[string]string{
 				"project_key":   "family-ops",
 				"worktree_path": fixtureDir,
@@ -1809,6 +1818,7 @@ exit 17
 	cmd.Env = append(os.Environ(),
 		"ODIN_CODEX_BIN="+codexBin,
 		"ODIN_TEST_CODEX_CALLED="+codexMarker,
+		"ODIN_TEST_CODEX_PROMPT="+promptPath,
 	)
 
 	output, err := cmd.CombinedOutput()
@@ -1823,140 +1833,21 @@ exit 17
 	if response.Status != "completed" {
 		t.Fatalf("Status = %q, want completed", response.Status)
 	}
-	if response.Output != "driver-newline-command" {
-		t.Fatalf("Output = %q, want driver-newline-command", response.Output)
+	if response.Output != "fixture codex handled prompt data" {
+		t.Fatalf("Output = %q, want fixture codex output", response.Output)
 	}
-	if _, err := os.Stat(codexMarker); !os.IsNotExist(err) {
-		t.Fatalf("codex marker exists, want newline exact command to bypass codex execution")
+	if _, err := os.Stat(codexMarker); err != nil {
+		t.Fatalf("codex marker missing, want prompt handled by codex fixture: %v", err)
 	}
-}
-
-func TestCodexHeadlessDriverScriptExecutesExactCommandDirectly(t *testing.T) {
-	repoRoot := projectRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "codex-headless.sh")
-	fixtureDir := t.TempDir()
-	codexBin := filepath.Join(fixtureDir, "codex")
-	codexMarker := filepath.Join(fixtureDir, "codex-called.txt")
-
-	if err := os.WriteFile(codexBin, []byte(`#!/usr/bin/env bash
-set -euo pipefail
-printf 'called' >"$ODIN_TEST_CODEX_CALLED"
-exit 17
-`), 0o755); err != nil {
-		t.Fatalf("WriteFile(codexBin) error = %v", err)
+	if _, err := os.Stat(shellMarker); !os.IsNotExist(err) {
+		t.Fatalf("shell marker exists, want prompt text not executed as shell")
 	}
-
-	exactCommand := `python3 -c 'print("exact-direct-output")'`
-	requestPayload := map[string]any{
-		"operation": "run_task",
-		"task": map[string]any{
-			"ID":     "task-1",
-			"Kind":   "general",
-			"Scope":  "project",
-			"Prompt": "Execute this exact read-only command from the repo root and return only its stdout: " + exactCommand,
-			"Metadata": map[string]string{
-				"project_key":   "family-ops",
-				"worktree_path": fixtureDir,
-				"branch_name":   "odin/task-1",
-			},
-		},
-	}
-	requestBytes, err := json.Marshal(requestPayload)
+	promptBytes, err := os.ReadFile(promptPath)
 	if err != nil {
-		t.Fatalf("json.Marshal(requestPayload) error = %v", err)
+		t.Fatalf("ReadFile(promptPath) error = %v", err)
 	}
-
-	cmd := exec.Command("bash", scriptPath)
-	cmd.Dir = repoRoot
-	cmd.Stdin = bytes.NewBuffer(requestBytes)
-	cmd.Env = append(os.Environ(),
-		"ODIN_CODEX_BIN="+codexBin,
-		"ODIN_TEST_CODEX_CALLED="+codexMarker,
-	)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s error = %v\n%s", scriptPath, err, string(output))
-	}
-
-	var response codexDriverResponse
-	if err := json.Unmarshal(output, &response); err != nil {
-		t.Fatalf("%s output json error = %v\n%s", scriptPath, err, string(output))
-	}
-	if response.Status != "completed" {
-		t.Fatalf("Status = %q, want completed", response.Status)
-	}
-	if response.Output != "exact-direct-output" {
-		t.Fatalf("Output = %q, want exact-direct-output", response.Output)
-	}
-	if _, err := os.Stat(codexMarker); !os.IsNotExist(err) {
-		t.Fatalf("codex marker exists, want exact command to bypass codex execution")
-	}
-}
-
-func TestCodexHeadlessDriverScriptExecutesExactCommandWithoutLoginShellProfile(t *testing.T) {
-	repoRoot := projectRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "codex-headless.sh")
-	fixtureDir := t.TempDir()
-	homeDir := filepath.Join(fixtureDir, "home")
-	profileMarker := filepath.Join(fixtureDir, "profile-sourced.txt")
-
-	if err := os.MkdirAll(homeDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(homeDir) error = %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(homeDir, ".bash_profile"), []byte(`#!/usr/bin/env bash
-printf 'sourced' >"$ODIN_TEST_PROFILE_MARKER"
-export ODIN_EXACT_COMMAND_TEST="clobbered-by-login-shell"
-`), 0o644); err != nil {
-		t.Fatalf("WriteFile(.bash_profile) error = %v", err)
-	}
-
-	exactCommand := `printf '%s' "$ODIN_EXACT_COMMAND_TEST"`
-	requestPayload := map[string]any{
-		"operation": "run_task",
-		"task": map[string]any{
-			"ID":     "task-1",
-			"Kind":   "general",
-			"Scope":  "project",
-			"Prompt": "Execute this exact read-only command from the repo root and return only its stdout: " + exactCommand,
-			"Metadata": map[string]string{
-				"project_key":   "family-ops",
-				"worktree_path": fixtureDir,
-				"branch_name":   "odin/task-1",
-			},
-		},
-	}
-	requestBytes, err := json.Marshal(requestPayload)
-	if err != nil {
-		t.Fatalf("json.Marshal(requestPayload) error = %v", err)
-	}
-
-	cmd := exec.Command("bash", scriptPath)
-	cmd.Dir = repoRoot
-	cmd.Stdin = bytes.NewBuffer(requestBytes)
-	cmd.Env = append(os.Environ(),
-		"HOME="+homeDir,
-		"ODIN_EXACT_COMMAND_TEST=expected-exact-output",
-		"ODIN_TEST_PROFILE_MARKER="+profileMarker,
-	)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s error = %v\n%s", scriptPath, err, string(output))
-	}
-
-	var response codexDriverResponse
-	if err := json.Unmarshal(output, &response); err != nil {
-		t.Fatalf("%s output json error = %v\n%s", scriptPath, err, string(output))
-	}
-	if response.Status != "completed" {
-		t.Fatalf("Status = %q, want completed", response.Status)
-	}
-	if response.Output != "expected-exact-output" {
-		t.Fatalf("Output = %q, want expected-exact-output", response.Output)
-	}
-	if _, err := os.Stat(profileMarker); !os.IsNotExist(err) {
-		t.Fatalf("profile marker exists, want exact command execution to bypass login-shell profile loading")
+	if !strings.Contains(string(promptBytes), commandLookingText) {
+		t.Fatalf("prompt = %q, want command-looking text preserved as prompt data", string(promptBytes))
 	}
 }
 

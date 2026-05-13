@@ -2,7 +2,6 @@ package lifecycle
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -13,44 +12,46 @@ import (
 	"odin-os/internal/app/bootstrap"
 	commands "odin-os/internal/cli/commands"
 	browserexecutor "odin-os/internal/executors/browser"
+	"odin-os/internal/runtime/browserhandoff"
 	"odin-os/internal/runtime/browserprofileartifacts"
 	"odin-os/internal/runtime/browserprofilekeys"
 	"odin-os/internal/runtime/browserprofilematerialize"
-	"odin-os/internal/runtime/recovery"
-	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/store/sqlite"
 )
 
 type browserRunView struct {
-	Status                 string                               `json:"status"`
-	GoalID                 int64                                `json:"goal_id,omitempty"`
-	TaskID                 int64                                `json:"task_id,omitempty"`
-	RunID                  int64                                `json:"run_id,omitempty"`
-	BrowserSessionID       int64                                `json:"browser_session_id,omitempty"`
-	EvidenceID             int64                                `json:"evidence_id,omitempty"`
-	EvidenceType           string                               `json:"evidence_type"`
-	ApprovalRequired       bool                                 `json:"approval_required,omitempty"`
-	ApprovalID             int64                                `json:"approval_id,omitempty"`
-	RiskClass              string                               `json:"risk_class,omitempty"`
-	AdapterStatus          string                               `json:"adapter_status,omitempty"`
-	AdapterKind            string                               `json:"adapter_kind,omitempty"`
-	StartURLs              []string                             `json:"start_urls"`
-	AllowedDomains         []string                             `json:"allowed_domains"`
-	MaxPages               int                                  `json:"max_pages"`
-	MaxDurationSeconds     int                                  `json:"max_duration_seconds"`
-	VisitedURLs            []string                             `json:"visited_urls,omitempty"`
-	PageResults            []browserexecutor.PageResult         `json:"page_results,omitempty"`
-	ExtractedTextSummary   string                               `json:"extracted_text_summary,omitempty"`
-	Screenshots            []string                             `json:"screenshots,omitempty"`
-	ScreenshotMetadata     []browserexecutor.ScreenshotMetadata `json:"screenshot_metadata,omitempty"`
-	SelectedLinks          []browserexecutor.SelectedLink       `json:"selected_links,omitempty"`
-	DownloadedFiles        []browserexecutor.DownloadedFile     `json:"downloaded_files,omitempty"`
-	FormStateSummary       []browserexecutor.FormStateSummary   `json:"form_state_summary,omitempty"`
-	BrowserNotes           []string                             `json:"browser_notes,omitempty"`
-	Confidence             string                               `json:"confidence,omitempty"`
-	Limitations            []string                             `json:"limitations,omitempty"`
-	RecoveryRecommendation string                               `json:"recovery_recommendation,omitempty"`
-	ActionLog              []string                             `json:"action_log,omitempty"`
+	Status                    string                                   `json:"status"`
+	GoalID                    int64                                    `json:"goal_id"`
+	TaskID                    int64                                    `json:"task_id,omitempty"`
+	RunID                     int64                                    `json:"run_id,omitempty"`
+	RunArtifactID             int64                                    `json:"run_artifact_id,omitempty"`
+	EvidenceID                int64                                    `json:"evidence_id"`
+	EvidenceType              string                                   `json:"evidence_type"`
+	RiskClass                 browserexecutor.RiskClass                `json:"risk_class,omitempty"`
+	ApprovalRequired          bool                                     `json:"approval_required,omitempty"`
+	ApprovalID                int64                                    `json:"approval_id,omitempty"`
+	MutatingActions           []string                                 `json:"mutating_actions,omitempty"`
+	AdapterStatus             string                                   `json:"adapter_status,omitempty"`
+	AdapterKind               string                                   `json:"adapter_kind,omitempty"`
+	StartURLs                 []string                                 `json:"start_urls"`
+	AllowedDomains            []string                                 `json:"allowed_domains"`
+	MaxPages                  int                                      `json:"max_pages"`
+	MaxDurationSeconds        int                                      `json:"max_duration_seconds"`
+	BrowserSession            *browserexecutor.BrowserSessionReference `json:"browser_session,omitempty"`
+	VisitedURLs               []string                                 `json:"visited_urls,omitempty"`
+	PageResults               []browserexecutor.PageResult             `json:"page_results,omitempty"`
+	ExtractedTextSummary      string                                   `json:"extracted_text_summary,omitempty"`
+	Screenshots               []string                                 `json:"screenshots,omitempty"`
+	ScreenshotMetadata        []browserexecutor.ScreenshotMetadata     `json:"screenshot_metadata,omitempty"`
+	SelectedLinks             []browserexecutor.SelectedLink           `json:"selected_links,omitempty"`
+	DownloadedFiles           []browserexecutor.DownloadedFileMetadata `json:"downloaded_files,omitempty"`
+	FormStateSummary          string                                   `json:"form_state_summary,omitempty"`
+	BrowserErrorRecoveryNotes []string                                 `json:"browser_error_recovery_notes,omitempty"`
+	Confidence                string                                   `json:"confidence,omitempty"`
+	Limitations               []string                                 `json:"limitations,omitempty"`
+	ActionLog                 []string                                 `json:"action_log,omitempty"`
+	ErrorCode                 string                                   `json:"error_code,omitempty"`
+	ErrorMessage              string                                   `json:"error_message,omitempty"`
 }
 
 type browserSessionEnvelope struct {
@@ -71,6 +72,18 @@ type browserSessionLoginRequestListView struct {
 
 type browserSessionHandoffEnvelope struct {
 	Handoff browserSessionHandoffView `json:"handoff"`
+}
+
+type browserSessionRunnerEnvelope struct {
+	Runner browserSessionRunnerView `json:"runner"`
+}
+
+type browserSessionRunnerListView struct {
+	Runners []browserSessionRunnerView `json:"runners"`
+}
+
+type browserSessionRunnerPlanEnvelope struct {
+	Plan browserSessionRunnerPlanView `json:"plan"`
 }
 
 type browserSessionProfileEnvelope struct {
@@ -177,6 +190,41 @@ type browserSessionHandoffView struct {
 	AllowedActions string `json:"allowed_actions"`
 }
 
+type browserSessionRunnerView struct {
+	ID             int64   `json:"id"`
+	SessionID      int64   `json:"session_id"`
+	LoginRequestID int64   `json:"login_request_id"`
+	HandoffID      string  `json:"handoff_id"`
+	Status         string  `json:"status"`
+	ViewerURL      *string `json:"viewer_url"`
+	RunnerID       *string `json:"runner_id"`
+	ProcessID      *int64  `json:"process_id"`
+	BindAddr       *string `json:"bind_addr"`
+	PrivateBaseURL *string `json:"private_base_url"`
+	PublicBaseURL  *string `json:"public_base_url"`
+	ExpiresAt      string  `json:"expires_at"`
+	StartedAt      string  `json:"started_at,omitempty"`
+	ExitedAt       string  `json:"exited_at,omitempty"`
+	CompletedAt    string  `json:"completed_at,omitempty"`
+	CancelledAt    string  `json:"cancelled_at,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
+	ErrorCode      *string `json:"error_code"`
+	ErrorMessage   *string `json:"error_message"`
+}
+
+type browserSessionRunnerPlanView struct {
+	ID             int64                                `json:"id"`
+	SessionID      int64                                `json:"session_id"`
+	LoginRequestID int64                                `json:"login_request_id"`
+	HandoffID      string                               `json:"handoff_id"`
+	Commands       []browserhandoff.NoVNCPlannedCommand `json:"commands"`
+	BindAddr       string                               `json:"bind_addr"`
+	PrivateBaseURL string                               `json:"private_base_url"`
+	ViewerURL      string                               `json:"viewer_url"`
+	TimeoutSeconds int                                  `json:"timeout_seconds"`
+}
+
 func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
 	command, err := commands.ParseBrowser(args)
 	if err != nil {
@@ -189,62 +237,20 @@ func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io
 	if command.Name == "session" {
 		return runBrowserSession(ctx, app, command, stdout)
 	}
-
-	objective := strings.TrimSpace(command.Objective)
 	if command.TaskID > 0 {
-		task, err := app.Store.GetTask(ctx, command.TaskID)
-		if err != nil {
-			return err
-		}
-		if objective == "" {
-			objective = task.Title
-		}
-		run, err := (runsvc.Service{Store: app.Store}).Start(ctx, task, browserexecutor.EvidenceType)
-		if err != nil {
-			return err
-		}
-		result, runErr := browserexecutor.Service{Store: app.Store}.Run(ctx, browserexecutor.ReadOnlyTask{
-			GoalID:             command.GoalID,
-			TaskID:             command.TaskID,
-			RunID:              run.ID,
-			BrowserSessionID:   command.SessionID,
-			WorkerMode:         command.WorkerMode,
-			Objective:          objective,
-			AllowedDomains:     command.AllowedDomains,
-			StartURLs:          command.URLs,
-			MaxPages:           command.MaxPages,
-			MaxDurationSeconds: command.MaxDurationSeconds,
-			EvidenceRequired:   command.EvidenceRequired,
-			Actions:            command.Actions,
-		})
-		if runErr != nil {
-			if finishErr := finishBrowserRunFailed(ctx, app.Store, run.ID, command.TaskID, result, runErr); finishErr != nil {
-				return finishErr
-			}
-			return runErr
-		}
-		if result.Status == "approval_required" {
-			if err := finishBrowserRunApprovalRequired(ctx, app.Store, run.ID, result); err != nil {
-				return err
-			}
-			return writeBrowserRunView(stdout, command.JSON, result)
-		}
-		if err := finishBrowserRunFromWork(ctx, app.Store, run.ID, command.TaskID, result); err != nil {
-			return err
-		}
-		return writeBrowserRunView(stdout, command.JSON, result)
+		return runBrowserTask(ctx, app, command, stdout)
 	}
 
 	goal, err := app.Store.GetGoal(ctx, command.GoalID)
 	if err != nil {
 		return err
 	}
+	objective := strings.TrimSpace(command.Objective)
 	if objective == "" {
 		objective = goal.Title
 	}
 	result, err := browserexecutor.Service{Store: app.Store}.Run(ctx, browserexecutor.ReadOnlyTask{
 		GoalID:             command.GoalID,
-		BrowserSessionID:   command.SessionID,
 		WorkerMode:         command.WorkerMode,
 		Objective:          objective,
 		AllowedDomains:     command.AllowedDomains,
@@ -252,137 +258,131 @@ func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io
 		MaxPages:           command.MaxPages,
 		MaxDurationSeconds: command.MaxDurationSeconds,
 		EvidenceRequired:   command.EvidenceRequired,
+		BrowserSessionID:   command.SessionID,
 		Actions:            command.Actions,
 	})
 	if err != nil {
 		return err
 	}
-	return writeBrowserRunView(stdout, command.JSON, result)
-}
-
-func writeBrowserRunView(stdout io.Writer, jsonOutput bool, result browserexecutor.Result) error {
 	view := browserRunView{
-		Status:                 result.Status,
-		GoalID:                 result.GoalID,
-		TaskID:                 result.TaskID,
-		RunID:                  result.RunID,
-		BrowserSessionID:       result.BrowserSessionID,
-		EvidenceID:             result.EvidenceID,
-		EvidenceType:           result.EvidenceType,
-		ApprovalRequired:       result.ApprovalRequired,
-		ApprovalID:             result.ApprovalID,
-		RiskClass:              result.RiskClass,
-		AdapterStatus:          result.AdapterStatus,
-		AdapterKind:            result.AdapterKind,
-		StartURLs:              result.StartURLs,
-		AllowedDomains:         result.AllowedDomains,
-		MaxPages:               result.MaxPages,
-		MaxDurationSeconds:     result.MaxDurationSeconds,
-		VisitedURLs:            result.VisitedURLs,
-		PageResults:            result.PageResults,
-		ExtractedTextSummary:   result.ExtractedTextSummary,
-		Screenshots:            result.Screenshots,
-		ScreenshotMetadata:     result.ScreenshotMetadata,
-		SelectedLinks:          result.SelectedLinks,
-		DownloadedFiles:        result.DownloadedFiles,
-		FormStateSummary:       result.FormStateSummary,
-		BrowserNotes:           result.BrowserNotes,
-		Confidence:             result.Confidence,
-		Limitations:            result.Limitations,
-		RecoveryRecommendation: result.RecoveryRecommendation,
-		ActionLog:              result.ActionLog,
+		Status:                    result.Status,
+		GoalID:                    result.GoalID,
+		EvidenceID:                result.EvidenceID,
+		EvidenceType:              result.EvidenceType,
+		AdapterStatus:             result.AdapterStatus,
+		AdapterKind:               result.AdapterKind,
+		StartURLs:                 result.StartURLs,
+		AllowedDomains:            result.AllowedDomains,
+		MaxPages:                  result.MaxPages,
+		MaxDurationSeconds:        result.MaxDurationSeconds,
+		BrowserSession:            result.BrowserSession,
+		VisitedURLs:               result.VisitedURLs,
+		PageResults:               result.PageResults,
+		ExtractedTextSummary:      result.ExtractedTextSummary,
+		Screenshots:               result.Screenshots,
+		ScreenshotMetadata:        result.ScreenshotMetadata,
+		SelectedLinks:             result.SelectedLinks,
+		DownloadedFiles:           result.DownloadedFiles,
+		FormStateSummary:          result.FormStateSummary,
+		BrowserErrorRecoveryNotes: result.BrowserErrorRecoveryNotes,
+		Confidence:                result.Confidence,
+		Limitations:               result.Limitations,
+		ActionLog:                 result.ActionLog,
+		ErrorCode:                 result.ErrorCode,
+		ErrorMessage:              result.ErrorMessage,
 	}
-	if jsonOutput {
+	if command.JSON {
 		return commands.WriteJSON(stdout, view)
 	}
-	_, err := fmt.Fprintf(stdout, "browser goal=%d task=%d run=%d status=%s evidence=%d type=%s\n", view.GoalID, view.TaskID, view.RunID, view.Status, view.EvidenceID, view.EvidenceType)
+	_, err = fmt.Fprintf(stdout, "browser goal=%d status=%s evidence=%d type=%s\n", view.GoalID, view.Status, view.EvidenceID, view.EvidenceType)
 	return err
 }
 
-func finishBrowserRunFromWork(ctx context.Context, store *sqlite.Store, runID int64, taskID int64, result browserexecutor.Result) error {
-	artifactsJSON := browserResultArtifactsJSON(result)
-	runStatus := "completed"
-	taskStatus := "blocked"
-	blockedReason := "browser_evidence_review"
-	lastError := ""
-	if result.AdapterStatus == "failed" || result.AdapterStatus == "timeout" {
-		runStatus = "failed"
-		taskStatus = "failed"
-		blockedReason = ""
-		lastError = "browser evidence capture failed: " + firstNonBlank(result.ErrorMessage, result.ExtractedTextSummary, "unknown browser error")
-	}
-	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:          runID,
-		Status:         runStatus,
-		Summary:        firstNonBlank(result.ExtractedTextSummary, result.AdapterStatus, result.Status),
-		TerminalReason: runStatus,
-		ArtifactsJSON:  artifactsJSON,
-	}); err != nil {
+func runBrowserTask(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
+	service := browserexecutor.Service{Store: app.Store}
+	if browserexecutor.ClassifyRisk(command.Actions) != browserexecutor.RiskClassReadOnly {
+		response, err := service.RunPlugin(ctx, browserexecutor.PluginRequest{
+			TaskID:             command.TaskID,
+			WorkerMode:         command.WorkerMode,
+			Objective:          command.Objective,
+			AllowedDomains:     command.AllowedDomains,
+			StartURLs:          command.URLs,
+			MaxPages:           command.MaxPages,
+			MaxDurationSeconds: command.MaxDurationSeconds,
+			EvidenceRequired:   command.EvidenceRequired,
+			BrowserSessionID:   command.SessionID,
+			Actions:            command.Actions,
+			RequestedBy:        "operator",
+		})
+		view := browserRunView{
+			Status:             response.Status,
+			TaskID:             response.TaskID,
+			RiskClass:          response.RiskClass,
+			ApprovalRequired:   response.ApprovalRequired,
+			ApprovalID:         response.ApprovalID,
+			MutatingActions:    response.MutatingActions,
+			ErrorCode:          response.ErrorCode,
+			ErrorMessage:       response.ErrorMessage,
+			StartURLs:          append([]string{}, command.URLs...),
+			AllowedDomains:     append([]string{}, command.AllowedDomains...),
+			MaxPages:           command.MaxPages,
+			MaxDurationSeconds: command.MaxDurationSeconds,
+		}
+		if command.JSON {
+			if writeErr := commands.WriteJSON(stdout, view); writeErr != nil {
+				return writeErr
+			}
+		}
 		return err
 	}
-	task, err := store.GetTask(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	updated, err := store.UpdateTaskQueueState(ctx, sqlite.UpdateTaskQueueStateParams{
-		TaskID:         task.ID,
-		Status:         taskStatus,
-		NextEligibleAt: task.NextEligibleAt,
-		Priority:       task.Priority,
-		LastError:      lastError,
-		RetryCount:     task.RetryCount,
-		MaxAttempts:    task.MaxAttempts,
-		BlockedReason:  blockedReason,
+	result, err := service.RunWorkEvidence(ctx, browserexecutor.WorkEvidenceTask{
+		TaskID:             command.TaskID,
+		WorkerMode:         command.WorkerMode,
+		Objective:          command.Objective,
+		AllowedDomains:     command.AllowedDomains,
+		StartURLs:          command.URLs,
+		MaxPages:           command.MaxPages,
+		MaxDurationSeconds: command.MaxDurationSeconds,
+		EvidenceRequired:   command.EvidenceRequired,
+		BrowserSessionID:   command.SessionID,
+		Actions:            command.Actions,
 	})
 	if err != nil {
 		return err
 	}
-	if taskStatus == "failed" {
-		guidance := recovery.RetryGuidanceForTask(recovery.RetryGuidanceInput{
-			RetryCount:  updated.RetryCount,
-			MaxAttempts: updated.MaxAttempts,
-			WorkKind:    "browser_evidence",
-			RequestedBy: updated.RequestedBy,
-		})
-		return store.RecordTaskRecoveryRecommendation(ctx, sqlite.RecordTaskRecoveryRecommendationParams{
-			Task:                   updated,
-			Decision:               guidance.Decision,
-			RetryEligible:          guidance.RetryEligible,
-			RecoveryRecommendation: guidance.RecoveryRecommendation,
-			Source:                 guidance.Source,
-		})
+	view := browserRunView{
+		Status:                    result.Status,
+		TaskID:                    result.TaskID,
+		RunID:                     result.RunID,
+		RunArtifactID:             result.RunArtifactID,
+		EvidenceType:              result.EvidenceType,
+		AdapterStatus:             result.AdapterStatus,
+		AdapterKind:               result.AdapterKind,
+		StartURLs:                 result.StartURLs,
+		AllowedDomains:            result.AllowedDomains,
+		MaxPages:                  result.MaxPages,
+		MaxDurationSeconds:        result.MaxDurationSeconds,
+		BrowserSession:            result.BrowserSession,
+		VisitedURLs:               result.VisitedURLs,
+		PageResults:               result.PageResults,
+		ExtractedTextSummary:      result.ExtractedTextSummary,
+		Screenshots:               result.Screenshots,
+		ScreenshotMetadata:        result.ScreenshotMetadata,
+		SelectedLinks:             result.SelectedLinks,
+		DownloadedFiles:           result.DownloadedFiles,
+		FormStateSummary:          result.FormStateSummary,
+		BrowserErrorRecoveryNotes: result.BrowserErrorRecoveryNotes,
+		Confidence:                result.Confidence,
+		Limitations:               result.Limitations,
+		ActionLog:                 result.ActionLog,
+		ErrorCode:                 result.ErrorCode,
+		ErrorMessage:              result.ErrorMessage,
 	}
-	return nil
-}
-
-func finishBrowserRunApprovalRequired(ctx context.Context, store *sqlite.Store, runID int64, result browserexecutor.Result) error {
-	_, err := store.FinishRun(ctx, sqlite.FinishRunParams{
-		RunID:          runID,
-		Status:         "interrupted",
-		Summary:        "browser request requires approval before external mutation",
-		TerminalReason: "approval_required",
-		ArtifactsJSON:  browserResultArtifactsJSON(result),
-	})
+	if command.JSON {
+		return commands.WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "browser task=%d status=%s run=%d artifact=%d type=%s\n", view.TaskID, view.Status, view.RunID, view.RunArtifactID, view.EvidenceType)
 	return err
-}
-
-func finishBrowserRunFailed(ctx context.Context, store *sqlite.Store, runID int64, taskID int64, result browserexecutor.Result, runErr error) error {
-	if result.ErrorMessage == "" {
-		result.ErrorMessage = runErr.Error()
-	}
-	result.AdapterStatus = firstNonBlank(result.AdapterStatus, "failed")
-	return finishBrowserRunFromWork(ctx, store, runID, taskID, result)
-}
-
-func browserResultArtifactsJSON(result browserexecutor.Result) string {
-	if result.WorkArtifact == nil {
-		return "[]"
-	}
-	raw, err := json.Marshal([]browserexecutor.EvidenceArtifact{*result.WorkArtifact})
-	if err != nil {
-		return "[]"
-	}
-	return string(raw)
 }
 
 func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
@@ -546,6 +546,8 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		}
 		_, err = fmt.Fprintf(stdout, "browser_session_handoff=%s login_request=%d session=%d status=%s allowed_actions=%s\n", view.HandoffID, view.LoginRequestID, view.SessionID, view.Status, view.AllowedActions)
 		return err
+	case "runner":
+		return runBrowserSessionRunner(ctx, app, command, stdout)
 	case "profile":
 		return runBrowserSessionProfile(ctx, app, command, stdout)
 	default:
@@ -723,6 +725,414 @@ func runBrowserSessionProfileArtifact(ctx context.Context, app bootstrap.App, co
 	default:
 		return fmt.Errorf(commands.BrowserUsage)
 	}
+}
+
+func runBrowserSessionRunner(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
+	switch command.RunnerAction {
+	case "create":
+		request, err := app.Store.GetBrowserSessionLoginRequest(ctx, command.LoginRequestID)
+		if err != nil {
+			return err
+		}
+		runner, err := app.Store.CreateBrowserHandoffRunner(ctx, sqlite.CreateBrowserHandoffRunnerParams{
+			SessionID:      request.SessionID,
+			LoginRequestID: request.ID,
+			HandoffID:      request.HandoffID,
+			ExpiresAt:      request.ExpiresAt,
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionRunnerView(runner)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerEnvelope{Runner: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status)
+		return err
+	case "list":
+		runners, err := app.Store.ListBrowserHandoffRunners(ctx, sqlite.ListBrowserHandoffRunnersParams{LoginRequestID: command.LoginRequestID})
+		if err != nil {
+			return err
+		}
+		views := make([]browserSessionRunnerView, 0, len(runners))
+		for _, runner := range runners {
+			views = append(views, newBrowserSessionRunnerView(runner))
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerListView{Runners: views})
+		}
+		if len(views) == 0 {
+			_, err := fmt.Fprintln(stdout, "no browser session handoff runners")
+			return err
+		}
+		for _, view := range views {
+			if _, err := fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "show":
+		runner, err := app.Store.GetBrowserHandoffRunner(ctx, command.ID)
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionRunnerView(runner)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerEnvelope{Runner: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status)
+		return err
+	case "start":
+		runner, err := startBrowserSessionRunner(ctx, app, command.ID)
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionRunnerView(runner)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerEnvelope{Runner: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status)
+		return err
+	case "plan-novnc":
+		plan, err := planBrowserSessionRunnerNoVNC(ctx, app, command)
+		if err != nil {
+			return err
+		}
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerPlanEnvelope{Plan: plan})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_runner_plan=%d login_request=%d session=%d viewer_url=%s\n", plan.ID, plan.LoginRequestID, plan.SessionID, plan.ViewerURL)
+		return err
+	case "status":
+		runner, err := app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:     command.ID,
+			Status: sqlite.BrowserHandoffRunnerStatus(command.Status),
+			Actor:  "operator",
+			Reason: "operator updated browser handoff runner metadata",
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionRunnerView(runner)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerEnvelope{Runner: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status)
+		return err
+	case "cancel":
+		runner, err := app.Store.CancelBrowserHandoffRunner(ctx, sqlite.CancelBrowserHandoffRunnerParams{
+			ID:     command.ID,
+			Actor:  "operator",
+			Reason: "operator cancelled browser handoff runner metadata",
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionRunnerView(runner)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionRunnerEnvelope{Runner: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_runner=%d login_request=%d session=%d status=%s\n", view.ID, view.LoginRequestID, view.SessionID, view.Status)
+		return err
+	default:
+		return fmt.Errorf(commands.BrowserUsage)
+	}
+}
+
+func planBrowserSessionRunnerNoVNC(ctx context.Context, app bootstrap.App, command commands.BrowserCommand) (browserSessionRunnerPlanView, error) {
+	runner, err := app.Store.GetBrowserHandoffRunner(ctx, command.ID)
+	if err != nil {
+		return browserSessionRunnerPlanView{}, err
+	}
+	if runner.Status != sqlite.BrowserHandoffRunnerStatusRequested {
+		return browserSessionRunnerPlanView{}, fmt.Errorf("browser handoff runner status %q cannot plan NoVNC start", runner.Status)
+	}
+	handoff, err := app.Store.GetBrowserSessionLoginHandoff(ctx, runner.HandoffID)
+	if err != nil {
+		return browserSessionRunnerPlanView{}, err
+	}
+	if handoff.LoginRequest.ID != runner.LoginRequestID || handoff.Session.ID != runner.SessionID {
+		return browserSessionRunnerPlanView{}, fmt.Errorf("browser handoff runner link mismatch")
+	}
+	plan, err := browserhandoff.PlanNoVNCStart(browserhandoff.StartRequest{
+		SessionID:      handoff.Session.ID,
+		LoginRequestID: handoff.LoginRequest.ID,
+		HandoffID:      handoff.HandoffID,
+		ProfilePath:    handoff.Session.ProfilePath,
+		AllowedDomain:  handoff.Session.Domain,
+		TimeoutSeconds: browserSessionRunnerTimeoutSeconds(handoff.LoginRequest.ExpiresAt),
+	}, browserhandoff.NoVNCRunnerConfig{
+		BrowserCommand:         command.NoVNCBrowserCommand,
+		BrowserAllowedCommands: command.NoVNCBrowserAllowedCommands,
+		DisplayCommand:         command.NoVNCDisplayCommand,
+		DisplayAllowedCommands: command.NoVNCDisplayAllowedCommands,
+		NoVNCCommand:           command.NoVNCCommand,
+		NoVNCAllowedCommands:   command.NoVNCAllowedCommands,
+		BindAddr:               command.NoVNCBindAddr,
+		PrivateBaseURL:         command.NoVNCPrivateBaseURL,
+		TimeoutSeconds:         command.NoVNCTimeoutSeconds,
+	})
+	if err != nil {
+		return browserSessionRunnerPlanView{}, err
+	}
+	return browserSessionRunnerPlanView{
+		ID:             runner.ID,
+		SessionID:      runner.SessionID,
+		LoginRequestID: runner.LoginRequestID,
+		HandoffID:      runner.HandoffID,
+		Commands:       plan.Commands,
+		BindAddr:       plan.BindAddr,
+		PrivateBaseURL: plan.PrivateBaseURL,
+		ViewerURL:      plan.ViewerURL,
+		TimeoutSeconds: plan.TimeoutSeconds,
+	}, nil
+}
+
+func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID int64) (sqlite.BrowserHandoffRunner, error) {
+	runner, err := app.Store.GetBrowserHandoffRunner(ctx, runnerID)
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	if runner.Status != sqlite.BrowserHandoffRunnerStatusRequested {
+		return sqlite.BrowserHandoffRunner{}, fmt.Errorf("browser handoff runner status %q cannot start", runner.Status)
+	}
+	handoff, err := app.Store.GetBrowserSessionLoginHandoff(ctx, runner.HandoffID)
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	if handoff.LoginRequest.ID != runner.LoginRequestID || handoff.Session.ID != runner.SessionID {
+		return sqlite.BrowserHandoffRunner{}, fmt.Errorf("browser handoff runner link mismatch")
+	}
+	selectedRunner, err := browserhandoff.RunnerFromEnv()
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	if fixtureRunner, ok := selectedRunner.(browserhandoff.FixtureRunner); ok {
+		return startBrowserSessionRunnerWithSupervisor(ctx, app, runner, handoff, fixtureRunner)
+	}
+	response, err := selectedRunner.Start(ctx, browserhandoff.StartRequest{
+		SessionID:      handoff.Session.ID,
+		LoginRequestID: handoff.LoginRequest.ID,
+		HandoffID:      handoff.HandoffID,
+		ProfilePath:    handoff.Session.ProfilePath,
+		AllowedDomain:  handoff.Session.Domain,
+		TimeoutSeconds: browserSessionRunnerTimeoutSeconds(handoff.LoginRequest.ExpiresAt),
+		BindAddr:       browserSessionStringPtrValue(runner.BindAddr),
+		PrivateBaseURL: browserSessionStringPtrValue(runner.PrivateBaseURL),
+		PublicBaseURL:  browserSessionStringPtrValue(runner.PublicBaseURL),
+	})
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	switch response.Status {
+	case browserhandoff.StatusStarted:
+		return updateBrowserSessionRunnerStartedFromResponse(ctx, app, runner, response, "browser handoff runner started")
+	case browserhandoff.StatusCompleted:
+		started, err := updateBrowserSessionRunnerStartedFromResponse(ctx, app, runner, response, "browser handoff runner started")
+		if err != nil {
+			return sqlite.BrowserHandoffRunner{}, err
+		}
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:     started.ID,
+			Status: sqlite.BrowserHandoffRunnerStatusCompleted,
+			Actor:  "operator",
+			Reason: "browser handoff runner completed",
+		})
+	case browserhandoff.StatusNotImplemented:
+		errorCode := response.ErrorCode
+		if strings.TrimSpace(errorCode) == "" {
+			errorCode = "not_implemented"
+		}
+		errorMessage := response.ErrorMessage
+		if strings.TrimSpace(errorMessage) == "" {
+			errorMessage = "browser handoff runner process boundary is not implemented"
+		}
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:           runner.ID,
+			Status:       sqlite.BrowserHandoffRunnerStatusFailed,
+			ErrorCode:    &errorCode,
+			ErrorMessage: &errorMessage,
+			Actor:        "operator",
+			Reason:       "browser handoff StubRunner returned not_implemented",
+		})
+	case browserhandoff.StatusFailed:
+		targetRunner := runner
+		if browserSessionRunnerResponseHasStartMetadata(response) {
+			started, err := updateBrowserSessionRunnerStartedFromResponse(ctx, app, runner, response, "browser handoff runner started before failure")
+			if err != nil {
+				return sqlite.BrowserHandoffRunner{}, err
+			}
+			targetRunner = started
+		}
+		errorCode := response.ErrorCode
+		if strings.TrimSpace(errorCode) == "" {
+			errorCode = "fixture_failed"
+		}
+		errorMessage := response.ErrorMessage
+		if strings.TrimSpace(errorMessage) == "" {
+			errorMessage = "browser handoff fixture runner failed"
+		}
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:           targetRunner.ID,
+			Status:       sqlite.BrowserHandoffRunnerStatusFailed,
+			RunnerID:     nonEmptyBrowserSessionStringPtr(response.RunnerID),
+			ProcessID:    positiveBrowserSessionInt64Ptr(response.ProcessID),
+			ErrorCode:    &errorCode,
+			ErrorMessage: &errorMessage,
+			Actor:        "operator",
+			Reason:       "browser handoff fixture runner failed",
+		})
+	case browserhandoff.StatusExpired:
+		targetRunner := runner
+		if browserSessionRunnerResponseHasStartMetadata(response) {
+			started, err := updateBrowserSessionRunnerStartedFromResponse(ctx, app, runner, response, "browser handoff runner started before timeout")
+			if err != nil {
+				return sqlite.BrowserHandoffRunner{}, err
+			}
+			targetRunner = started
+		}
+		errorCode := response.ErrorCode
+		if strings.TrimSpace(errorCode) == "" {
+			errorCode = "fixture_timeout"
+		}
+		errorMessage := response.ErrorMessage
+		if strings.TrimSpace(errorMessage) == "" {
+			errorMessage = "browser handoff fixture runner timed out"
+		}
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:           targetRunner.ID,
+			Status:       sqlite.BrowserHandoffRunnerStatusExpired,
+			RunnerID:     nonEmptyBrowserSessionStringPtr(response.RunnerID),
+			ProcessID:    positiveBrowserSessionInt64Ptr(response.ProcessID),
+			ErrorCode:    &errorCode,
+			ErrorMessage: &errorMessage,
+			Actor:        "operator",
+			Reason:       "browser handoff fixture runner timed out",
+		})
+	default:
+		return sqlite.BrowserHandoffRunner{}, fmt.Errorf("unsupported browser handoff runner start status %q", response.Status)
+	}
+}
+
+func startBrowserSessionRunnerWithSupervisor(ctx context.Context, app bootstrap.App, runner sqlite.BrowserHandoffRunner, handoff sqlite.BrowserSessionLoginHandoff, fixtureRunner browserhandoff.FixtureRunner) (sqlite.BrowserHandoffRunner, error) {
+	timeoutSeconds := fixtureRunner.TimeoutSeconds
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = browserSessionRunnerTimeoutSeconds(handoff.LoginRequest.ExpiresAt)
+	}
+	supervisor := browserhandoff.BoundedProcessSupervisor{Runner: browserhandoff.NewExecCommandRunner()}
+	handle, err := supervisor.StartProcess(ctx, browserhandoff.StartProcessRequest{
+		Role:            "fixture",
+		CommandPath:     fixtureRunner.Command,
+		Args:            fixtureRunner.Args,
+		TimeoutSeconds:  timeoutSeconds,
+		AllowedCommands: fixtureRunner.AllowedCommands,
+	})
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	runnerID := fmt.Sprintf("fixture-%d", handle.PID)
+	processID := handle.PID
+	started, err := app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+		ID:        runner.ID,
+		Status:    sqlite.BrowserHandoffRunnerStatusStarted,
+		RunnerID:  &runnerID,
+		ProcessID: &processID,
+		Actor:     "operator",
+		Reason:    "browser handoff fixture supervisor started",
+	})
+	if err != nil {
+		_, _ = supervisor.CancelProcess(ctx, handle, "failed to persist runner start")
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	result, err := supervisor.WaitProcess(ctx, handle)
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, err
+	}
+	switch result.Status {
+	case browserhandoff.ProcessStatusExited:
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:     started.ID,
+			Status: sqlite.BrowserHandoffRunnerStatusCompleted,
+			Actor:  "operator",
+			Reason: "browser handoff fixture supervisor completed",
+		})
+	case browserhandoff.ProcessStatusTimeout:
+		errorCode := "fixture_timeout"
+		errorMessage := browserSessionRunnerProcessErrorMessage(result, "browser handoff fixture runner timed out")
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:           started.ID,
+			Status:       sqlite.BrowserHandoffRunnerStatusExpired,
+			ErrorCode:    &errorCode,
+			ErrorMessage: &errorMessage,
+			Actor:        "operator",
+			Reason:       "browser handoff fixture supervisor timed out",
+		})
+	case browserhandoff.ProcessStatusCancelled:
+		errorCode := "fixture_cancelled"
+		errorMessage := browserSessionRunnerProcessErrorMessage(result, "browser handoff fixture runner cancelled")
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:           started.ID,
+			Status:       sqlite.BrowserHandoffRunnerStatusCancelled,
+			ErrorCode:    &errorCode,
+			ErrorMessage: &errorMessage,
+			Actor:        "operator",
+			Reason:       "browser handoff fixture supervisor cancelled",
+		})
+	case browserhandoff.ProcessStatusFailed:
+		errorCode := "fixture_failed"
+		errorMessage := browserSessionRunnerProcessErrorMessage(result, "browser handoff fixture runner failed")
+		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+			ID:           started.ID,
+			Status:       sqlite.BrowserHandoffRunnerStatusFailed,
+			ErrorCode:    &errorCode,
+			ErrorMessage: &errorMessage,
+			Actor:        "operator",
+			Reason:       "browser handoff fixture supervisor failed",
+		})
+	default:
+		return sqlite.BrowserHandoffRunner{}, fmt.Errorf("unsupported browser handoff process status %q", result.Status)
+	}
+}
+
+func updateBrowserSessionRunnerStartedFromResponse(ctx context.Context, app bootstrap.App, runner sqlite.BrowserHandoffRunner, response browserhandoff.StartResponse, reason string) (sqlite.BrowserHandoffRunner, error) {
+	return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+		ID:             runner.ID,
+		Status:         sqlite.BrowserHandoffRunnerStatusStarted,
+		ViewerURL:      nonEmptyBrowserSessionStringPtr(response.ViewerURL),
+		RunnerID:       nonEmptyBrowserSessionStringPtr(response.RunnerID),
+		ProcessID:      positiveBrowserSessionInt64Ptr(response.ProcessID),
+		BindAddr:       nonEmptyBrowserSessionStringPtr(response.BindAddr),
+		PrivateBaseURL: nonEmptyBrowserSessionStringPtr(response.PrivateBaseURL),
+		Actor:          "operator",
+		Reason:         reason,
+	})
+}
+
+func browserSessionRunnerResponseHasStartMetadata(response browserhandoff.StartResponse) bool {
+	return strings.TrimSpace(response.RunnerID) != "" ||
+		response.ProcessID > 0 ||
+		strings.TrimSpace(response.ViewerURL) != ""
+}
+
+func browserSessionRunnerProcessErrorMessage(result browserhandoff.ProcessResult, fallback string) string {
+	for _, candidate := range []string{result.ErrorMessage, result.Stderr, result.Stdout} {
+		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
+			return trimmed
+		}
+	}
+	return fallback
+}
+
+func browserSessionRunnerTimeoutSeconds(expiresAt time.Time) int {
+	remaining := time.Until(expiresAt)
+	if remaining <= 0 {
+		return 0
+	}
+	seconds := int(remaining.Seconds())
+	if seconds <= 0 {
+		return 1
+	}
+	return seconds
 }
 
 func prepareBrowserSessionProfile(ctx context.Context, app bootstrap.App, session sqlite.BrowserSession) (browserSessionProfileView, error) {
@@ -972,6 +1382,31 @@ func newBrowserSessionHandoffView(handoff sqlite.BrowserSessionLoginHandoff) bro
 	}
 }
 
+func newBrowserSessionRunnerView(runner sqlite.BrowserHandoffRunner) browserSessionRunnerView {
+	return browserSessionRunnerView{
+		ID:             runner.ID,
+		SessionID:      runner.SessionID,
+		LoginRequestID: runner.LoginRequestID,
+		HandoffID:      runner.HandoffID,
+		Status:         string(runner.Status),
+		ViewerURL:      cloneBrowserSessionStringPtr(runner.ViewerURL),
+		RunnerID:       cloneBrowserSessionStringPtr(runner.RunnerID),
+		ProcessID:      cloneBrowserSessionInt64Ptr(runner.ProcessID),
+		BindAddr:       cloneBrowserSessionStringPtr(runner.BindAddr),
+		PrivateBaseURL: cloneBrowserSessionStringPtr(runner.PrivateBaseURL),
+		PublicBaseURL:  cloneBrowserSessionStringPtr(runner.PublicBaseURL),
+		ExpiresAt:      formatBrowserSessionTime(runner.ExpiresAt),
+		StartedAt:      formatBrowserSessionOptionalTime(runner.StartedAt),
+		ExitedAt:       formatBrowserSessionOptionalTime(runner.ExitedAt),
+		CompletedAt:    formatBrowserSessionOptionalTime(runner.CompletedAt),
+		CancelledAt:    formatBrowserSessionOptionalTime(runner.CancelledAt),
+		CreatedAt:      formatBrowserSessionTime(runner.CreatedAt),
+		UpdatedAt:      formatBrowserSessionTime(runner.UpdatedAt),
+		ErrorCode:      cloneBrowserSessionStringPtr(runner.ErrorCode),
+		ErrorMessage:   cloneBrowserSessionStringPtr(runner.ErrorMessage),
+	}
+}
+
 func cloneBrowserSessionStringPtr(value *string) *string {
 	if value == nil {
 		return nil
@@ -986,6 +1421,30 @@ func browserSessionStringPtrValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func nonEmptyBrowserSessionStringPtr(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func cloneBrowserSessionInt64Ptr(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	ptr := new(int64)
+	*ptr = *value
+	return ptr
+}
+
+func positiveBrowserSessionInt64Ptr(value int64) *int64 {
+	if value <= 0 {
+		return nil
+	}
+	return &value
 }
 
 func formatBrowserSessionOptionalTime(value *time.Time) string {

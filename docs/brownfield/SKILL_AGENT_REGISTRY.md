@@ -14,7 +14,8 @@ Active Odin-authored skills and agents live under `registry/`.
 - `registry/agents/*.md`: role/persona definitions.
 - `state/migration/drafts/skills/*.md`: review-only migration drafts.
 - global Codex skills under `/home/orchestrator/.codex` or `/home/orchestrator/.agents` are operator tooling, not Odin runtime authority.
-- `prompts/` contains draft role prompt text until a prompt renderer contract promotes it.
+- `prompts/workers/<template>.md` contains canonical rendered worker prompts for the current Go file renderer.
+- other `prompts/` paths are placeholders or deprecated provenance unless a later contract promotes them.
 
 Do not create repo-local Codex `SKILL.md` files until Odin has a documented bridge between external Codex skills and Odin registry skills.
 
@@ -54,6 +55,7 @@ Do not create repo-local Codex `SKILL.md` files until Odin has a documented brid
 
 - A skill is procedure.
 - An agent is a role/persona.
+- A delegatable agent is the stricter subset of registry agents with an enabled `delegation` profile that compiles into Odin-owned child work records.
 - A worker is runtime implementation.
 - A prompt is text loaded by a future renderer.
 - An executor is the tool/model lane used by a run.
@@ -65,9 +67,9 @@ Do not collapse these into a single "agent" bucket. When in doubt, keep the asse
 
 | Duplicate group | Keep now | Deprecated / review-only item | Migration note |
 | --- | --- | --- | --- |
-| Builder prompts | `prompts/workers/agency-builder.md` | `prompts/templates/agency-builder.md` | Keep both until prompt layout is decided; prefer worker prompt content because it includes worktree/branch boundaries. |
+| Builder prompts | `prompts/workers/agency-builder.md` | `prompts/templates/agency-builder.md` | Canonical layout is `prompts/workers/<template>.md`; the deprecated template is provenance-only and its useful safety wording is preserved in the worker prompt. |
 | Role vocabulary | `registry/agents/triage-agent.md`, `internal/workers/*`, executor `TaskKind` | `internal/agents/roles.go` | Reconcile before adding worker implementations. |
-| TypeScript scaffold roles | Go registry and Go runtime | `src/agents/index.ts`, `src/runner/*`, `src/prompts/*` | Remove or archive after cleanup approval; do not wire into Odin runtime. |
+| TypeScript scaffold roles | Go registry and Go runtime | Historical `src/agents/index.ts`, `src/runner/*`, `src/prompts/*` | Keep absent from the current tree; do not recreate or wire a TypeScript runtime. |
 | Migration skill drafts | New active Odin registry skills | `state/migration/drafts/skills/*.md` | Review-only provenance. Promote by rewriting, not copying wholesale. |
 | App-server runner | `internal/runner/codexexec` compatibility facade and `internal/executors` target | `internal/runner/appserver` | Keep experimental and unimplemented until Codex exec is proven. |
 
@@ -81,3 +83,5 @@ Promote a draft or duplicate only when:
 4. It does not create a second runtime authority.
 5. It preserves human approval boundaries.
 6. It has tests or real `odin` proof when runtime behavior changes.
+
+Runtime delegation requires the stricter delegatable-agent profile contract. Active registry status alone does not mean `odin companion delegate` may launch the agent.

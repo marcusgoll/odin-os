@@ -5,10 +5,10 @@ Use this checklist before treating a single-daemon `odin serve` deployment as th
 ## Install and service restart
 
 - `make build` completes and the intended `odin` binary is installed on the host path used by the service manager.
-- `deploy/systemd/odin.service` and the real env file derived from `deploy/systemd/odin.env.example` are installed and reviewed.
+- `deploy/systemd/odin-os.service` and the real env file derived from `deploy/systemd/odin-os.env.example` are installed and reviewed.
 - `ODIN_ROOT` points at the intended runtime root and the service account can read and write `data/`, `state/`, and `runs/`.
-- `systemctl restart odin` completes cleanly.
-- `systemctl status odin --no-pager` shows one active daemon for the runtime root.
+- `systemctl --user restart odin-os.service` completes cleanly.
+- `systemctl --user status odin-os.service --no-pager` shows one active daemon for the runtime root.
 
 ## Health and readiness verification
 
@@ -41,10 +41,17 @@ Use this checklist before treating a single-daemon `odin serve` deployment as th
 
 ## Backup and restore drill
 
-- Create a fresh backup archive from the live runtime root.
-- Run backup verification and confirm it passes.
+- Create a fresh backup archive from the live runtime root with `odin backup <archive-path>`.
+- Run `odin verify-backup <archive-path>` and confirm it passes before release cutover.
 - Restore into a clean target root instead of overwriting the live one.
 - Open the restored SQLite database and confirm `odin doctor --json` can inspect it.
+
+## Release dry-run gate
+
+- `make homelab-release-dry-run` completes without installing, updating, restarting, or repointing production paths.
+- `make odin-actual-use-e2e` completes, or any failure is recorded as an explicit stop condition before cutover.
+- `./bin/odin backup --help`, `./bin/odin restore --help`, `./bin/odin verify-backup --help`, and `./bin/odin serve --help` return bounded usage output.
+- Service readiness gates include `doctor`, fail-closed `healthcheck`, `overview`, `work status`, `review list`, `approvals all`, and actual-use E2E proof.
 
 ## Operator sign-off
 

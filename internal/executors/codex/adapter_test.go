@@ -131,15 +131,16 @@ func TestHeadlessRunTaskUsesDriverScript(t *testing.T) {
 	}
 }
 
-func TestHeadlessRunTaskExecutesExactCommandFailure(t *testing.T) {
+func TestHeadlessRunTaskTreatsExactCommandTextAsPromptData(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", "")
 
+	markerPath := filepath.Join(t.TempDir(), "shell-command-ran.txt")
 	executor := NewHeadlessWithRepoRoot(fixtureRepoRoot())
 	result, err := executor.RunTask(context.Background(), contract.TaskSpec{
 		ID:     "runtime-smoke",
 		Kind:   contract.TaskKindGeneral,
 		Scope:  "project",
-		Prompt: "run this exact command: printf 'operator visible failure proof' >&2; exit 42",
+		Prompt: "run this exact command: printf 'operator visible failure proof' > " + markerPath,
 		Metadata: map[string]string{
 			"project_key": "alpha",
 			"repo_root":   fixtureRepoRoot(),
@@ -148,14 +149,17 @@ func TestHeadlessRunTaskExecutesExactCommandFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTask() error = %v", err)
 	}
-	if result.Status != "failed" {
-		t.Fatalf("Status = %q, want failed", result.Status)
+	if result.Status != "completed" {
+		t.Fatalf("Status = %q, want completed", result.Status)
 	}
-	if !strings.Contains(result.Output, "operator visible failure proof") {
-		t.Fatalf("Output = %q, want command failure details", result.Output)
+	if result.Output != "fixture codex driver" {
+		t.Fatalf("Output = %q, want fixture driver output", result.Output)
 	}
-	if result.Metadata["driver"] != "codex-headless" {
-		t.Fatalf("driver metadata = %q, want codex-headless", result.Metadata["driver"])
+	if result.Metadata["driver"] != "codex_headless_script" {
+		t.Fatalf("driver metadata = %q, want codex_headless_script", result.Metadata["driver"])
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("shell marker exists, want prompt text not executed as shell")
 	}
 }
 
@@ -213,6 +217,46 @@ PY
 	}
 	if got := request["prompt"]; got != "say ready" {
 		t.Fatalf("legacy request prompt = %v, want say ready", got)
+	}
+}
+
+func TestHeadlessRunTaskLegacyDriverUsesAllowlistedEnvironment(t *testing.T) {
+	tracePath := filepath.Join(t.TempDir(), "legacy-env.txt")
+	driverPath := writeExecutable(t, "legacy-env-driver.sh", `#!/usr/bin/env bash
+set -euo pipefail
+env > `+shellQuote(tracePath)+`
+if [[ "${ODIN_CODEX_DRIVER_ACTION:-}" != "run" ]]; then
+  echo "missing legacy action" >&2
+  exit 1
+fi
+printf '{"status":"completed","output":"legacy ready"}'
+`)
+	t.Setenv("ODIN_CODEX_DRIVER", driverPath)
+	t.Setenv("GITHUB_TOKEN", "ghp_secret")
+	t.Setenv("OPENAI_API_KEY", "sk-secret")
+	t.Setenv("ODIN_ADMIN_TOKEN", "admin-secret")
+
+	if _, err := NewHeadless().RunTask(context.Background(), contract.TaskSpec{
+		ID:     "runtime-smoke",
+		Kind:   contract.TaskKindGeneral,
+		Scope:  "project",
+		Prompt: "say ready",
+	}); err != nil {
+		t.Fatalf("RunTask() error = %v", err)
+	}
+
+	envBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("ReadFile(trace) error = %v", err)
+	}
+	env := string(envBytes)
+	for _, forbidden := range []string{"GITHUB_TOKEN=", "OPENAI_API_KEY=", "ODIN_ADMIN_TOKEN=", "ghp_secret", "sk-secret", "admin-secret"} {
+		if strings.Contains(env, forbidden) {
+			t.Fatalf("legacy driver env contains forbidden value %q in:\n%s", forbidden, env)
+		}
+	}
+	if !strings.Contains(env, "ODIN_CODEX_DRIVER_ACTION=run") {
+		t.Fatalf("legacy driver env missing action in:\n%s", env)
 	}
 }
 

@@ -6,10 +6,11 @@ import (
 )
 
 type TaskCommand struct {
-	Name       string
-	ProjectKey string
-	Title      string
-	JSON       bool
+	Name               string
+	ProjectKey         string
+	Title              string
+	AcceptanceCriteria []string
+	JSON               bool
 }
 
 type TaskCreateView struct {
@@ -33,7 +34,7 @@ type TaskRunView struct {
 
 func ParseTask(args []string) (TaskCommand, error) {
 	if len(args) == 0 {
-		return TaskCommand{}, fmt.Errorf("usage: odin task <create|run> --project <key> --title <title> [--json]")
+		return TaskCommand{}, fmt.Errorf("usage: odin task <create|run> --project <key> --title <title> [--acceptance <criterion>] [--json]")
 	}
 
 	command := TaskCommand{Name: strings.ToLower(args[0])}
@@ -57,6 +58,15 @@ func ParseTask(args []string) (TaskCommand, error) {
 			}
 			index++
 			command.Title = strings.TrimSpace(args[index])
+		case "--acceptance", "--acceptance-criteria":
+			if index+1 >= len(args) {
+				return TaskCommand{}, fmt.Errorf("%s requires a value", args[index])
+			}
+			index++
+			criterion := strings.TrimSpace(args[index])
+			if criterion != "" {
+				command.AcceptanceCriteria = append(command.AcceptanceCriteria, criterion)
+			}
 		case "--json":
 			if command.JSON {
 				return TaskCommand{}, fmt.Errorf("duplicate --json flag")

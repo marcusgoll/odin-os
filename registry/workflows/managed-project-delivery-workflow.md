@@ -7,6 +7,7 @@ status: active
 tags:
   - managed-project
   - delivery
+  - delivery_profile
   - planning
 owners:
   - odin-core
@@ -38,4 +39,4 @@ The workflow outputs a scoped delivery plan, task breakdown, implementation evid
 Do not bypass managed-project governance, branch policy, worktree requirements, approvals, or runtime evidence. Do not run `npx spec-flow`, invoke `spec-cli.py`, import slash-command files as Odin commands, create a Spec-Flow project class, or bidirectionally sync with `.spec-flow/`, `specs/*/state.yaml`, or `epics/*/state.yaml`. Treat compatible artifacts as evidence and project-local outputs, not as Odin's source of truth.
 
 ## Success Criteria
-The workflow remains valid authored catalog content, operators can inspect Spec-Flow compatibility evidence through project views, and user-visible behavior is proven through real `odin` commands while Odin runtime state remains authoritative. First-class operator selection for registry workflows belongs to a later capability-catalog surface because current `main` does not expose a real `/workflow` command.
+The workflow remains valid authored catalog content, operators can inspect it through `odin work profiles`, and user-visible behavior is proven through real `odin` commands while Odin runtime state remains authoritative. First-class workflow execution belongs to existing work, review, and approval paths rather than a separate `/workflow` command.

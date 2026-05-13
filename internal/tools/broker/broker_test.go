@@ -122,6 +122,46 @@ func TestInvokeAndCompactRespectBudgets(t *testing.T) {
 	}
 }
 
+func TestInvokeToolBlocksApprovalRequiredPublicPublish(t *testing.T) {
+	t.Parallel()
+
+	invoked := false
+	broker := New(
+		testSnapshot(),
+		map[string]catalog.ToolDefinition{
+			"browser_x_post_publish": {
+				Key:              "browser_x_post_publish",
+				CanonicalKey:     "browser_x_post_publish",
+				Title:            "Publish X Post",
+				Summary:          "Publishes approved X content.",
+				Scopes:           []string{"project"},
+				Tags:             []string{"browser", "social", "publish"},
+				BudgetCost:       1,
+				SourceRef:        "builtin://browser_x_post_publish",
+				RequiresApproval: true,
+				ApprovalReason:   "public social publishing requires an approved social_outcome",
+				Invoke: func(map[string]string) (catalog.StructuredResult, error) {
+					invoked = true
+					return catalog.StructuredResult{CapabilityKey: "browser_x_post_publish"}, nil
+				},
+			},
+		},
+		budgets.Limits{
+			Tool:    budgets.Tool{MaxSelections: 10, MaxInvocations: 10, MaxCostUnits: 20},
+			Context: budgets.Context{MaxExpandedDefinitions: 10, MaxCompactedResults: 10, MaxCompactedBytes: 1000},
+		},
+	)
+
+	if _, err := broker.InvokeTool("browser_x_post_publish", map[string]string{"post_text": "publish"}); err == nil {
+		t.Fatal("InvokeTool(browser_x_post_publish) error = nil, want approval-required refusal")
+	} else if got := err.Error(); got != `approval_required: tool "browser_x_post_publish" requires approval before invocation: public social publishing requires an approved social_outcome` {
+		t.Fatalf("InvokeTool() error = %q", got)
+	}
+	if invoked {
+		t.Fatal("approval-required tool invocation reached Invoke handler")
+	}
+}
+
 func testSnapshot() registry.Snapshot {
 	return registry.Snapshot{
 		Items: []registry.Item{

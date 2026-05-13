@@ -42,7 +42,7 @@ func (server *Server) ListTools(ctx context.Context, scope string) ([]Tool, erro
 	}
 
 	tools := make([]Tool, 0)
-	for _, kind := range []registry.Kind{registry.KindSkill, registry.KindWorkflow, registry.KindCommand} {
+	for _, kind := range []registry.Kind{registry.KindTool, registry.KindSkill, registry.KindWorkflow, registry.KindCommand} {
 		for _, card := range server.source.ListCapabilities(kind, scope) {
 			descriptor, err := server.source.GetCapability(card.ID, card.Version)
 			if err != nil {

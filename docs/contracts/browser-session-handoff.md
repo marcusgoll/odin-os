@@ -6,7 +6,7 @@ date: 2026-05-06
 
 # Browser Session Handoff Contract
 
-This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, read-only handoff lookup, manual verification metadata, profile path allocation, explicit empty profile directory preparation, and profile storage policy gate slices are implemented. Real NoVNC/Tailscale handoff, browser launch, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
+This contract defines the Odin-native handoff for manual Huginn browser login and reusable authenticated read-only sessions. The session metadata, login request metadata, read-only handoff lookup, handoff runner metadata CLI, handoff runner process-boundary skeleton, bounded fixture runner, bounded exec process runner, fixture supervisor lifecycle wiring, NoVNC dry-run planning, NoVNC fixture-safe runner launch, real NoVNC command config validation, display/browser/noVNC dry-run detection metadata, explicit real display/VNC role launch, explicit real browser role launch, explicit real websockify/noVNC role launch, manual verification metadata, profile path allocation, explicit empty profile directory preparation, profile storage policy gate, encrypted profile artifact metadata, AES-256-GCM helper, explicit env key-provider foundation, fixture-only encrypted artifact writer, fixture-only encrypted artifact reader, read-only fixture artifact materialization, retention cleanup CLI, fixture artifact creation CLI, and artifact inspect/revoke/materialize CLI slices are implemented. Profile capture/export, Tailscale handoff, browser profile persistence, login automation, read-only verification checks, and authenticated session attachment remain future work.
 
 ## Existing State
 
@@ -18,9 +18,22 @@ This contract defines the Odin-native handoff for manual Huginn browser login an
 - `odin browser session login-request --id <session_id> [--handoff-base-url <url>] --json` records metadata-only manual login requests with an opaque `handoff_id`; `handoff_url` is null unless a private base URL is provided.
 - `odin browser session login-requests --id <session_id> --json` lists persisted login request metadata for one session.
 - `odin browser session handoff show --handoff-id <id> --json` resolves safe manual-login metadata for one valid, unexpired requested handoff without mutating runtime state.
+- `odin browser session runner create|list|show|plan-novnc|status|cancel --json` records, inspects, or dry-run plans metadata-only browser handoff runner records without launching a process.
+- `internal/runtime/browserhandoff` defines the future runner process boundary request/response types, a default stub runner that returns structured `not_implemented` responses, and an explicit env-gated fixture runner for harmless local process lifecycle proof.
+- `internal/runtime/browserhandoff` also defines a NoVNC dry-run planner and real-launch config validator that validate command paths, allowlists, bind address, private base URL, and timeout, then return normalized config or planned metadata without launching processes. The dry-run planner records display, browser, and noVNC/websockify detection metadata for each configured command.
+- `internal/runtime/browserhandoff` defines a bounded process supervisor abstraction with fake-runner and harmless local exec-runner tests for command validation, timeout kill handling, cancellation handling, bounded stdout/stderr capture, and safe process metadata. `runner start` wires the explicit fixture mode and explicit NoVNC mode through this supervisor. NoVNC mode keeps every role fixture-safe by default, while display/VNC, browser, and websockify/noVNC may each use a real allowlisted executable only behind their explicit gates. It does not add Tailscale routing, profile writes, cookie writes, credential storage, or automatic login.
 - `odin browser session verify --id <session_id> [--login-request-id <id>] --json` records metadata-only operator verification, sets `last_verified_at`, moves the session to `verified`, and completes the login request when one is provided.
 - `odin browser session prepare-profile --id <session_id> --json` explicitly creates the empty profile directory under `ODIN_ROOT` and records an audit event without writing browser files.
 - Browser session JSON reports `profile_storage_policy`. The default is `encrypted_required`, and `CanWriteBrowserProfile` denies writes for every current policy value until encrypted profile storage is implemented.
+- `internal/runtime/browserprofilekeys` loads only an explicit `ODIN_BROWSER_PROFILE_KEY_B64` value, requires it to decode to a 32-byte key, fails closed when missing or invalid, and returns the metadata-safe key reference `env:ODIN_BROWSER_PROFILE_KEY_B64` without exposing the secret as metadata.
+- `odin browser session profile artifact create-fixture --session-id <id> --name <safe-name> --plaintext-file <path> --json` encrypts only the explicitly supplied fixture file, stores the encoded envelope under `ODIN_ROOT/browser-sessions/encrypted-profiles/`, and records artifact metadata through the existing writer/store path.
+- `odin browser session profile artifact list --session-id <id> --json` and `odin browser session profile artifact show --id <artifact_id> --json` return encrypted artifact metadata only.
+- `odin browser session profile artifact revoke --id <artifact_id> --json` marks an encrypted artifact revoked through the existing store transition path and audit event stream. It does not delete files; retention cleanup remains the only artifact deletion path.
+- `odin browser session profile artifact materialize --id <artifact_id> --target-dir runtime/browser-profile-materializations/<safe-name> --json` decrypts one encrypted fixture artifact into a runtime-scoped temporary materialization directory, marks the materialized file and directory read-only where supported, and appends `browser.profile_materialized`.
+- `odin browser session profile artifact cleanup-materialization --id <artifact_id> --target-dir runtime/browser-profile-materializations/<safe-name> --json` removes only that temporary materialization directory, preserves the encrypted artifact, is idempotent, and appends `browser.profile_materialization_cleaned`.
+- `internal/runtime/browserprofileartifacts` encrypts caller-provided fixture bytes only, writes an AES-256-GCM envelope under `ODIN_ROOT/browser-sessions/encrypted-profiles/<artifact>.enc`, and records metadata through the existing SQLite encrypted-artifact store method. It refuses missing keys, paths outside `ODIN_ROOT`, and credential-looking metadata markers.
+- `internal/runtime/browserprofileartifacts` can also read a previously written fixture envelope, load the same explicit key provider, decrypt in memory, and return plaintext bytes to the caller only. It refuses missing or wrong keys, paths outside `ODIN_ROOT/browser-sessions/encrypted-profiles/`, and corrupted envelopes. It does not write decrypted files or attach profiles to browser launch.
+- `internal/runtime/browserprofilematerialize` uses the fixture artifact reader, writes decrypted bytes only under `ODIN_ROOT/runtime/browser-profile-materializations/<safe-name>/`, rejects paths outside that temporary materialization root, refuses credential-looking metadata, cleans only its target materialization directory, and does not attach profiles to browser launch.
 - Older Huginn/Plaid/Google notes describe narrow attended browser needs, but they do not define a durable Odin browser session profile authority.
 
 ## Non-Goals
@@ -28,7 +41,7 @@ This contract defines the Odin-native handoff for manual Huginn browser login an
 - No automated username, password, passkey, TOTP, recovery-code, or 2FA handling.
 - No password, TOTP seed, backup code, OAuth refresh token, or recovery-secret storage.
 - No form submit, message send, purchase, account change, delete, or external mutation execution.
-- No NoVNC implementation in this slice.
+- No real NoVNC service implementation in this slice.
 - No cookies, browser profile files, or profile bytes are created by this design.
 - Empty profile directory preparation does not write browser files, cookies, storage state, credentials, or profile bytes.
 - No browser-observed account binding or read-only domain verification check is performed by the metadata-only verification slice.
@@ -141,9 +154,53 @@ Forbidden goal types for session reuse:
 
 ## Future NoVNC/Tailscale Handoff Runner Contract
 
-The handoff runner is a future, operator-attended process boundary for manual login only. Its purpose is to launch one temporary visible browser session, expose its viewer only over an operator-approved private network path such as Tailscale to a NoVNC endpoint, and then stop after completion, expiration, or cancellation. Odin remains the metadata, policy, and audit authority. The runner must never become a credential collector, browser automation agent, profile registry, or goal execution authority.
+The handoff runner is an operator-attended process boundary for manual login only. Its future process implementation will launch one temporary visible browser session, expose its viewer only over an operator-approved private network path such as Tailscale to a NoVNC endpoint, and then stop after completion, expiration, or cancellation. Odin remains the metadata, policy, and audit authority. The runner must never become a credential collector, browser automation agent, profile registry, or goal execution authority.
 
-This section is a design contract only. It does not add runtime behavior, HTTP handlers, process launch, NoVNC services, Tailscale services, browser profile writes, cookie writes, or credential storage.
+The SQLite runner metadata store, metadata CLI, typed process-boundary skeleton, fixture-safe local process launch, explicit real display/VNC role launch, explicit real browser role launch, and explicit real websockify/noVNC role launch are implemented. Full service wiring, authenticated session attachment, and profile persistence remain design only. This slice does not add HTTP handlers, Tailscale services, browser profile writes, cookie writes, credential storage, or automatic login.
+
+### Local Process Topology
+
+The first real runner implementation must keep one local supervised topology per browser handoff runner record:
+
+1. **Browser process**: one visible browser instance launched for the linked session/login request only. The browser starts on the configured `allowed_domain` or a later approved start URL under that domain. It must run in a process group owned by the runner supervisor so cancellation and timeout cleanup can stop the full tree.
+2. **Virtual display or VNC server**: one display boundary for that browser process. The implementation may use a combined VNC server/display command or separate virtual display plus VNC commands, but Odin must treat them as child processes of the same runner lifecycle.
+3. **noVNC/websockify viewer**: one local viewer proxy that exposes the display through a private URL. The viewer process must be bound to loopback or an explicitly configured private interface by default.
+4. **Lifecycle supervisor**: Odin-owned runner code that validates config, starts children in order, records safe metadata, watches exits, enforces timeout, and performs cleanup. The supervisor is not a browser automation agent and must not inspect, collect, or persist credential material.
+
+The runner metadata row remains the durable authority. Process IDs, runner IDs, bind addresses, and viewer URLs are operational metadata attached to the row; they must not create a second runner registry.
+
+### Required Runner Config
+
+The future NoVNC runner must fail closed unless all required config is present and valid. Config may come from environment variables first, then a later Odin config file only if it uses the same validation rules.
+
+Required fields for the real process boundary:
+
+- `ODIN_BROWSER_HANDOFF_RUNNER=novnc`: selects the real local NoVNC runner. Empty or `stub` continues to select `StubRunner`; `fixture` continues to select the bounded fixture runner.
+- `ODIN_NOVNC_BROWSER_COMMAND`: absolute path to the browser executable.
+- `ODIN_NOVNC_DISPLAY_COMMAND`: absolute path to the virtual display or VNC/display command when the platform requires one.
+- `ODIN_NOVNC_WEBSOCKIFY_COMMAND`: absolute path to the noVNC or websockify command.
+- `ODIN_NOVNC_ALLOWED_COMMANDS`: comma-separated common allowlist of absolute executable paths. Every selected command must match one clean allowlist entry exactly.
+- `ODIN_NOVNC_BIND_ADDR`: optional bind host and port for the viewer proxy. Empty defaults to `127.0.0.1:0`.
+- `ODIN_NOVNC_PRIVATE_BASE_URL`: private operator URL base used to generate `viewer_url`, for example a Tailscale-only HTTPS origin.
+- `ODIN_NOVNC_TIMEOUT_SECONDS`: positive timeout capped by policy and never longer than the linked login request expiration.
+- `ODIN_NOVNC_REAL_BROWSER`: optional boolean gate. When true, the browser role may use a non-fixture-safe executable after all command, allowlist, executable-bit, bind, URL, and timeout validation passes. This does not relax display or websockify command restrictions and does not enable profile/session persistence.
+- `ODIN_NOVNC_REAL_DISPLAY`: optional boolean gate. When true, the display/VNC role may use a non-fixture-safe executable after all command, allowlist, executable-bit, bind, URL, and timeout validation passes. This does not relax browser or websockify command restrictions.
+- `ODIN_NOVNC_REAL_WEBSOCKIFY`: optional boolean gate. When true, the `novnc/websockify` role may use a non-fixture-safe executable after all command, allowlist, executable-bit, bind, URL, and timeout validation passes. This does not relax display or browser command restrictions.
+
+Optional fields:
+
+- Future explicit browser, display, and websockify arg fields may be added only if they remain structured argument lists passed without a shell. This slice does not add arg loading for the real NoVNC boundary.
+
+Config validation rules:
+
+- Every configured command path must be absolute, clean, present in `ODIN_NOVNC_ALLOWED_COMMANDS`, present on disk, and executable before launch.
+- Dry-run display, browser, and noVNC/websockify detection must also verify each configured command exists and has an executable bit before reporting `validation_status: "valid"`.
+- The implementation must not search `PATH`, invoke a shell, or accept command strings that combine executable and args.
+- `bind_addr` must be loopback by default. A non-loopback private interface requires an explicit later policy option and must still reject public wildcard binds such as `0.0.0.0`.
+- `private_base_url` must be absolute `http` or `https`; the first real slice should prefer `https` for any non-loopback origin.
+- `public_base_url` remains unsupported and must be rejected until a separate security contract approves public exposure.
+- Missing config must produce a structured `failed` runner result and audit event, not a partial process launch.
+- `LoadNoVNCLaunchConfigFromEnv` and `ValidateNoVNCLaunchConfig` validate the NoVNC launch config used by the skeleton and future real process boundary. They must not import `os/exec`, start child processes, create viewer routes, write profile data, or append runtime events by themselves.
 
 ### Runner Request
 
@@ -177,7 +234,7 @@ Field rules:
 
 ### Runner Response
 
-A future runner start result must use a stable JSON response envelope:
+A future non-stub runner start result must use a stable JSON response envelope:
 
 ```json
 {
@@ -205,6 +262,49 @@ Allowed response statuses are:
 
 `viewer_url` must be absent or null for `failed` results. `error_code` and `error_message` are required for `failed` and optional for terminal non-failure states. `process_id` may be null when an implementation uses a supervised runner ID rather than an OS process ID, but `runner_id` must always be present.
 
+### Runner Process Boundary Skeleton
+
+`internal/runtime/browserhandoff` defines the safe process boundary shape before any real process runner exists:
+
+- `StartRequest`: `session_id`, `login_request_id`, `handoff_id`, `profile_path`, `allowed_domain`, `timeout_seconds`, optional loopback `bind_addr`, optional `private_base_url`, and unsupported `public_base_url`.
+- `StartResponse`: safe runner metadata, status, optional future process/viewer fields, and structured error metadata.
+- `CancelRequest`: future runner ID plus optional reason.
+- `StatusResponse`: structured status for cancellation and later status lookups.
+
+The default `StubRunner` validates required request fields and returns `not_implemented`. It must not import `os/exec`, launch a browser, start NoVNC/Tailscale, write profile data, create viewer URLs, or store credential material. `public_base_url` is rejected until a later security contract explicitly permits it. `bind_addr` must stay on loopback in the stub boundary.
+
+The `FixtureRunner` is selected only when `ODIN_BROWSER_HANDOFF_RUNNER=fixture`. It requires `ODIN_BROWSER_HANDOFF_FIXTURE_COMMAND` to be an absolute path and that same path to appear in comma-separated `ODIN_BROWSER_HANDOFF_FIXTURE_ALLOWED_COMMANDS`. Optional `ODIN_BROWSER_HANDOFF_FIXTURE_ARGS` supplies explicit fixture arguments, and `ODIN_BROWSER_HANDOFF_FIXTURE_TIMEOUT_SECONDS` bounds execution. The fixture runner does not use a shell, does not create viewer URLs, does not launch a browser, and must only be used for harmless local test commands such as process lifecycle fixtures. It can return `started`, `failed`, or `expired` with safe `runner_id` and `process_id` metadata.
+
+The `NoVNCRunner` launch path is selected only when `ODIN_BROWSER_HANDOFF_RUNNER=novnc`. It loads and validates `ODIN_NOVNC_*` launch config through `LoadNoVNCLaunchConfigFromEnv` and `ValidateNoVNCLaunchConfig`, then starts the configured `display`, `browser`, and `novnc/websockify` roles through the bounded supervisor. The browser role is fixture-safe by default, but may use a non-fixture executable only when `ODIN_NOVNC_REAL_BROWSER=true` is set and the command is absolute, executable, allowlisted, and paired with validated private bind/base URL and bounded timeout settings. The display/VNC role is fixture-safe by default, but may use a non-fixture executable only when `ODIN_NOVNC_REAL_DISPLAY=true` is set under the same validation rules. The `novnc/websockify` role is fixture-safe by default, but may use a non-fixture executable only when `ODIN_NOVNC_REAL_WEBSOCKIFY=true` is set under the same validation rules. The current browser role launch passes no browser args, no custom env, and no working directory, so it does not inject the allocated `profile_path`, cookies, credentials, or saved browser state into the process boundary. It records safe runner metadata, generates a private `viewer_url` from the validated private base URL, waits for child process completion, and returns `completed`, `failed`, or `expired`. It must not start Tailscale services, write profile data, persist cookies, or store credential material.
+
+### Bounded Process Supervisor Abstraction
+
+`internal/runtime/browserhandoff` includes a reusable process supervisor contract for the future display, browser, and noVNC/websockify children. The abstraction is intentionally separate from `RunnerFromEnv`, `StubRunner`, `FixtureRunner`, and `runner start`; this slice does not wire it into live runner behavior.
+
+`StartProcessRequest` defines:
+
+- `role`: process role such as `display`, `browser`, or `novnc/websockify`.
+- `command_path`: absolute executable path.
+- `args`: explicit arguments passed without a shell by any future real runner.
+- `env`: explicit environment entries.
+- `working_directory`: optional absolute working directory.
+- `timeout_seconds`: positive timeout for the process.
+- `allowed_commands`: absolute command allowlist for the role.
+
+`ProcessHandle` records `pid`, `role`, `command_path`, `started_at`, and status `started`.
+
+`ProcessResult` records `pid`, `role`, `command_path`, `started_at`, optional `exited_at`, status `started`, `exited`, `failed`, `timeout`, or `cancelled`, plus safe stdout/stderr/error metadata. Runner metadata now persists terminal `exited_at` for completed, expired, cancelled, and failed lifecycle transitions. Result payloads must not contain passwords, cookies, bearer tokens, passkey material, TOTP values, backup codes, browser profile bytes, or screenshots.
+
+Supervisor validation is fail-closed:
+
+- command paths must be absolute and exactly present in the role allowlist.
+- `timeout_seconds` is required and positive.
+- `role` is required.
+- optional working directories must be absolute.
+- cancellation returns an audited-safe `cancelled` result shape, but this abstraction does not append runtime events by itself.
+
+The current implementation includes both an injected fake `ProcessCommandRunner` for unit tests and an `ExecCommandRunner` for allowlisted local commands. `ExecCommandRunner` uses `exec.CommandContext` without a shell, requires supervisor validation before start, starts commands in a process group, enforces `timeout_seconds`, kills the process group on timeout or cancellation, and captures stdout/stderr up to `4096` bytes per stream by default. The explicit `ODIN_BROWSER_HANDOFF_RUNNER=fixture` path is wired through `BoundedProcessSupervisor` and `ExecCommandRunner` from `runner start`: Odin records `started`, waits for the harmless process to exit, then records `completed`, `expired`, `failed`, or `cancelled` through the existing store transition path and audit event stream. The explicit `ODIN_BROWSER_HANDOFF_RUNNER=novnc` path is also wired through the supervisor. The browser role can be a real allowlisted executable only behind `ODIN_NOVNC_REAL_BROWSER=true`, the display/VNC role can be a real allowlisted executable only behind `ODIN_NOVNC_REAL_DISPLAY=true`, and the websockify/noVNC role can be a real allowlisted executable only behind `ODIN_NOVNC_REAL_WEBSOCKIFY=true`. The exec runner remains separate from profile persistence and credential handling; it must not start Tailscale, write profile files, persist cookies, or store credential material.
+
 ### Runner Safety Policy
 
 The runner policy is fail-closed:
@@ -212,14 +312,18 @@ The runner policy is fail-closed:
 - Manual login only. The operator performs username, password, passkey, 2FA, consent, and account selection directly in the visible browser.
 - No auto-submit, form fill, credential scraping, prompt capture, password manager integration, TOTP handling, recovery-code handling, or OAuth token extraction.
 - No cross-domain navigation unless the destination is the configured `allowed_domain` or a narrower approved hostname. Redirects outside policy must stop the runner or require a later explicit approval contract.
+- `allowed_domain` is required for every start request and must be validated before process launch.
+- `profile_path` must already be allocated in SQLite and the empty profile directory must already be prepared when a persistent profile run is requested.
 - No browser profile writes until `profile_storage_policy` and `CanWriteBrowserProfile(session)` allow writes. In the current implementation every policy value denies profile writes, so a future runner must run with ephemeral browser state or stop before persistence.
+- Persistent profile mode is forbidden until the profile write policy explicitly allows writes. A prepared empty directory is necessary for persistent mode, but it is not sufficient authorization.
 - No cookies, storage state, browser profile bytes, screenshots containing secrets, raw credential prompts, passwords, passkeys, TOTP values, backup codes, OAuth tokens, or bearer tokens may be written to Odin metadata, events, logs, evidence, or profile storage.
 - Runner startup does not approve a goal, transition a goal to executable state, satisfy a policy approval, or grant mutation authority.
 - Viewer access must be time-limited, bound to the login request, and accessible only through an operator-approved private network path.
+- No public viewer URL is generated by default. The first real runner must return `viewer_url` only when it can be derived from validated private config and bound runner metadata.
 
 ### Runner Lifecycle
 
-Runner metadata uses a separate future lifecycle from browser session status and login request status:
+Runner metadata uses a separate lifecycle from browser session status and login request status:
 
 1. `requested`: Odin has accepted the runner request metadata but has not exposed a viewer.
 2. `started`: the visible browser and private viewer route are available for manual login.
@@ -227,20 +331,57 @@ Runner metadata uses a separate future lifecycle from browser session status and
 4. `expired`: timeout or login request expiration stopped the runner before completion.
 5. `cancelled`: the operator or policy stopped the runner before completion.
 
-Allowed transitions are `requested -> started`, `requested -> failed`, `started -> completed`, `started -> expired`, and `started -> cancelled`. Terminal states are `failed`, `completed`, `expired`, and `cancelled`. A terminal runner must not be restarted in place; create a new login request and runner record instead.
+Allowed transitions are `requested -> started`, `requested -> expired`, `requested -> cancelled`, `requested -> failed`, `started -> completed`, `started -> expired`, `started -> cancelled`, and `started -> failed`. Terminal states are `failed`, `completed`, `expired`, and `cancelled`. A terminal runner must not be restarted in place; create a new login request and runner record instead.
 
 Runner lifecycle must not silently mutate session lifecycle. A `completed` runner may complete the linked login request only through the same completion path as `POST /browser/session/handoff/complete`; session verification still requires the existing verification policy for the current slice and stronger browser-observed checks in a later slice.
 
+### Runner Start, Status, Cancel, and Cleanup Behavior
+
+Start behavior:
+
+- Load the runner metadata row and require status `requested`.
+- Resolve the linked login request and browser session through the existing handoff lookup validation.
+- Validate config before launching any child process.
+- Start child processes in dependency order: display/VNC first when needed, browser second, noVNC/websockify last.
+- Record `started` only after the viewer proxy is reachable on the configured bind address and the generated `viewer_url` is private and time-limited.
+- If any process fails before that point, terminate already-started children and record `failed` with a structured `error_code`.
+
+Status behavior:
+
+- `runner show --id <id> --json` remains the operator status read path.
+- A future status implementation may inspect process liveness, but SQLite remains the state authority. If process liveness disagrees with SQLite, the runner must reconcile by appending an audited transition such as `failed`, `expired`, or `cancelled`; it must not silently rewrite state.
+- Stale `started` runners whose process group no longer exists must be marked `failed` or `expired` with an explicit stale-runner reason.
+
+Cancel behavior:
+
+- Cancel must signal the runner process group, wait a bounded grace period, then kill remaining children.
+- Cancel must remove transient viewer/display resources owned by the runner.
+- Cancel records `cancelled` through the existing store transition path. If cleanup cannot fully complete, record safe error metadata and keep the terminal state auditable.
+
+Timeout cleanup:
+
+- The supervisor must stop the process group when `ODIN_NOVNC_TIMEOUT_SECONDS` expires or when the linked login request expires, whichever comes first.
+- Timeout records `expired` through the existing store transition path.
+- Cleanup must be idempotent so repeated cancel/status/tick calls do not relaunch or double-record terminal transitions.
+
+Stale runner cleanup:
+
+- A later `odin serve` or maintenance tick may scan for active runners past expiration and call the same cleanup path.
+- The scan must be metadata-driven from SQLite, not from a sidecar pid file registry.
+- Missing pid/process metadata must fail closed by marking the runner terminal when the viewer cannot be proven active and private.
+
 ### Runner Audit Events
 
-Future runner state changes must append runtime events in the same transaction as runner metadata changes. Event payloads must follow the existing browser session audit redaction rules.
+Runner state changes append runtime events in the same transaction as runner metadata changes. Event payloads must follow the existing browser session audit redaction rules.
 
-Required future event types:
+Required event types:
 
+- `browser.handoff_runner_requested`
 - `browser.handoff_runner_started`
 - `browser.handoff_runner_expired`
 - `browser.handoff_runner_cancelled`
 - `browser.handoff_runner_completed`
+- `browser.handoff_runner_failed`
 
 Suggested payload fields:
 
@@ -277,6 +418,13 @@ odin browser session revoke --id <id> --json
 odin browser session login-request --id <id> [--handoff-base-url <url>] --json
 odin browser session login-requests --id <id> --json
 odin browser session handoff show --handoff-id <id> --json
+odin browser session runner create --login-request-id <id> --json
+odin browser session runner list --login-request-id <id> --json
+odin browser session runner show --id <id> --json
+odin browser session runner start --id <id> --json
+odin browser session runner plan-novnc --id <id> --browser-command <path> --browser-allowed-command <path> --display-command <path> --display-allowed-command <path> --novnc-command <path> --novnc-allowed-command <path> --bind-addr <addr> --private-base-url <url> --timeout-seconds <n> --json
+odin browser session runner status --id <id> --status <started|completed|expired|cancelled|failed> --json
+odin browser session runner cancel --id <id> --json
 odin browser session verify --id <id> [--login-request-id <id>] --json
 odin browser session prepare-profile --id <id> --json
 ```
@@ -306,6 +454,14 @@ POST /browser/session/handoff/complete
 The handoff URL is not proof that a browser handoff service exists. Odin now exposes only a read-only HTTP metadata inspection route. This slice does not add NoVNC, Tailscale service, browser launch, browser profile write, credential storage, or session verification. Operators should treat any base URL as a future private-network browser handoff surface only, intended for Tailscale or another operator-approved private path after that service is implemented.
 
 `handoff show` and `GET /browser/session/handoff?handoff_id=<id>` are read-only lookups for safe manual-login metadata. They require a handoff ID, reject missing IDs, unknown handoffs, non-`requested` login requests, expired requests, and revoked or missing linked sessions. They return only the handoff ID, login request ID, session ID, session name, domain, optional account hint, expiration, request status, and `allowed_actions: manual_login_only`. They must not append runtime events, launch a browser, create NoVNC/Tailscale resources, write profile files, or store credential material.
+
+`runner create` resolves the login request and linked session from the existing store, then writes only runner metadata with status `requested`. It rejects missing, completed, expired, cancelled, or otherwise invalid login requests through the store validation path. It does not launch a browser, expose a viewer, start NoVNC/Tailscale, write profile data, or handle credential material. `viewer_url`, `runner_id`, `process_id`, and network fields remain null until a future process-boundary implementation records safe metadata.
+
+`runner start` loads existing runner metadata, validates the linked login request and browser session through the existing handoff lookup rules, and calls the selected `internal/runtime/browserhandoff` runner path. The default stub returns `not_implemented`, so Odin records a safe `failed` runner status through the existing store transition path with `error_code: "not_implemented"`. The explicit NoVNC mode validates configured `ODIN_NOVNC_*` launch settings, starts the configured display/VNC command, configured browser command, and configured `novnc/websockify` command through the bounded supervisor, records `started` with private `viewer_url`, `runner_id`, process metadata, bind address, and private base URL, waits for child process exit, and then records `completed`, `expired`, or `failed` through the existing event stream. The browser command may be a real allowlisted executable only when `ODIN_NOVNC_REAL_BROWSER=true`; the display/VNC command may be a real allowlisted executable only when `ODIN_NOVNC_REAL_DISPLAY=true`; the websockify command may be a real allowlisted executable only when `ODIN_NOVNC_REAL_WEBSOCKIFY=true`. The browser process receives no configured args, no custom env, no working directory, and no profile path reuse. The explicit fixture mode uses the bounded process supervisor and `ExecCommandRunner` to start only the configured allowlisted harmless command, record `started` with `runner_id`, `process_id`, and `started_at`, wait for process exit, and then record `completed`, `expired`, `failed`, or `cancelled` with terminal `exited_at` and safe error metadata. These paths must not create Tailscale resources, write profile files, persist cookies, or store credential material.
+
+`runner plan-novnc` loads existing runner metadata, validates the linked login request and browser session through the existing handoff lookup rules, and calls the pure NoVNC dry-run planner. It returns planned command roles, validated bind/private URL/timeout config, a planned private `viewer_url`, and display/browser/noVNC command detection metadata including `detected_path`, `command_role`, and `validation_status` for every planned command. It must not update runner status, append runtime events, launch processes, start browsers, start NoVNC/websockify, create Tailscale resources, write profile files, or store credential material. The command accepts explicit command paths and allowlists as flags; later config-file support must use the same validation rules.
+
+`runner list`, `runner show`, `runner status`, and `runner cancel` expose and mutate only the `browser_handoff_runners` metadata rows. Status changes append runner lifecycle events transactionally through the existing browser session runtime event stream. `runner show --id <id> --json` is the non-mutating runner status inspection path; `runner status` is reserved for explicit lifecycle transitions and accepts `started`, `completed`, `expired`, `cancelled`, and `failed`. Terminal runners cannot be restarted in place.
 
 The HTML shell is static and informational. It displays safe metadata, states that no browser session is launched yet, states that Odin is not collecting credentials, and states that login and 2FA will be manual in a future handoff step. Dynamic values must be escaped. The page must not include external scripts, inline scripts, forms, credential inputs, password fields, or profile/session write affordances.
 
@@ -410,6 +566,91 @@ Implemented `POST /browser/session/handoff/complete` returns metadata-only opera
 }
 ```
 
+Implemented `runner create --json` returns metadata-only runner details without secrets:
+
+```json
+{
+  "runner": {
+    "id": 1,
+    "session_id": 1,
+    "login_request_id": 1,
+    "handoff_id": "opaque-handoff-id",
+    "status": "requested",
+    "viewer_url": null,
+    "runner_id": null,
+    "process_id": null,
+    "bind_addr": null,
+    "private_base_url": null,
+    "public_base_url": null,
+    "expires_at": "2026-05-06T00:10:00Z",
+    "created_at": "2026-05-06T00:00:00Z",
+    "updated_at": "2026-05-06T00:00:00Z",
+    "error_code": null,
+    "error_message": null
+  }
+}
+```
+
+Implemented `runner start --json` with the current `StubRunner` returns safe failure metadata without secrets:
+
+```json
+{
+  "runner": {
+    "id": 1,
+    "session_id": 1,
+    "login_request_id": 1,
+    "handoff_id": "opaque-handoff-id",
+    "status": "failed",
+    "viewer_url": null,
+    "runner_id": null,
+    "process_id": null,
+    "expires_at": "2026-05-06T00:10:00Z",
+    "error_code": "not_implemented",
+    "error_message": "browser handoff runner process boundary is not implemented"
+  }
+}
+```
+
+Implemented `runner plan-novnc --json` returns a dry-run plan without mutating runner metadata:
+
+```json
+{
+  "plan": {
+    "id": 1,
+    "session_id": 1,
+    "login_request_id": 1,
+    "handoff_id": "opaque-handoff-id",
+    "commands": [
+      {
+        "role": "display",
+        "path": "/usr/bin/x11vnc",
+        "detected_path": "/usr/bin/x11vnc",
+        "command_role": "display",
+        "validation_status": "valid"
+      },
+      {
+        "role": "browser",
+        "path": "/usr/bin/chromium",
+        "detected_path": "/usr/bin/chromium",
+        "command_role": "browser",
+        "validation_status": "valid"
+      },
+      {
+        "role": "novnc",
+        "path": "/usr/bin/websockify",
+        "detected_path": "/usr/bin/websockify",
+        "command_role": "novnc/websockify",
+        "validation_status": "valid"
+      }
+    ],
+    "bind_addr": "127.0.0.1:6080",
+    "private_base_url": "https://odin-handoff.tailnet.local",
+    "viewer_url": "https://odin-handoff.tailnet.local/session/dry-run-opaque-handoff-id",
+    "timeout_seconds": 300
+  }
+}
+```
+
 `revoke` is always mutating and must require a reason. `verify` is mutating when it changes status, binding, expiration, or verification timestamps.
 
 ## Storage Contract
@@ -420,6 +661,7 @@ Tables:
 
 - `browser_session_profiles`: implemented profile metadata and policy binding.
 - `browser_session_login_requests`: implemented metadata-only manual login requests with status, opaque handoff ID, optional future handoff URL, expiration, completion timestamp, and audit timestamps.
+- `browser_handoff_runners`: implemented metadata-only runner records linked to login requests and browser sessions, with lifecycle status, optional future viewer/process/network fields, expiration, started/exited timestamps, terminal timestamps, and safe error metadata.
 - `browser_session_events`: optional profile-local lifecycle detail if the global runtime events stream alone is not sufficient for efficient profile show/history.
 - `browser_session_goal_links`: explicit goal/profile relation with reason, requested tier, and verification evidence references.
 
@@ -433,6 +675,76 @@ Browser profile files:
 - `profile_storage_policy` defaults to `encrypted_required`; prepared directories alone are not approval to write browser files.
 - Profile files must be encrypted at rest before real session writes are allowed. If host-level encryption is the first slice, policy must still deny profile writes unless the operator explicitly accepts that documented gap in a later policy slice.
 - No credential material may be written to Odin-specific metadata, events, logs, screenshots, or evidence payloads.
+
+### Encrypted Profile Storage Contract
+
+Encrypted profile storage is the future contract for converting a prepared empty profile directory into reusable browser state. The current implementation can encrypt caller-provided fixture bytes, record encrypted-artifact metadata, decrypt fixture artifacts back to memory for tests, and materialize fixture artifacts into temporary read-only runtime directories for operator proof. It still cannot capture real browser profiles or make a profile attachable. Until the capture/export path, read-only attach path, and cleanup/rotation behavior are implemented, `CanWriteBrowserProfile(session)` must continue to deny every policy value.
+
+What may be stored after the future encrypted-storage slice is approved:
+
+- A browser profile directory snapshot captured from the allocated `ODIN_ROOT/browser-sessions/profiles/<session>` directory.
+- Cookie and session-state files that the browser writes as part of that profile snapshot, but only inside the encrypted archive/blob.
+- Local storage, session storage, IndexedDB, cache metadata, and equivalent browser-origin state when they are part of the captured profile snapshot and are required for read-only authenticated reuse.
+
+What must never be stored by Odin:
+
+- Passwords, passkeys, password-manager exports, or password autofill databases.
+- TOTP seeds, MFA enrollment secrets, backup factors, recovery codes, or equivalent account-recovery material.
+- Raw credentials, credential prompts, operator-entered secret text, OAuth refresh tokens copied out of the browser profile, or any secret copied into SQLite metadata, runtime events, logs, screenshots, or goal evidence.
+
+Encryption model:
+
+- Key source: the implemented foundation loads only the explicit `ODIN_BROWSER_PROFILE_KEY_B64` environment variable. It must decode to a 32-byte AES key and fails closed when missing, malformed, or the wrong length. No key generation command, persistent key store, CLI/HTTP wiring, or profile capture path exists yet.
+- Key identity: SQLite may store non-secret key metadata such as `key_provider`, `key_id`, `key_version`, `cipher`, `archive_digest`, `encrypted_blob_path`, `captured_at`, `encrypted_at`, and `expires_at`. The current safe reference is `env:ODIN_BROWSER_PROFILE_KEY_B64`; raw key bytes must never be stored in SQLite, runtime events, logs, or profile metadata.
+- Fixture artifact writer: the implemented writer accepts fixture plaintext bytes from the caller, never reads a browser profile directory, encrypts with the existing AES-256-GCM helper, writes only the encoded envelope, and records metadata in SQLite through `CreateBrowserEncryptedProfileArtifact`.
+- Operator fixture artifact creation: `odin browser session profile artifact create-fixture --session-id <id> --name <safe-name> --plaintext-file <path> --json` reads only the explicit plaintext fixture file supplied by the operator, loads `ODIN_BROWSER_PROFILE_KEY_B64` through the existing env key provider, writes only encrypted envelope bytes under `ODIN_ROOT/browser-sessions/encrypted-profiles/`, and returns metadata-only JSON with artifact id, path, status, and key reference. It rejects missing keys, missing fixture files, unsafe or credential-looking artifact names, and fixture sources under `ODIN_ROOT/browser-sessions`. It must not output plaintext, source file paths, browser profile bytes, cookies, credentials, or decrypted material.
+- Fixture artifact reader: the implemented reader accepts artifact metadata or path, validates it under `ODIN_ROOT/browser-sessions/encrypted-profiles/`, reads the encoded envelope, decrypts with the explicit key provider, and returns plaintext bytes to the caller only. It must not log plaintext, create browser profile directories, or attach profiles to browser launch.
+- Fixture artifact materialization: the implemented materializer calls the fixture artifact reader and writes decrypted fixture bytes only under `ODIN_ROOT/runtime/browser-profile-materializations/<safe-name>/profile.materialized`. It requires an explicit target directory under the materialization root, rejects traversal, encrypted artifact paths, prepared profile paths, credential-looking metadata, and existing materialization directories, marks files/directories read-only where supported, and records only safe metadata through `browser.profile_materialized`. Cleanup removes only that materialization directory, is idempotent, preserves encrypted `.enc` artifacts, and records `browser.profile_materialization_cleaned`.
+- Fixture artifact cleanup: the implemented cleanup helper validates an encrypted artifact path under `ODIN_ROOT/browser-sessions/encrypted-profiles/` and removes only that `.enc` envelope file. It is idempotent for missing artifacts and must not remove profile directories, decrypted materialization paths, cookies, credentials, or browser profile bytes.
+- Fixture artifact retention: the implemented retention service lists encrypted artifact metadata from SQLite, treats only `revoked` and `expired` artifacts as cleanup eligible, defaults to dry-run, and calls the cleanup helper only when `apply` is explicitly true. Successful cleanup transitions the artifact to `cleaned` with `cleaned_at` and appends `browser.profile_cleaned`; cleanup failures leave the artifact terminal status unchanged, record safe error metadata, and append `browser.profile_cleanup_failed`.
+- Operator retention cleanup: `odin browser session profile retention cleanup [--session-id <id>] [--apply] --json` calls the retention service. Without `--apply`, it reports eligible, cleaned, failed, skipped, and artifact action details without deleting files or mutating artifact status. With `--apply`, it deletes only eligible encrypted `.enc` envelope files through the cleanup helper and records mutations through the existing SQLite transition paths. This CLI has no HTTP route, browser launch, profile attach, profile capture, decrypted output, cookie writes, or credential handling.
+- Encryption at rest: reusable profile state must be encrypted before Odin records it as attachable. A prepared unencrypted directory is temporary working state only and cannot satisfy attachment policy.
+- Fail closed: if the key provider is unavailable, returns an unknown key, fails integrity verification, or cannot decrypt the profile blob, Odin must refuse capture, attach, rotation, and read-only reuse. It may record safe failure metadata and audit events, but must not fall back to plaintext.
+- Key rotation: rotation creates a new encrypted blob with a newer `key_version`, verifies decryptability and digest metadata, updates SQLite in one transaction, and schedules the old encrypted blob for cleanup only after the new blob is durable. Rotation failure leaves the previous encrypted blob authoritative.
+
+Read-only materialized attach contract:
+
+- This is a future contract only. The current implementation can materialize fixture artifacts for operator proof, but no runner currently consumes a materialized profile path.
+- Preconditions: the encrypted artifact metadata exists in SQLite, the encrypted artifact file still exists under `ODIN_ROOT/browser-sessions/encrypted-profiles/`, the artifact has been materialized into an explicit path under `ODIN_ROOT/runtime/browser-profile-materializations/<safe-name>/`, that materialization path is read-only where the host supports permissions, and the browser launch gate for authenticated profile attach is explicitly enabled. If any precondition is missing, Odin records `browser.profile_attach_failed` with safe metadata and does not launch a browser with that profile.
+- Attach behavior: the runner receives only the materialized profile path and safe artifact/session identifiers. It must not write to the source encrypted artifact, must not write outside the temporary materialization directory, and must treat attach as read-only by default. Any future writable capture/update flow must be a separate explicit capture contract; attach never promotes the materialized copy to source-of-truth state.
+- Browser invocation boundary: the first attach implementation must pass the materialized path only to a harmless fixture or allowlisted browser command behind the existing runner launch gates. The command config must distinguish the immutable encrypted artifact path from the temporary materialized profile path, and must never infer attach permission from session existence alone.
+- Cleanup behavior: Odin must attempt materialization cleanup after normal completion, after failed launch, and after timeout, cancellation, or process-supervisor termination. Cleanup must remove only the temporary materialization directory, must preserve the encrypted artifact, and must record `browser.profile_attach_cleaned` after the attach cleanup path has completed or safely no-oped. A cleanup failure must be recorded as safe failure metadata and must not delete the encrypted artifact.
+- Security boundaries: attach must not extract credentials, automate login, read or store passwords, TOTP seeds, recovery codes, passkeys, password-manager exports, OAuth refresh tokens copied out of the browser profile, or raw credential prompts. Decrypted profile material must not persist after cleanup, and attach output, events, logs, screenshots, goal evidence, and runner metadata must not include credential values, cookie values, or browser profile bytes.
+
+Storage layout:
+
+- Prepared working directory: `ODIN_ROOT/browser-sessions/profiles/<session>`.
+- Encrypted archive/blob path: `ODIN_ROOT/browser-sessions/encrypted-profiles/<artifact>.enc`. The writer stores the path relative to `ODIN_ROOT` in SQLite.
+- Temporary fixture materialization path: `ODIN_ROOT/runtime/browser-profile-materializations/<safe-name>/profile.materialized`. This is read-only where supported, operator-targeted, cleanup-bounded, and not a browser profile attach path.
+- Temporary capture path: `ODIN_ROOT/browser-sessions/profiles/<session>/.capture-tmp/<capture-id>` and only for bounded capture/rotation work. Temporary plaintext must be removed on success, failure, cancellation, and expiry.
+- Metadata authority: SQLite stores profile lifecycle, policy, encryption metadata, encrypted blob relative path, digest, key metadata, and audit linkage. The filesystem is never the registry of record.
+
+Policy gates:
+
+- `disabled`: no profile directory creation, capture, encryption, attach, or rotation is allowed.
+- `encrypted_required`: profile writes may proceed only through the future capture/encrypt path and become attachable only after the encrypted blob and SQLite metadata are committed together.
+- `prepared_unencrypted`: an explicitly non-attachable state for an empty or temporary prepared directory. It may support manual login setup in a bounded future flow, but it cannot be reused by the goal runner and cannot be attached to read-only browser work.
+
+Lifecycle:
+
+- `prepared`: Odin has allocated metadata and, if explicitly requested, created an empty profile directory. No reusable browser state exists.
+- `capture_requested`: an operator-approved or policy-approved capture has been requested for a verified session. Odin records `browser.profile_capture_requested` before capture begins.
+- `encrypted`: Odin has captured allowed browser state, encrypted it at rest, committed SQLite metadata, removed temporary plaintext, and recorded `browser.profile_encrypted`.
+- `attached_readonly`: Odin has mounted or materialized the encrypted profile for a read-only browser run under the allowed domain and recorded `browser.profile_attached`. The attached copy must be read-only to Odin callers and must not become the source of truth until a later capture is explicitly requested.
+- `revoked`: Odin refuses future capture, attach, decrypt, and rotation for the profile, records `browser.profile_revoked`, and schedules encrypted blobs and prepared directories for cleanup according to retention policy.
+- `expired`: Odin refuses attach and capture until the operator completes a fresh verification/capture flow. Expiry does not delete evidence immediately unless the cleanup policy says so.
+
+Security review:
+
+- This contract intentionally does not implement key generation, persistent key storage, profile capture, browser launch changes, profile writes, credential collection, HTTP routes, or read-only attachment. The implemented crypto helper, env key provider, fixture-only artifact writer, fixture-only artifact reader, and read-only fixture materializer are isolated foundations and are not wired to runner start, real browser capture, browser launch, or profile attachment.
+- The helper envelope uses versioned `AES-256-GCM` authenticated encryption with an explicit 32-byte key, a random 12-byte nonce, and no global or default key. Missing, wrong, or unavailable keys fail closed.
+- Future implementation must prove that plaintext profile bytes are bounded to the prepared working directory or temporary capture path, are never copied into SQLite/events/logs/evidence, and are removed on all terminal paths.
+- Audit payloads for profile storage must include only safe metadata: session ID, profile key, policy decision, lifecycle status, key ID/version, encrypted blob relative path, digest, actor, reason, and timestamps.
 
 ## Policy Gates
 
@@ -478,18 +790,35 @@ Required event types for the metadata foundation:
 - `browser.session_login_expired`
 - `goal.waiting_for_human_login`
 
-Required future runner event types:
+Required runner event types:
 
+- `browser.handoff_runner_requested`
 - `browser.handoff_runner_started`
 - `browser.handoff_runner_expired`
 - `browser.handoff_runner_cancelled`
 - `browser.handoff_runner_completed`
+- `browser.handoff_runner_failed`
+
+Required encrypted profile storage event types:
+
+- `browser.profile_capture_requested`
+- `browser.profile_encrypted`
+- `browser.profile_attach_requested`
+- `browser.profile_attached`
+- `browser.profile_attach_failed`
+- `browser.profile_attach_cleaned`
+- `browser.profile_revoked`
+- `browser.profile_expired`
+- `browser.profile_cleaned`
+- `browser.profile_cleanup_failed`
 
 `browser.session_status_changed` covers profile status changes. Login request metadata uses specific request lifecycle events.
 
 Suggested payload fields:
 
 - `session_id`
+- `artifact_id`
+- `runner_id`
 - `profile_key`
 - `domain`
 - `account_label`
@@ -503,9 +832,13 @@ Suggested payload fields:
 - `created`
 - `profile_path`
 - `profile_storage_policy`
+- `encrypted_artifact_path`
+- `materialization_path`
 - `expires_at`
 - `handoff_expires_at`
 - `last_verified_at`
+- `error_code`
+- `error_message`
 - `policy_decision`
 
 Audit payloads must not contain passwords, cookies, tokens, passkey material, TOTP values, backup codes, raw credential prompts, or screenshot text that reveals secrets.
@@ -529,15 +862,34 @@ Rules:
 4. Manual verification metadata surface: implemented `odin browser session verify` to set session status `verified`, record `last_verified_at`, and optionally complete a login request, with no browser launch or credential handling.
 5. Profile path and empty directory preparation: implemented safe profile path allocation plus explicit `odin browser session prepare-profile` for empty-directory creation.
 6. Profile storage policy gate: implemented `profile_storage_policy` with default `encrypted_required`, CLI JSON output, and a deny-all `CanWriteBrowserProfile` helper until encrypted storage exists.
-7. Encrypted profile storage: add encrypted profile root handling and policy denial for unencrypted profiles.
-8. Authenticated read-only attachment: allow `odin browser run` and goal runner evidence collection to attach a verified `authenticated_readonly` profile for allowed domains only.
-9. Handoff runner metadata store: add additive SQLite runner metadata with `requested`, `started`, `failed`, `completed`, `expired`, and `cancelled` states; append runner audit events transactionally.
-10. Handoff runner CLI: add minimal start/cancel/show/list commands under the existing `odin browser session handoff` surface, reusing current session and login request validation.
-11. Process boundary: define and implement the isolated runner process contract, shutdown semantics, timeout enforcement, and fail-closed cleanup without profile writes.
-12. Local NoVNC fixture: add a local-only fixture for tests that proves viewer URL wiring and lifecycle behavior without external network mutation.
-13. Tailscale/private URL config: add private viewer URL configuration and reject public exposure unless a later security contract explicitly allows it.
-14. Profile write gate integration: connect runner persistence only after encrypted profile storage and `CanWriteBrowserProfile(session)` allow writes.
-15. Operator runbooks and overview visibility: surface session health, expiring profiles, active handoff runners, and waiting login goals in existing overview lanes if a clean projection lane exists.
+7. Encrypted profile storage: add schema, key provider, encryption helper, fixture artifact writer, fixture artifact reader, read-only fixture materialization, fixture artifact cleanup, audited retention, capture/export, attach read-only, and rotation slices. The schema slice records encrypted blob metadata in SQLite only. The fixture-only encryption-helper slice provides versioned `AES-256-GCM` envelope encryption with explicit key input, random nonce, and fail-closed authentication checks. The key-provider foundation loads only `ODIN_BROWSER_PROFILE_KEY_B64`, rejects missing/malformed/wrong-length keys, and returns a safe `env:ODIN_BROWSER_PROFILE_KEY_B64` metadata reference without key storage or CLI/HTTP wiring. The fixture artifact writer encrypts caller-provided bytes, writes an envelope under `browser-sessions/encrypted-profiles/`, and records metadata through the existing store method without browser capture. The fixture artifact creation CLI exposes that writer for explicit fixture files only, without browser capture, source path disclosure, plaintext output, browser attach, or credential storage. The fixture artifact reader decrypts those envelopes back to caller memory only, without browser attach or credential storage. The read-only fixture materializer writes decrypted fixture bytes only under `runtime/browser-profile-materializations/<safe-name>/`, records safe audit metadata, and cleanup removes only that temporary materialization path while preserving encrypted artifacts. The fixture artifact cleanup helper removes only validated `.enc` envelopes under `browser-sessions/encrypted-profiles/` and leaves metadata, profile directories, decrypted paths, cookies, and credentials untouched. The audited retention helper dry-runs by default, cleans only revoked/expired artifact files when `apply` is set, records `cleaned` metadata plus audit events on success, and records safe cleanup-failure audit metadata on rejection. The future capture/export slice turns an allowed prepared profile directory into an encrypted blob without storing forbidden credential material in metadata or logs. The attach read-only slices below turn materialized encrypted state into a runner input only for read-only allowed-domain browser work. Rotation removes temporary plaintext, rotates keys transactionally, and preserves the previous encrypted blob if rotation fails.
+8. Attach metadata/store link: add metadata that links an attach attempt to one browser session, one encrypted artifact, and one materialization path, and records `browser.profile_attach_requested`, `browser.profile_attached`, `browser.profile_attach_failed`, and `browser.profile_attach_cleaned` through the existing browser session event stream without storing plaintext or credential material.
+9. Runner attach config: add a typed runner config that accepts a materialized profile path only when it is under `ODIN_ROOT/runtime/browser-profile-materializations/`, read-only where supported, linked to an encrypted artifact, and guarded by the explicit browser launch gate.
+10. Read-only attach fixture: prove the runner can consume a materialized profile path with a harmless fixture command, no browser launch, no external mutation, no writes to the source encrypted artifact, and cleanup on normal completion.
+11. Browser attach with harmless executable: extend the process-boundary runner to pass the materialized profile path to an allowlisted harmless executable, recording safe start/fail/cleanup metadata while keeping real browser launch disabled.
+12. Cleanup-on-failure: prove cleanup executes after failed launch, timeout, cancellation, and supervisor termination, and that cleanup preserves the encrypted artifact while removing only the temporary materialization directory.
+13. Later real browser attach: after fixture and harmless executable proofs pass, allow a real browser command behind explicit operator gates for authenticated read-only domains only. This slice must not add automatic login, credential extraction, profile capture/update, or mutation actions.
+14. Authenticated read-only attachment: allow `odin browser run` and goal runner evidence collection to attach a verified `authenticated_readonly` profile for allowed domains only after the attach contract above is implemented.
+15. Handoff runner metadata store: implemented additive SQLite runner metadata with `requested`, `started`, `failed`, `completed`, `expired`, and `cancelled` states; append runner audit events transactionally.
+16. Handoff runner CLI: implemented minimal `odin browser session runner create|list|show|start|status|cancel` commands, reusing current session and login request validation without process launch.
+17. Process boundary: implemented a typed `internal/runtime/browserhandoff` skeleton with validating `StubRunner`; real browser process launch, shutdown semantics, and fail-closed cleanup remain future work.
+18. Bounded fixture runner: implemented explicit env-gated `FixtureRunner` for harmless allowlisted local commands with timeout handling and safe process metadata. Local NoVNC fixture remains future work.
+19. NoVNC runner contract refinement: document process topology, config, security rules, lifecycle cleanup, and staged implementation constraints before process code.
+20. Command contract and config validation: implemented pure NoVNC dry-run and real-launch config models with validation for absolute allowlisted command paths, loopback/private bind settings, private base URL, and bounded timeout without launching processes.
+21. Dry-run NoVNC runner: implemented pure request/config planning and `odin browser session runner plan-novnc` JSON output that returns planned command roles, validated bind/timeout config, command detection metadata for every planned display/browser/noVNC role, and a private planned `viewer_url` without starting child processes or mutating runner metadata. Real process wiring remains future work.
+22. Bounded process supervisor abstraction: implemented injected-runner process supervision contracts, request/handle/result shapes, allowlist validation, timeout result handling, and cancellation result handling without wiring into real runner start.
+23. Bounded exec process runner: implemented `ExecCommandRunner` behind the supervisor abstraction for harmless allowlisted local commands with process-group kill on timeout/cancel, bounded stdout/stderr capture, and no wiring into runner start.
+24. Local fixture process runner lifecycle: implemented `runner start` wiring from fixture mode through the bounded process supervisor and existing runner metadata transitions, proving harmless allowlisted command completion, timeout, disallowed command rejection, `started` and terminal audit events, and no browser/NoVNC/Tailscale/profile writes.
+25. NoVNC runner skeleton: implemented explicit `ODIN_BROWSER_HANDOFF_RUNNER=novnc` selection that validates `ODIN_NOVNC_*` launch config and returns `not_implemented` through the existing `runner start` status/audit path without process launch.
+26. NoVNC fixture-safe launch: implemented explicit NoVNC runner wiring through the bounded supervisor using only allowlisted harmless local commands for display, browser, and `novnc/websockify` roles, with private viewer URL metadata, started/completed/failed/expired lifecycle transitions, and no real browser/NoVNC/Tailscale/profile writes.
+27. Display/browser/websockify command detection: implemented dry-run detection metadata for explicit display, browser, and noVNC/websockify command paths with absolute path, allowlist, existence, and executable-bit checks without process launch.
+28. Real websockify role launch: implemented explicit `ODIN_NOVNC_REAL_WEBSOCKIFY=true` gate that permits only the `novnc/websockify` role to use a real allowlisted executable while display/browser remain fixture-safe, with private `viewer_url`, existing lifecycle/audit transitions, timeout/failure handling, and no profile/cookie/credential writes.
+29. Real display/VNC role launch: implemented explicit `ODIN_NOVNC_REAL_DISPLAY=true` gate that permits only the display/VNC role to use a real allowlisted executable while browser remains fixture-safe and websockify remains separately gated, with private `viewer_url`, existing lifecycle/audit transitions, timeout/failure handling, and no profile/cookie/credential writes.
+30. Real browser role launch: implemented explicit `ODIN_NOVNC_REAL_BROWSER=true` gate that permits only the browser role to use a real allowlisted executable while display and websockify remain separately gated, with private `viewer_url`, existing lifecycle/audit transitions, timeout/failure handling, no browser args/env/profile path reuse, and no profile/cookie/credential writes.
+31. Full real NoVNC service boundary: connect production display/VNC, browser, and noVNC/websockify commands under one operator-approved service contract and prove cleanup without persistent profile writes.
+32. Real browser visible session: allow operator-attended manual login in the visible browser only after profile write policy, private viewer routing, cancellation, timeout, and audit behavior are proven.
+33. Profile write gate integration: connect runner persistence only after encrypted profile storage and `CanWriteBrowserProfile(session)` allow writes.
+34. Operator runbooks and overview visibility: surface session health, expiring profiles, active handoff runners, and waiting login goals in existing overview lanes if a clean projection lane exists.
 
 ## Best Operating Rule
 

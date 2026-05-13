@@ -17,7 +17,10 @@ import (
 	"strings"
 	"time"
 
+	coreprojects "odin-os/internal/core/projects"
+	coreworkspace "odin-os/internal/core/workspace"
 	"odin-os/internal/core/workspaces"
+	"odin-os/internal/registry"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/triggers"
@@ -37,6 +40,8 @@ type Dependencies struct {
 	Tmux                TmuxStatusProvider
 	GitHubWebhookSecret string
 	GitHubIssueIngester GitHubIssueIngester
+	RegistrySnapshot    registry.Snapshot
+	Registry            coreprojects.Registry
 }
 
 type AdminActions interface {
@@ -50,17 +55,72 @@ type TmuxStatusProvider interface {
 	Status(context.Context) (TmuxStatus, error)
 }
 
+type WorkspaceStatusLister interface {
+	List(context.Context) ([]coreworkspace.Status, error)
+}
+
 type GitHubIssueIngester interface {
 	IngestGitHubIssue(context.Context, triggers.GitHubIssueIngestParams) (triggers.GitHubIssueIngestResult, error)
 }
 
 type TmuxStatus struct {
-	Available bool   `json:"available"`
-	Source    string `json:"source"`
-	Error     string `json:"error,omitempty"`
+	Available        bool                   `json:"available"`
+	Source           string                 `json:"source"`
+	Error            string                 `json:"error,omitempty"`
+	LiveSessions     int                    `json:"live_sessions,omitempty"`
+	AttachedSessions int                    `json:"attached_sessions,omitempty"`
+	Sessions         []TmuxWorkspaceSession `json:"sessions,omitempty"`
+}
+
+type TmuxWorkspaceSession struct {
+	ProjectKey    string `json:"project_key"`
+	SessionName   string `json:"session_name"`
+	State         string `json:"state"`
+	FactsSource   string `json:"facts_source"`
+	AttachedCount int    `json:"attached_count"`
+}
+
+type WorkspaceTmuxStatusProvider struct {
+	Workspaces WorkspaceStatusLister
 }
 
 var ErrAdminActionNotImplemented = errors.New("admin action not implemented")
+var ErrAdminTargetNotFound = errors.New("admin target not found")
+var ErrAdminActionConflict = errors.New("admin action conflict")
+
+func (provider WorkspaceTmuxStatusProvider) Status(ctx context.Context) (TmuxStatus, error) {
+	if provider.Workspaces == nil {
+		return TmuxStatus{Available: false, Source: "not_configured"}, nil
+	}
+	statuses, err := provider.Workspaces.List(ctx)
+	if err != nil {
+		return TmuxStatus{}, err
+	}
+
+	tmuxStatus := TmuxStatus{
+		Source:   "workspace_sessions",
+		Sessions: make([]TmuxWorkspaceSession, 0),
+	}
+	for _, status := range statuses {
+		if status.State != coreworkspace.StateLive {
+			continue
+		}
+		session := TmuxWorkspaceSession{
+			ProjectKey:    status.ProjectKey,
+			SessionName:   status.SessionName,
+			State:         string(status.State),
+			FactsSource:   string(status.FactsSource),
+			AttachedCount: status.AttachedCount,
+		}
+		tmuxStatus.Sessions = append(tmuxStatus.Sessions, session)
+		tmuxStatus.LiveSessions++
+		if status.AttachedCount > 0 {
+			tmuxStatus.AttachedSessions++
+		}
+	}
+	tmuxStatus.Available = tmuxStatus.LiveSessions > 0
+	return tmuxStatus, nil
+}
 
 func NewOperationalHandler(deps Dependencies) http.Handler {
 	now := deps.Now
@@ -107,7 +167,18 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 			writeAPIError(writer, http.StatusServiceUnavailable, "read_models_unavailable", "read models unavailable")
 			return
 		}
-		issues, err := listDashboardIssues(request.Context(), deps.ReadModels)
+		options, err := parseDashboardListOptions(request)
+		if err != nil {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_query", err.Error())
+			return
+		}
+		query := request.URL.Query()
+		issues, err := listDashboardIssues(request.Context(), deps.ReadModels, options, dashboardIssueFilters{
+			Provider:   query.Get("provider"),
+			Repo:       query.Get("repo"),
+			State:      query.Get("state"),
+			SyncStatus: query.Get("sync_status"),
+		})
 		if err != nil {
 			writeAPIError(writer, http.StatusServiceUnavailable, "issues_unavailable", err.Error())
 			return
@@ -119,7 +190,26 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 			writeAPIError(writer, http.StatusServiceUnavailable, "read_models_unavailable", "read models unavailable")
 			return
 		}
-		views, err := projections.ListRunSummaryViews(request.Context(), deps.ReadModels)
+		options, err := parseDashboardListOptions(request)
+		if err != nil {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_query", err.Error())
+			return
+		}
+		query := request.URL.Query()
+		var taskID *int64
+		if rawTaskID := strings.TrimSpace(query.Get("task_id")); rawTaskID != "" {
+			parsedTaskID, err := strconv.ParseInt(rawTaskID, 10, 64)
+			if err != nil || parsedTaskID <= 0 {
+				writeAPIError(writer, http.StatusBadRequest, "invalid_query", "task_id must be a positive integer")
+				return
+			}
+			taskID = &parsedTaskID
+		}
+		views, err := listDashboardRuns(request.Context(), deps.ReadModels, options, dashboardRunFilters{
+			Status:   query.Get("status"),
+			Executor: query.Get("executor"),
+			TaskID:   taskID,
+		})
 		if err != nil {
 			writeAPIError(writer, http.StatusServiceUnavailable, "runs_unavailable", err.Error())
 			return
@@ -192,8 +282,8 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 	})
 	mux.HandleFunc("POST /issues/{issue_id}/pause", func(writer http.ResponseWriter, request *http.Request) {
 		issueID, err := strconv.ParseInt(request.PathValue("issue_id"), 10, 64)
-		if err != nil {
-			writeAPIError(writer, http.StatusBadRequest, "invalid_issue_id", "issue id must be an integer")
+		if err != nil || issueID <= 0 {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_issue_id", "issue id must be a positive integer")
 			return
 		}
 		handleAdminAction(writer, request, deps, "pause_issue", func(ctx context.Context, admin AdminActions) error {
@@ -202,8 +292,8 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 	})
 	mux.HandleFunc("POST /issues/{issue_id}/resume", func(writer http.ResponseWriter, request *http.Request) {
 		issueID, err := strconv.ParseInt(request.PathValue("issue_id"), 10, 64)
-		if err != nil {
-			writeAPIError(writer, http.StatusBadRequest, "invalid_issue_id", "issue id must be an integer")
+		if err != nil || issueID <= 0 {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_issue_id", "issue id must be a positive integer")
 			return
 		}
 		handleAdminAction(writer, request, deps, "resume_issue", func(ctx context.Context, admin AdminActions) error {
@@ -327,6 +417,8 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		}
 		writeJSON(writer, http.StatusOK, view)
 	})
+	registerMobileRoutes(mux, deps, now)
+	registerPWAHandlers(mux)
 	return mux
 }
 
@@ -708,12 +800,13 @@ func validGitHubWebhookSignature(body []byte, secret string, signature string) b
 }
 
 type dashboardStatus struct {
-	GeneratedAt  string          `json:"generated_at"`
-	HealthStatus string          `json:"health_status"`
-	Ready        bool            `json:"ready"`
-	Runtime      runtimeStatus   `json:"runtime"`
-	Counts       dashboardCounts `json:"counts"`
-	Tmux         TmuxStatus      `json:"tmux"`
+	GeneratedAt    string                         `json:"generated_at"`
+	HealthStatus   string                         `json:"health_status"`
+	Ready          bool                           `json:"ready"`
+	Runtime        runtimeStatus                  `json:"runtime"`
+	WorkerDispatch healthsvc.WorkerDispatchStatus `json:"worker_dispatch"`
+	Counts         dashboardCounts                `json:"counts"`
+	Tmux           TmuxStatus                     `json:"tmux"`
 }
 
 type runtimeStatus struct {
@@ -724,9 +817,23 @@ type runtimeStatus struct {
 }
 
 type dashboardCounts struct {
-	WorkItems         int `json:"work_items"`
-	ActiveRunAttempts int `json:"active_run_attempts"`
-	PendingApprovals  int `json:"pending_approvals"`
+	WorkItems                 int `json:"work_items"`
+	OpenWorkItems             int `json:"open_work_items"`
+	ActiveRunAttempts         int `json:"active_run_attempts"`
+	PendingApprovals          int `json:"pending_approvals"`
+	ReviewQueueItems          int `json:"review_queue_items"`
+	BlockedWorkItems          int `json:"blocked_work_items"`
+	FailedWorkItems           int `json:"failed_work_items"`
+	RecoveryRecommendations   int `json:"recovery_recommendations"`
+	IntakeReviewItems         int `json:"intake_review_items"`
+	KnowledgeReviewItems      int `json:"knowledge_review_items"`
+	SkillArtifactReviewItems  int `json:"skill_artifact_review_items"`
+	AutomationTriggers        int `json:"automation_triggers"`
+	EnabledAutomationTriggers int `json:"enabled_automation_triggers"`
+	DeliveryProfiles          int `json:"delivery_profiles"`
+	ExplicitIntentWorkItems   int `json:"explicit_intent_work_items"`
+	FallbackIntentWorkItems   int `json:"fallback_intent_work_items"`
+	ActionRequiredItems       int `json:"action_required_items"`
 }
 
 type dashboardIssue struct {
@@ -756,6 +863,29 @@ type dashboardRun struct {
 	ArtifactsJSON  string  `json:"artifacts_json"`
 }
 
+const (
+	dashboardDefaultLimit = 100
+	dashboardMaxLimit     = 500
+)
+
+type dashboardListOptions struct {
+	Limit  int
+	Offset int
+}
+
+type dashboardIssueFilters struct {
+	Provider   string
+	Repo       string
+	State      string
+	SyncStatus string
+}
+
+type dashboardRunFilters struct {
+	Status   string
+	Executor string
+	TaskID   *int64
+}
+
 func buildStatusPayload(ctx context.Context, deps Dependencies, now func() time.Time) (dashboardStatus, error) {
 	report, err := deps.Health.Doctor(ctx, deps.RegistryHealthy)
 	if err != nil {
@@ -783,22 +913,28 @@ func buildStatusPayload(ctx context.Context, deps Dependencies, now func() time.
 			status.Runtime = runtimeState
 		}
 
-		workItems, err := projections.ListTaskStatusViews(ctx, deps.ReadModels)
-		if err != nil {
-			return dashboardStatus{}, err
-		}
-		activeRuns, err := projections.ListActiveRunViews(ctx, deps.ReadModels)
-		if err != nil {
-			return dashboardStatus{}, err
-		}
-		pendingApprovals, err := projections.ListPendingApprovalViews(ctx, deps.ReadModels)
+		actualUse, err := projections.GetActualUseSummaryView(ctx, deps.ReadModels, workspaces.DefaultWorkspaceKey)
 		if err != nil {
 			return dashboardStatus{}, err
 		}
 		status.Counts = dashboardCounts{
-			WorkItems:         len(workItems),
-			ActiveRunAttempts: len(activeRuns),
-			PendingApprovals:  len(pendingApprovals),
+			WorkItems:                 actualUse.WorkItems,
+			OpenWorkItems:             actualUse.OpenWorkItems,
+			ActiveRunAttempts:         actualUse.ActiveRunAttempts,
+			PendingApprovals:          actualUse.PendingApprovals,
+			ReviewQueueItems:          actualUse.ReviewQueueItems,
+			BlockedWorkItems:          actualUse.BlockedWorkItems,
+			FailedWorkItems:           actualUse.FailedWorkItems,
+			RecoveryRecommendations:   actualUse.RecoveryRecommendations,
+			IntakeReviewItems:         actualUse.IntakeReviewItems,
+			KnowledgeReviewItems:      actualUse.KnowledgeReviewItems,
+			SkillArtifactReviewItems:  actualUse.SkillArtifactReviewItems,
+			AutomationTriggers:        actualUse.AutomationTriggers,
+			EnabledAutomationTriggers: actualUse.EnabledAutomationTriggers,
+			DeliveryProfiles:          countDeliveryProfiles(deps.RegistrySnapshot),
+			ExplicitIntentWorkItems:   actualUse.ExplicitIntentWorkItems,
+			FallbackIntentWorkItems:   actualUse.FallbackIntentWorkItems,
+			ActionRequiredItems:       actualUse.ActionRequiredItems,
 		}
 	}
 
@@ -811,7 +947,25 @@ func buildStatusPayload(ctx context.Context, deps Dependencies, now func() time.
 		}
 	}
 
+	status.WorkerDispatch = healthsvc.NewWorkerDispatchStatus(ready, status.Runtime.Status, report.Status)
+
 	return status, nil
+}
+
+func countDeliveryProfiles(snapshot registry.Snapshot) int {
+	count := 0
+	for _, item := range snapshot.Items {
+		if item.Kind != registry.KindWorkflow {
+			continue
+		}
+		for _, tag := range item.Tags {
+			if strings.EqualFold(strings.TrimSpace(tag), "delivery_profile") {
+				count++
+				break
+			}
+		}
+	}
+	return count
 }
 
 func getRuntimeStatus(ctx context.Context, queryer projections.Queryer) (runtimeStatus, error) {
@@ -843,12 +997,62 @@ func getRuntimeStatus(ctx context.Context, queryer projections.Queryer) (runtime
 	return status, rows.Err()
 }
 
-func listDashboardIssues(ctx context.Context, queryer projections.Queryer) ([]dashboardIssue, error) {
-	rows, err := queryer.QueryContext(ctx, `
+func parseDashboardListOptions(request *http.Request) (dashboardListOptions, error) {
+	values := request.URL.Query()
+	options := dashboardListOptions{Limit: dashboardDefaultLimit}
+	if rawLimit := strings.TrimSpace(values.Get("limit")); rawLimit != "" {
+		limit, err := strconv.Atoi(rawLimit)
+		if err != nil || limit <= 0 {
+			return dashboardListOptions{}, fmt.Errorf("limit must be a positive integer")
+		}
+		if limit > dashboardMaxLimit {
+			return dashboardListOptions{}, fmt.Errorf("limit must be less than or equal to %d", dashboardMaxLimit)
+		}
+		options.Limit = limit
+	}
+	if rawOffset := strings.TrimSpace(values.Get("offset")); rawOffset != "" {
+		offset, err := strconv.Atoi(rawOffset)
+		if err != nil || offset < 0 {
+			return dashboardListOptions{}, fmt.Errorf("offset must be a non-negative integer")
+		}
+		options.Offset = offset
+	}
+	return options, nil
+}
+
+func listDashboardIssues(ctx context.Context, queryer projections.Queryer, options dashboardListOptions, filters dashboardIssueFilters) ([]dashboardIssue, error) {
+	var query strings.Builder
+	query.WriteString(`
 		SELECT id, project_id, provider, repo, number, title, url, state, labels_json, sync_status, last_synced_at
 		FROM external_issues
-		ORDER BY repo ASC, number ASC, id ASC
 	`)
+
+	clauses := make([]string, 0, 4)
+	args := make([]any, 0, 6)
+	if provider := strings.TrimSpace(filters.Provider); provider != "" {
+		clauses = append(clauses, "provider = ?")
+		args = append(args, provider)
+	}
+	if repo := strings.TrimSpace(filters.Repo); repo != "" {
+		clauses = append(clauses, "repo = ?")
+		args = append(args, repo)
+	}
+	if state := strings.TrimSpace(filters.State); state != "" {
+		clauses = append(clauses, "state = ?")
+		args = append(args, state)
+	}
+	if syncStatus := strings.TrimSpace(filters.SyncStatus); syncStatus != "" {
+		clauses = append(clauses, "sync_status = ?")
+		args = append(args, syncStatus)
+	}
+	if len(clauses) > 0 {
+		query.WriteString(" WHERE ")
+		query.WriteString(strings.Join(clauses, " AND "))
+	}
+	query.WriteString(" ORDER BY repo ASC, number ASC, id ASC LIMIT ? OFFSET ?")
+	args = append(args, options.Limit, options.Offset)
+
+	rows, err := queryer.QueryContext(ctx, query.String(), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -877,6 +1081,73 @@ func listDashboardIssues(ctx context.Context, queryer projections.Queryer) ([]da
 		issues = append(issues, issue)
 	}
 	return issues, rows.Err()
+}
+
+func listDashboardRuns(ctx context.Context, queryer projections.Queryer, options dashboardListOptions, filters dashboardRunFilters) ([]projections.RunSummaryView, error) {
+	var query strings.Builder
+	query.WriteString(`
+		SELECT
+			r.id,
+			r.task_id,
+			t.key,
+			r.executor,
+			r.status,
+			r.attempt,
+			r.started_at,
+			r.finished_at
+		FROM runs r
+		JOIN tasks t ON t.id = r.task_id
+	`)
+
+	clauses := make([]string, 0, 3)
+	args := make([]any, 0, 5)
+	if status := strings.TrimSpace(filters.Status); status != "" {
+		clauses = append(clauses, "r.status = ?")
+		args = append(args, status)
+	}
+	if executor := strings.TrimSpace(filters.Executor); executor != "" {
+		clauses = append(clauses, "r.executor = ?")
+		args = append(args, executor)
+	}
+	if filters.TaskID != nil {
+		clauses = append(clauses, "r.task_id = ?")
+		args = append(args, *filters.TaskID)
+	}
+	if len(clauses) > 0 {
+		query.WriteString(" WHERE ")
+		query.WriteString(strings.Join(clauses, " AND "))
+	}
+	query.WriteString(" ORDER BY r.id ASC LIMIT ? OFFSET ?")
+	args = append(args, options.Limit, options.Offset)
+
+	rows, err := queryer.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []projections.RunSummaryView
+	for rows.Next() {
+		var view projections.RunSummaryView
+		var finishedAt sql.NullString
+		if err := rows.Scan(
+			&view.RunID,
+			&view.TaskID,
+			&view.TaskKey,
+			&view.Executor,
+			&view.Status,
+			&view.Attempt,
+			&view.StartedAt,
+			&finishedAt,
+		); err != nil {
+			return nil, err
+		}
+		if finishedAt.Valid {
+			view.FinishedAt = &finishedAt.String
+		}
+		views = append(views, view)
+	}
+	return views, rows.Err()
 }
 
 func getDashboardRun(ctx context.Context, queryer projections.Queryer, runID int64) (dashboardRun, error) {
@@ -946,6 +1217,14 @@ func handleAdminAction(writer http.ResponseWriter, request *http.Request, deps D
 	if err := call(request.Context(), deps.Admin); err != nil {
 		if errors.Is(err, ErrAdminActionNotImplemented) {
 			writeAPIError(writer, http.StatusNotImplemented, "admin_action_not_implemented", err.Error())
+			return
+		}
+		if errors.Is(err, ErrAdminTargetNotFound) {
+			writeAPIError(writer, http.StatusNotFound, "admin_target_not_found", err.Error())
+			return
+		}
+		if errors.Is(err, ErrAdminActionConflict) {
+			writeAPIError(writer, http.StatusConflict, "admin_action_conflict", err.Error())
 			return
 		}
 		writeAPIError(writer, http.StatusServiceUnavailable, "admin_action_failed", err.Error())

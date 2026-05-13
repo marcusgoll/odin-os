@@ -15,6 +15,7 @@ const (
 	KindSkill    Kind = "skill"
 	KindWorkflow Kind = "workflow"
 	KindCommand  Kind = "command"
+	KindTool     Kind = "tool"
 )
 
 const (
@@ -102,27 +103,28 @@ type Frontmatter struct {
 	Execution      ExecutionPolicy   `yaml:"execution"`
 	Implementation ImplementationRef `yaml:"implementation"`
 
-	Key                string         `yaml:"key"`
-	Title              string         `yaml:"title"`
-	Summary            string         `yaml:"summary"`
-	Status             string         `yaml:"status"`
-	Enabled            *bool          `yaml:"enabled"`
-	Tags               []string       `yaml:"tags"`
-	Owners             []string       `yaml:"owners"`
-	Role               string         `yaml:"role"`
-	Scopes             []string       `yaml:"scopes"`
-	Tools              []string       `yaml:"tools"`
-	Strictness         string         `yaml:"strictness"`
-	AppliesTo          []string       `yaml:"applies_to"`
-	LegacyInputSchema  map[string]any `yaml:"input_schema"`
-	LegacyOutputSchema map[string]any `yaml:"output_schema"`
-	HandlerType        string         `yaml:"handler_type"`
-	HandlerRef         string         `yaml:"handler_ref"`
-	TimeoutSeconds     int            `yaml:"timeout_seconds"`
-	Entrypoint         string         `yaml:"entrypoint"`
-	Composes           []string       `yaml:"composes"`
-	Command            string         `yaml:"command"`
-	Aliases            []string       `yaml:"aliases"`
+	Key                string            `yaml:"key"`
+	Title              string            `yaml:"title"`
+	Summary            string            `yaml:"summary"`
+	Status             string            `yaml:"status"`
+	Enabled            *bool             `yaml:"enabled"`
+	Tags               []string          `yaml:"tags"`
+	Owners             []string          `yaml:"owners"`
+	Role               string            `yaml:"role"`
+	Scopes             []string          `yaml:"scopes"`
+	Tools              []string          `yaml:"tools"`
+	Delegation         DelegationProfile `yaml:"delegation"`
+	Strictness         string            `yaml:"strictness"`
+	AppliesTo          []string          `yaml:"applies_to"`
+	LegacyInputSchema  map[string]any    `yaml:"input_schema"`
+	LegacyOutputSchema map[string]any    `yaml:"output_schema"`
+	HandlerType        string            `yaml:"handler_type"`
+	HandlerRef         string            `yaml:"handler_ref"`
+	TimeoutSeconds     int               `yaml:"timeout_seconds"`
+	Entrypoint         string            `yaml:"entrypoint"`
+	Composes           []string          `yaml:"composes"`
+	Command            string            `yaml:"command"`
+	Aliases            []string          `yaml:"aliases"`
 }
 
 type ParsedDocument struct {
@@ -131,6 +133,34 @@ type ParsedDocument struct {
 	Body         string
 	Sections     map[string]string
 	SectionOrder []string
+}
+
+type DelegationProfile struct {
+	Enabled         bool                     `yaml:"enabled"`
+	OperatorSurface string                   `yaml:"operator_surface"`
+	Inputs          DelegationInputs         `yaml:"inputs"`
+	ConvergenceMode string                   `yaml:"convergence_mode"`
+	Children        []DelegationChildProfile `yaml:"children"`
+}
+
+type DelegationInputs struct {
+	Required []string `yaml:"required"`
+	Optional []string `yaml:"optional"`
+}
+
+type DelegationChildProfile struct {
+	DelegationKey         string   `yaml:"delegation_key"`
+	Role                  string   `yaml:"role"`
+	Wave                  int      `yaml:"wave"`
+	ActionClass           string   `yaml:"action_class"`
+	ActionKeyTemplate     string   `yaml:"action_key_template"`
+	MutationModeSource    string   `yaml:"mutation_mode_source"`
+	ConvergenceMode       string   `yaml:"convergence_mode"`
+	ArtifactTarget        string   `yaml:"artifact_target"`
+	Executor              string   `yaml:"executor"`
+	SkillKey              string   `yaml:"skill_key"`
+	RequestedTools        []string `yaml:"requested_tools"`
+	RequestedMemoryScopes []string `yaml:"requested_memory_scopes"`
 }
 
 type DiagnosticSeverity string
@@ -167,6 +197,7 @@ type Item struct {
 	Role               string
 	Scopes             []string
 	Tools              []string
+	Delegation         DelegationProfile
 	Strictness         string
 	AppliesTo          []string
 	LegacyInputSchema  map[string]any
@@ -200,7 +231,7 @@ func (kind Kind) Valid() bool {
 
 func (kind Kind) ValidDependencyKind() bool {
 	switch kind {
-	case KindAgent, KindSkill, KindCommand, Kind("tool"):
+	case KindAgent, KindSkill, KindCommand, KindTool:
 		return true
 	default:
 		return false
@@ -209,7 +240,7 @@ func (kind Kind) ValidDependencyKind() bool {
 
 func (kind Kind) IsInvokable() bool {
 	switch kind {
-	case KindSkill, KindWorkflow, KindCommand:
+	case KindSkill, KindWorkflow, KindCommand, KindTool:
 		return true
 	default:
 		return false

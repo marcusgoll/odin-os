@@ -1,0 +1,31 @@
+name: github-issue-delivery-dry-run
+description: Fixture-backed GitHub issue delivery chain through PR-ready branch without external mutation.
+github:
+  mode: fixture
+codex:
+  mode: disabled
+steps:
+  - name: load_fixture_issue
+    fixture: fixtures/github/issues/delivery-chain.json
+    expect:
+      eligible_count: 1
+
+  - name: review_issue_into_work_item
+    expect:
+      created: 1
+      linked: 1
+
+  - name: dispatch_to_isolated_worktree
+    expect:
+      branch_prefix: odin/
+      inside_workspace_root: true
+
+  - name: execute_deterministic_stub
+    expect:
+      tests_recorded: true
+      review_artifact: true
+
+  - name: require_pr_approval
+    expect:
+      approval_required: true
+      github_writes: 0

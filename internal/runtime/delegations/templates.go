@@ -1,6 +1,11 @@
 package delegations
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+
+	"odin-os/internal/registry"
+)
 
 type ChildSpec struct {
 	DelegationKey   string
@@ -15,7 +20,18 @@ type ChildSpec struct {
 	SkillKey        string
 }
 
-func childSpecsForAgent(agentKey string, inputs map[string]string) ([]ChildSpec, error) {
+func (service Service) childSpecsForAgent(agentKey string, inputs map[string]string) ([]ChildSpec, error) {
+	agentKey = cleanInput(agentKey)
+	if item, ok := service.RegistrySnapshot.ByKey[agentKey]; ok && item.Kind == registry.KindAgent {
+		if !item.Delegation.Enabled {
+			return nil, fmt.Errorf("agent %q is not runtime-delegatable", agentKey)
+		}
+		return childSpecsFromDelegationProfile(agentKey, item.Delegation, inputs)
+	}
+	return builtInChildSpecsForAgent(agentKey, inputs)
+}
+
+func builtInChildSpecsForAgent(agentKey string, inputs map[string]string) ([]ChildSpec, error) {
 	switch agentKey {
 	case "portal-delivery-agent":
 		portalTrack := cleanInput(inputs["portal_track"])
@@ -89,6 +105,67 @@ func childSpecsForAgent(agentKey string, inputs map[string]string) ([]ChildSpec,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported agent %q", agentKey)
+	}
+}
+
+func childSpecsFromDelegationProfile(agentKey string, profile registry.DelegationProfile, inputs map[string]string) ([]ChildSpec, error) {
+	if strings.TrimSpace(profile.OperatorSurface) != "companion_delegate" {
+		return nil, fmt.Errorf("agent %q delegation surface %q is not supported", agentKey, profile.OperatorSurface)
+	}
+	for _, required := range profile.Inputs.Required {
+		required = strings.TrimSpace(required)
+		if required == "" {
+			continue
+		}
+		if cleanInput(inputs[required]) == "" {
+			return nil, fmt.Errorf("%s is required", required)
+		}
+	}
+	if len(profile.Children) == 0 {
+		return nil, fmt.Errorf("agent %q has no delegation children", agentKey)
+	}
+
+	childSpecs := make([]ChildSpec, 0, len(profile.Children))
+	for _, child := range profile.Children {
+		convergenceMode := cleanInput(child.ConvergenceMode)
+		if convergenceMode == "" {
+			convergenceMode = cleanInput(profile.ConvergenceMode)
+		}
+		if convergenceMode == "" {
+			convergenceMode = "merge"
+		}
+		childSpecs = append(childSpecs, ChildSpec{
+			DelegationKey:   cleanInput(child.DelegationKey),
+			Role:            cleanInput(child.Role),
+			Wave:            child.Wave,
+			ActionClass:     cleanInput(child.ActionClass),
+			ActionKey:       renderDelegationTemplate(child.ActionKeyTemplate, inputs),
+			MutationMode:    delegationMutationModeFromProfile(child.MutationModeSource, inputs),
+			ConvergenceMode: convergenceMode,
+			ArtifactTarget:  cleanInput(child.ArtifactTarget),
+			Executor:        cleanInput(child.Executor),
+			SkillKey:        cleanInput(child.SkillKey),
+		})
+	}
+	return childSpecs, nil
+}
+
+func renderDelegationTemplate(template string, inputs map[string]string) string {
+	replacer := strings.NewReplacer(
+		"{{portal_track}}", cleanInput(inputs["portal_track"]),
+		"{{surface}}", cleanInput(inputs["surface"]),
+		"{{goal}}", cleanInput(inputs["goal"]),
+		"{{intent}}", delegationRunIntent(inputs["intent"]),
+	)
+	return cleanInput(replacer.Replace(template))
+}
+
+func delegationMutationModeFromProfile(source string, inputs map[string]string) string {
+	switch strings.TrimSpace(source) {
+	case "intent":
+		return delegationRunIntent(inputs["intent"])
+	default:
+		return delegationRunIntent(source)
 	}
 }
 

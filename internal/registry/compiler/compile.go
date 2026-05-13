@@ -75,6 +75,19 @@ func cloneAnyValue(value any) any {
 	}
 }
 
+func cloneDelegationProfile(profile registry.DelegationProfile) registry.DelegationProfile {
+	cloned := profile
+	cloned.Inputs.Required = append([]string(nil), profile.Inputs.Required...)
+	cloned.Inputs.Optional = append([]string(nil), profile.Inputs.Optional...)
+	cloned.Children = make([]registry.DelegationChildProfile, len(profile.Children))
+	for index, child := range profile.Children {
+		cloned.Children[index] = child
+		cloned.Children[index].RequestedTools = append([]string(nil), child.RequestedTools...)
+		cloned.Children[index].RequestedMemoryScopes = append([]string(nil), child.RequestedMemoryScopes...)
+	}
+	return cloned
+}
+
 func compileItem(document registry.ParsedDocument) registry.Item {
 	frontmatter := document.Frontmatter
 	name := strings.TrimSpace(frontmatter.Name)
@@ -155,6 +168,7 @@ func compileItem(document registry.ParsedDocument) registry.Item {
 		Role:               frontmatter.Role,
 		Scopes:             scopes,
 		Tools:              append([]string(nil), frontmatter.Tools...),
+		Delegation:         cloneDelegationProfile(frontmatter.Delegation),
 		Strictness:         frontmatter.Strictness,
 		AppliesTo:          append([]string(nil), frontmatter.AppliesTo...),
 		LegacyInputSchema:  cloneAnyMap(frontmatter.LegacyInputSchema),

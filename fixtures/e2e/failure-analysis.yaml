@@ -9,4 +9,4 @@ steps:
     input: fixtures/failures/missing-acceptance-criteria.json
     expect:
       category: missing acceptance criteria
-      creates_follow_up: true
+      creates_follow_up: false

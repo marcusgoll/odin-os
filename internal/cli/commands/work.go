@@ -21,7 +21,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+const workUsage = "usage: odin work status [--json]|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -56,6 +56,25 @@ type workDispatchRunView struct {
 	Summary  string `json:"summary,omitempty"`
 }
 
+type workStatusView struct {
+	WorkItems                   int    `json:"work_items"`
+	OpenWorkItems               int    `json:"open_work_items"`
+	ActiveRunAttempts           int    `json:"active_run_attempts"`
+	PendingApprovals            int    `json:"pending_approvals"`
+	DeliveryProfiles            int    `json:"delivery_profiles"`
+	RawIntakeItems              int    `json:"raw_intake_items"`
+	IntakeReviewItems           int    `json:"intake_review_items"`
+	IntakeApprovalRequiredItems int    `json:"intake_approval_required_items"`
+	FailedRetryableWorkItems    int    `json:"failed_retryable_work_items"`
+	RetryBlockedWorkItems       int    `json:"retry_blocked_work_items"`
+	ExplicitIntentWorkItems     int    `json:"explicit_intent_work_items"`
+	FallbackIntentWorkItems     int    `json:"fallback_intent_work_items"`
+	IntentBackfilledWorkItems   int    `json:"intent_backfilled_work_items"`
+	LegacyFallbackWorkItems     int    `json:"legacy_fallback_work_items"`
+	Dispatch                    string `json:"dispatch"`
+	Intake                      string `json:"intake"`
+}
+
 func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, snapshot registry.Snapshot, args []string, stdout io.Writer, options ...WorkOptions) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
 		_, err := fmt.Fprintln(stdout, workUsage)
@@ -64,13 +83,15 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 
 	switch args[0] {
 	case "status":
-		return runWorkStatus(ctx, store, snapshot, stdout)
+		return runWorkStatus(ctx, store, projectRegistry, snapshot, args[1:], stdout)
 	case "profiles":
 		return runWorkProfiles(snapshot, stdout)
 	case "start":
 		return runWorkStart(ctx, store, projectRegistry, args[1:], stdout)
 	case "intake":
 		return runWorkIntake(ctx, store, projectRegistry, args[1:], stdout)
+	case "reconcile":
+		return runWorkReconcile(ctx, store, projectRegistry, args[1:], stdout)
 	case "dispatch":
 		return runWorkDispatch(ctx, store, projectRegistry, args[1:], stdout, options...)
 	case "execute":
@@ -83,7 +104,22 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 	}
 }
 
-func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.Snapshot, stdout io.Writer) error {
+func runWorkStatus(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, snapshot registry.Snapshot, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	jsonOutput := parseBoolFlag(params, "json")
+	if _, ok := params["help"]; ok {
+		_, err := fmt.Fprintln(stdout, "usage: odin work status [--json]")
+		return err
+	}
+	if err := rejectUnknownWorkArgs(params, "json", "help"); err != nil {
+		return err
+	}
+
+	backfillStats, err := jobs.Service{Store: store, Registry: projectRegistry}.BackfillOpenTaskExecutionIntents(ctx)
+	if err != nil {
+		return err
+	}
+
 	taskViews, err := projections.ListTaskStatusViews(ctx, store.DB())
 	if err != nil {
 		return err
@@ -141,21 +177,47 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, snapshot registry.S
 		}
 	}
 
+	view := workStatusView{
+		WorkItems:                   len(taskViews),
+		OpenWorkItems:               openWorkItems,
+		ActiveRunAttempts:           activeRunAttempts,
+		PendingApprovals:            len(approvalViews),
+		DeliveryProfiles:            len(deliveryProfiles(snapshot)),
+		RawIntakeItems:              len(rawIntakeItems),
+		IntakeReviewItems:           intakeReviewItems,
+		IntakeApprovalRequiredItems: intakeApprovalRequiredItems,
+		FailedRetryableWorkItems:    failedRetryableWorkItems,
+		RetryBlockedWorkItems:       retryBlockedWorkItems,
+		ExplicitIntentWorkItems:     explicitIntentWorkItems,
+		FallbackIntentWorkItems:     fallbackIntentWorkItems,
+		IntentBackfilledWorkItems:   backfillStats.Updated,
+		LegacyFallbackWorkItems:     backfillStats.LegacyFallback,
+		Dispatch:                    "work_dispatch",
+		Intake:                      "raw_cli",
+	}
+	if jsonOutput {
+		return WriteJSON(stdout, view)
+	}
+
 	_, err = fmt.Fprintf(
 		stdout,
-		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d raw_intake_items=%d intake_review_items=%d intake_approval_required_items=%d failed_retryable_work_items=%d retry_blocked_work_items=%d explicit_intent_work_items=%d fallback_intent_work_items=%d dispatch=work_dispatch intake=raw_cli\n",
-		len(taskViews),
-		openWorkItems,
-		activeRunAttempts,
-		len(approvalViews),
-		len(deliveryProfiles(snapshot)),
-		len(rawIntakeItems),
-		intakeReviewItems,
-		intakeApprovalRequiredItems,
-		failedRetryableWorkItems,
-		retryBlockedWorkItems,
-		explicitIntentWorkItems,
-		fallbackIntentWorkItems,
+		"work_items=%d open_work_items=%d active_run_attempts=%d pending_approvals=%d delivery_profiles=%d raw_intake_items=%d intake_review_items=%d intake_approval_required_items=%d failed_retryable_work_items=%d retry_blocked_work_items=%d explicit_intent_work_items=%d fallback_intent_work_items=%d intent_backfilled_work_items=%d legacy_fallback_work_items=%d dispatch=%s intake=%s\n",
+		view.WorkItems,
+		view.OpenWorkItems,
+		view.ActiveRunAttempts,
+		view.PendingApprovals,
+		view.DeliveryProfiles,
+		view.RawIntakeItems,
+		view.IntakeReviewItems,
+		view.IntakeApprovalRequiredItems,
+		view.FailedRetryableWorkItems,
+		view.RetryBlockedWorkItems,
+		view.ExplicitIntentWorkItems,
+		view.FallbackIntentWorkItems,
+		view.IntentBackfilledWorkItems,
+		view.LegacyFallbackWorkItems,
+		view.Dispatch,
+		view.Intake,
 	)
 	return err
 }
@@ -165,6 +227,9 @@ func runWorkDispatch(ctx context.Context, store *sqlite.Store, projectRegistry p
 	jsonOutput := parseBoolFlag(params, "json")
 	if _, ok := params["help"]; ok {
 		_, err := fmt.Fprintln(stdout, "usage: odin work dispatch [--task <id|key>] [--json]")
+		return err
+	}
+	if err := rejectUnknownWorkArgs(params, "task", "json"); err != nil {
 		return err
 	}
 
@@ -208,6 +273,20 @@ func runWorkDispatch(ctx context.Context, store *sqlite.Store, projectRegistry p
 	}
 	_, err = fmt.Fprintf(stdout, "dispatched=%t reason=%s task=%s status=%s run_id=%d\n", view.Dispatched, view.Reason, view.Task.Key, view.Task.Status, runID)
 	return err
+}
+
+func rejectUnknownWorkArgs(params map[string]string, allowed ...string) error {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, key := range allowed {
+		allowedSet[key] = struct{}{}
+	}
+	for key := range params {
+		if _, ok := allowedSet[key]; ok {
+			continue
+		}
+		return fmt.Errorf("unknown work dispatch argument: %s", key)
+	}
+	return nil
 }
 
 func runWorkExecute(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string, stdout io.Writer, options ...WorkOptions) error {
@@ -451,8 +530,9 @@ func runWorkStart(ctx context.Context, store *sqlite.Store, projectRegistry proj
 	projectKey := strings.TrimSpace(params["project"])
 	title := strings.TrimSpace(params["title"])
 	intent := strings.TrimSpace(params["intent"])
+	acceptance := strings.TrimSpace(params["acceptance"])
 	if projectKey == "" || title == "" {
-		_, err := fmt.Fprintln(stdout, "usage: odin work start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]")
+		_, err := fmt.Fprintln(stdout, "usage: odin work start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>] [--acceptance <criterion>]")
 		return err
 	}
 	if intent != "" && !isValidWorkIntent(intent) {
@@ -473,6 +553,7 @@ func runWorkStart(ctx context.Context, store *sqlite.Store, projectRegistry proj
 	}.CreateTaskOnce(ctx, jobs.CreateTaskParams{
 		Resolved:              resolved,
 		Title:                 title,
+		AcceptanceCriteria:    singleCriterion(acceptance),
 		RequestedBy:           "operator",
 		ExecutionIntent:       intent,
 		ExecutionIntentSource: intentSourceForWorkStart(intent),
@@ -483,6 +564,13 @@ func runWorkStart(ctx context.Context, store *sqlite.Store, projectRegistry proj
 
 	_, err = fmt.Fprintf(stdout, "work_item_id=%d project=%s key=%s status=%s intent=%s intent_source=%s\n", task.Task.ID, projectKey, task.Task.Key, task.Task.Status, noneIfEmpty(task.Task.ExecutionIntent), noneIfEmpty(task.Task.ExecutionIntentSource))
 	return err
+}
+
+func singleCriterion(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return []string{strings.TrimSpace(value)}
 }
 
 func isValidWorkIntent(intent string) bool {
@@ -531,6 +619,37 @@ func runWorkIntake(ctx context.Context, store *sqlite.Store, projectRegistry pro
 		summary.Fetched,
 		summary.Persisted,
 		summary.DryRun,
+	)
+	return err
+}
+
+func runWorkReconcile(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string, stdout io.Writer) error {
+	params := parseWorkStartArgs(args)
+	projectKey := strings.TrimSpace(params["project"])
+	if projectKey == "" {
+		_, err := fmt.Fprintln(stdout, "usage: odin work reconcile --project <key>")
+		return err
+	}
+
+	summary, err := trackerintake.Service{
+		Store:    store,
+		Registry: projectRegistry,
+	}.ReconcileProject(ctx, trackerintake.ReconcileOptions{
+		ProjectKey: projectKey,
+	})
+	if err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintf(
+		stdout,
+		"project=%s repo=%s intake=not_started reconciliation=completed eligible=%d created=%d existing=%d linked=%d dispatch=not_started prs=not_created\n",
+		summary.ProjectKey,
+		summary.Repo,
+		summary.Eligible,
+		summary.Created,
+		summary.Existing,
+		summary.Linked,
 	)
 	return err
 }

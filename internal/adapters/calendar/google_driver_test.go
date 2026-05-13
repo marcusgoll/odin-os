@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -82,6 +83,34 @@ printf '{"status":"failed","tool_key":"google_calendar_off_dates","summary":"dri
 		},
 	}); err == nil {
 		t.Fatal("Invoke() error = nil, want non-completed status failure")
+	}
+}
+
+func TestDriverRejectsMutationShapedArtifacts(t *testing.T) {
+	for name, artifact := range map[string]string{
+		"snake_case":   `"changed_events":["event-1"]`,
+		"camel_case":   `"createdEvents":["event-1"]`,
+		"event_action": `"event":{"action":"delete"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"completed","tool_key":"google_calendar_off_dates","summary":"changed event","artifacts":{`+artifact+`}}'
+`)
+			t.Setenv("ODIN_GOOGLE_CALENDAR_DRIVER", script)
+
+			driver := NewDriver()
+			_, err := driver.Invoke(context.Background(), Request{
+				ToolKey: "google_calendar_off_dates",
+				Input: Input{
+					BidPeriod:  "2026-05",
+					CalendarID: "primary",
+					Timezone:   "America/Chicago",
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), "external adapter mutation is not supported") {
+				t.Fatalf("Invoke() error = %v, want mutation unsupported error", err)
+			}
+		})
 	}
 }
 

@@ -141,6 +141,8 @@ func TestOperatorOverviewUsesCanonicalBoard(t *testing.T) {
 		"Capability Catalog",
 		"Approvals",
 		"Observability",
+		"Activity Log",
+		"event=",
 		"Memory",
 		"Intake Inbox",
 		"wiring=live source=task_intakes status=linked_evidence count=1",

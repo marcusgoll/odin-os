@@ -7,8 +7,8 @@ date: 2026-04-30
 # Odin OS Deployment
 
 This document describes the supported deployment paths for Odin OS. It preserves
-the current user-systemd deployment while adding a hardened `odin-os.service`
-path for future cutovers.
+the current user-systemd deployment through the hardened `odin-os.service`
+path.
 
 ## Current Server Path
 
@@ -29,6 +29,10 @@ systemctl --user status odin-os.service --no-pager
 systemctl --user cat odin-os.service
 ```
 
+See `docs/operations/legacy-systemd-disposition.md` for the full inventory of
+legacy `odin.service` and `odin.env` references and the migration decision for
+each one.
+
 ## Build
 
 Build both binaries from a clean checkout:
@@ -41,7 +45,7 @@ The systemd service uses the canonical `bin/odin` command surface.
 
 ## User systemd Install
 
-Install the safer user service without starting it:
+Install the canonical user service without starting it:
 
 ```bash
 scripts/install-service.sh
@@ -65,6 +69,11 @@ The installer copies:
 - `deploy/systemd/odin-os.env.example` to `~/.config/odin/odin-os.env` if the env file does not already exist
 
 It does not overwrite an existing env file unless `--force` is provided.
+
+Do not use `scripts/dev/install-systemd-service.sh` for new deployments. That
+script remains only as a compatibility installer for the older `odin.service`
+unit and must not be run against a live host unless a human operator explicitly
+approves the legacy path.
 
 ## Environment Files and Secrets
 
@@ -146,18 +155,32 @@ curl -fsS -X POST \
 Keep the HTTP listener on loopback unless a reviewed reverse proxy, SSH tunnel,
 or firewall policy protects admin endpoints.
 
+Use `docs/operations/dashboard-admin-hardening.md` for the full admin endpoint
+runbook, including token setup, rotation, SSH tunnel, reverse proxy/TLS, and
+audit expectations.
+
 ## Dry Run
 
-There is no global production dispatch dry-run switch yet. Until one exists,
-dry-run means:
+There is no global production dispatch dry-run switch yet. `odin status --json`
+and the daemon `/status` endpoint surface the current worker-dispatch posture
+under `worker_dispatch`:
+
+- `mode=live` means readiness currently allows the service loop to attempt
+  queued or dispatched work.
+- `mode=paused` means readiness currently prevents worker dispatch.
+- `dry_run=false` and `read_only=false` mean no global runtime dry-run or
+  read-only switch is active. Project transition, approval, and worktree policy
+  still gate individual task mutation.
+
+Until a global runtime switch exists, dry-run means:
 
 - use `scripts/install-service.sh --dry-run` before installing service files
 - keep new integrations in read-only intake or shadow mode
 - keep human approval required before merge or deployment
 - keep production secrets out of worker environments
 
-Any future runtime dry-run switch must be documented here and surfaced in
-`odin status` or `odin healthcheck`.
+Any future runtime dry-run switch must be documented here and reflected in
+`worker_dispatch.dry_run` or `worker_dispatch.read_only`.
 
 ## Docker Compose
 
@@ -169,6 +192,33 @@ volume:
 docker compose -f deploy/docker/docker-compose.yml build
 docker compose -f deploy/docker/docker-compose.yml up -d
 docker compose -f deploy/docker/docker-compose.yml ps
+```
+
+Run the local runtime smoke:
+
+```bash
+make docker-smoke
+```
+
+The smoke builds `deploy/docker/Dockerfile`, starts the Compose service with a
+non-secret env fixture, verifies `GET /health`, confirms the container runs as a
+non-root user, and checks the Compose hardening settings: read-only root
+filesystem, `cap_drop: ALL`, and `no-new-privileges:true`.
+The target delegates to `scripts/tests/docker-compose-smoke.sh`.
+
+Required host prerequisites:
+
+- Docker daemon reachable by the current user
+- Docker Compose plugin
+- `curl`
+- a free loopback port; the smoke chooses one automatically unless
+  `ODIN_DOCKER_SMOKE_PORT` is set
+
+The Compose listener defaults to `127.0.0.1:9444`. Override it for local smoke
+or port-conflict avoidance:
+
+```bash
+ODIN_COMPOSE_HTTP_BIND=127.0.0.1:19444 docker compose -f deploy/docker/docker-compose.yml up -d
 ```
 
 Use a machine-local env file for real secrets:

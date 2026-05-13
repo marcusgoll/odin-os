@@ -51,6 +51,11 @@ Stored lifecycle states are `active`, `paused`, `blocked`, `completed`, `skipped
 
 Due and overdue are derived schedule states, not stored lifecycle states. They are computed from stored status plus `next_due_at` and surfaced through agenda, `/overview`, and other read models as due-state visibility.
 
+Follow-Up Obligation `paused` is not the same state as Work Item operator pause.
+A paused obligation suppresses future obligation materialization; a paused Work
+Item is represented by the Work Item blocked reason defined in
+`docs/contracts/pause-resume.md`.
+
 ## Obligation To Work Item Materialization
 
 When a follow-up obligation becomes due, Odin materializes a governed `work item` from it.

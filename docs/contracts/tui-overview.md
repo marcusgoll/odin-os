@@ -35,7 +35,7 @@ This hierarchy is the primary business navigation. Future TUI work must not repl
 
 Rules:
 
-- render `Attention` first for approvals, incidents, blocked work, recoveries, and other items that need operator intervention
+- render `Attention` first for approvals, incidents, blocked work, failed work, recoveries, and other items that need operator intervention
 - render `Active Execution` second for live `Run Attempts` and active companion-swarm execution so operators can see who is working on what
 - keep the canonical lanes below those sections so dashboard triage does not replace `Workspace -> Initiative -> Work Item`
 - do not introduce a separate generic `Agents` or `Processes` dashboard to answer runtime triage questions already covered by `Companions`, `Run Attempts`, `Approvals`, and `Observability`
@@ -108,6 +108,17 @@ It contains typed sections or filters for:
 
 It must not be split back into multiple top-level panes just because the shell currently exposes separate commands.
 
+The overview must also render a sibling `Capability Truth` readback so operators
+do not mistake authored inventory for implemented runtime capability.
+
+Rules:
+
+- keep `Capability Catalog` as authored inventory
+- render `Capability Truth` with authored asset, runtime-proven, partial, advisory, unknown, and high-risk counts
+- show registry agents as `authored_asset` unless runtime evidence proves a real Odin delegation path
+- keep high-risk integration posture in risk labels such as `read_only` or `approval_required`; do not use risk labels as generic completion states
+- preserve object-owned lifecycle state from Work Items, Run Attempts, Review Queue, Approvals, Triggers, and Skill Activity instead of adding a generic capability status enum
+
 ### Approvals
 
 This is the first-class governance triage lane.
@@ -120,24 +131,80 @@ Rules:
 - support filters such as `supported` and `unsupported` may narrow the visible approval list, but they are inspection filters only
 - approval filters must not create batch approve or deny actions; every approval mutation must still target one explicit `Approval Request` and pass workflow-owned resolver support
 
+#### Review Queue Contract
+
+`odin review` is the unified governed decision queue for operator-visible decisions. It is not a second approval system and must not be forked into a parallel review queue.
+
+Rules:
+
+- `odin review list` composes review entries from source-specific same-package adapters; each adapter reads its existing runtime authority and returns `reviewQueueEntry` records
+- source adapters may be added for new governed decision sources, but they must preserve one queue shape and the existing `review show` / `review act` command contract
+- unsupported sources remain visible for inspection with empty or restricted `allowed_actions`
+- unsupported actions must fail closed through the existing review handlers and return machine-readable unsupported / not-resolved output when that handler already supports it
+- adding a source adapter does not grant resolver behavior; resolver behavior belongs to the source-owned workflow or approval service
+- `odin overview` renders a read-only `review_queue` proof lane derived from existing runtime truth; it summarizes counts only and does not own review or approval mutation
+
+Review action receipt contract:
+
+`odin review act <queue-id> <action> --json` returns a standard receipt envelope around source-owned action results. The receipt is proof of the action outcome, not permission by itself. Source-owned handlers keep their business rules.
+
+Receipt fields:
+
+- `review_id` and `queue_id`: stable review item identity
+- `source_type` and `source_id`: source-owned runtime authority
+- `action`: requested operator action
+- `status`: `resolved`, `dry_run`, `unsupported`, or `not_resolved`
+- `result`: source-independent result such as `accepted`, `denied`, `approved`, `archived`, `retried`, or `not_resolved`
+- `supported`: whether the source/action has a supported resolver path
+- `mutation_scope`: one of `none`, `review_state`, `execution_resuming`, `external_world`, or `unsupported`
+- `approval_required`: whether the action is approval-backed or itself represents approval-gated governance
+- `approval_status`: resolved approval state when applicable
+- `resolver_support`: approval resolver support when applicable
+- `mutated`: whether the action changed durable state
+- `audit_event`: expected durable event family when applicable
+- `error`: stable refusal key for unsupported or failed-closed actions
+- `next_step`: operator-readable next action
+- `source_result`: nested source-owned JSON result when the action ran
+
+Unsupported or high-risk actions without a supported resolver must return `supported=false`, `status=unsupported`, `result=not_resolved`, `mutation_scope=unsupported`, `mutated=false`, and a stable `error`. External-world mutation remains forbidden from `odin review act` until a source-specific resolver contract, approval policy, and real `odin` proof are implemented.
+
+Source/action contract:
+
+| Source type | Queue ID prefix | Runtime authority | Allowed actions |
+| --- | --- | --- | --- |
+| `intake_review` | `intake-review:<id>` | raw intake item with reviewable status | intake review actions from the intake workflow (`accept`, `reject`, `archive`, `clarify` when supported by status) |
+| `intake_approval` | `intake-approval:<id>` | raw intake item requiring approval | `approve`, `deny` |
+| `intake_goal_conversion` | `intake-goal:<id>` | raw intake item linked to a goal | visible as a goal-derived decision; approve/reject goes through goal review handlers |
+| `goal` | `goal:<id>` or `goal-approval:<id>` | goal status | approve/reject through goal review handlers |
+| `goal_blocker` | `goal-blocker:<id>` | open goal blocker | visible for inspection; approve/reject is unsupported until blocker resolution exists |
+| `task_approval` | `approval:<id>` | pending task approval request, including materialized scheduled work that requires approval | `approve`, `deny` through the approval resolver |
+| `skill_artifact` | `skill-artifact:<id>` | reviewable skill artifact | skill artifact review actions from artifact status (`accept`, `reject`, `archive`) |
+| `context_pack` | `context-pack:<id>` | proposed operator context packet | context-pack review actions (`accept`, `reject`, `archive`) |
+| `memory_proposal` | `memory-proposal:<id>` | review-required memory summary proposal | visible for inspection; mutation is unsupported in this queue until durable memory write review is implemented |
+| `failed_work` | `failed-work:<id>` | failed work item projection and retry policy, including failed automation-trigger work | `retry`, with retry eligibility enforced by failed-work policy |
+
 ### Observability
 
 This is the first-class runtime-understanding lane.
 
 It contains:
 
+- Activity Log
 - logs
 - health
 - metrics
 - incidents
 - recoveries
+- failed work with retry eligibility and recovery recommendation
 - projections
 - runtime readbacks that cut across initiatives or work items
 
 Rules:
 
 - `Run Attempts` remain nested under `Work Item` detail in the default business view
+- `Activity Log` is a read-only recent-event projection from SQLite runtime events and must reuse the same provenance summary contract as `odin logs trail`
 - `Run Attempts` may also be browsed here for cross-scope debugging and operator understanding
+- failed `Work Items` render from the existing recovery-guidance projection, including decision, retry eligibility, retry count, last error, source, and recommended next action
 - observability consumes runtime truth and must not become a second authority
 
 ### Memory
@@ -149,6 +216,12 @@ Rules:
 - memory views must always use explicit `Memory Scope`
 - workspace, initiative, companion, and run-related memory may all appear here
 - relevant memory snippets should also appear contextually inside other detail views
+- `odin memory` owns durable memory proposal, inspection, and resolution flows
+- pending, rejected, and archived Memory Proposals are visible only through
+  explicit proposal filters or `odin review`; they must not be treated as active
+  recall material
+- `odin knowledge` remains the retrieval and context-pack surface over existing
+  runtime truth and must not become the generic memory write command
 - do not turn this into an unscoped notes dump
 
 ## Scoped controls
@@ -165,6 +238,8 @@ Rules:
 - triggers create or update `Work Items` before any worker dispatch
 - v1 schedule-backed triggers are `Follow-Up Obligations`; they should appear as trigger definitions with derived due or overdue state
 - materialized follow-up occurrences remain `Work Items` with follow-up provenance and should not be duplicated as trigger definitions
+- trigger readback should expose next-run or due state, last materialization key, linked Work Item, trigger kind, and approval-required posture when available
+- trigger preview belongs in `odin trigger test`; overview may summarize previewable state but must not evaluate, fire, or test triggers itself
 
 ### Nested runtime and governance surfaces
 

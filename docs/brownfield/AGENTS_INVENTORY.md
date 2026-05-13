@@ -37,8 +37,8 @@ This inventory covers active agent definitions and agent-like role assets in the
 
 | Path | Name | Role | Instructions summary | Model / sandbox / approval settings | Maps to target role model | Recommendation |
 | --- | --- | --- | --- | --- | --- | --- |
-| `prompts/templates/agency-builder.md` | Agency builder template | Builder | One work item, one worktree, no merge, no production deploy, no root, no `danger-full-access`, return structured handoff. | Encodes sandbox prohibitions in prose; no typed enforcement. | Yes conceptually, but duplicated with worker prompts. | Refactor into canonical prompt location or remove duplicate after prompt model decision. |
-| `prompts/workers/agency-builder.md` | Agency builder worker prompt | Builder | Work on exactly one Work Item in assigned worktree and branch; no merge/deploy/secrets; return changed files, verification, risks, handoff. | Encodes safety rules in prose; no typed enforcement. | Yes conceptually. | Refactor. Preserve useful boundaries but integrate with `internal/executors` and prompt renderer. |
+| `prompts/templates/agency-builder.md` | Agency builder template | Builder | Deprecated provenance duplicate; useful no-root, no-`danger-full-access`, and human handoff wording is preserved in the worker prompt. | Encodes sandbox prohibitions in prose; no typed enforcement. | Yes conceptually, but duplicated with worker prompts. | Do not use for renderer dispatch; remove only after separate cleanup approval. |
+| `prompts/workers/agency-builder.md` | Agency builder worker prompt | Builder | Canonical builder prompt for one Work Item in assigned worktree and branch; no merge/deploy/secrets/root/`danger-full-access`; return changed files, verification, risks, human handoff state, and handoff notes. | Encodes safety rules in prose; no typed enforcement. | Yes conceptually. | Keep as canonical `prompts/workers/<template>.md` builder prompt for the current file renderer. |
 | `prompts/workers/agency-qa.md` | Agency QA worker prompt | QA | Run requested checks, record failures, return handoff summary; QA evidence does not approve merge/deploy. | No model/sandbox settings. | Yes conceptually. | Refactor. Tie to verification model and review outputs. |
 | `prompts/workers/agency-reviewer.md` | Agency review worker prompt | Reviewer | Prioritize bugs, regressions, missing tests, policy violations, and unclear handoff evidence; human review remains required. | No model/sandbox settings. | Yes conceptually. | Refactor. Useful instructions, but should not bypass human approval. |
 
@@ -54,5 +54,5 @@ This inventory covers active agent definitions and agent-like role assets in the
 1. Keep `registry/agents/triage-agent.md` and `internal/workers/planner` as proven/current.
 2. Define one Go role vocabulary by reconciling `internal/executors/contract.TaskKind`, `internal/workers`, and registry `role` values.
 3. Remove or merge `internal/agents/roles.go` after the canonical role vocabulary is documented.
-4. Treat prompt files as draft role instructions until a prompt renderer loads them through a typed interface.
+4. Treat `prompts/workers/<template>.md` as the canonical rendered worker prompt layout; keep other prompt paths as placeholders or provenance until explicitly promoted.
 5. Do not add runtime model/sandbox/approval fields to ad hoc prompts; place those controls in executor config, worker policy, and approval gates.

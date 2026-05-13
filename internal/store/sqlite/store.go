@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -59,34 +58,21 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	tempDB := isTempSQLitePath(path)
-	if tempDB {
-		if _, err := db.Exec(`PRAGMA journal_mode = MEMORY`); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-	}
-	synchronous := strings.ToUpper(strings.TrimSpace(os.Getenv("ODIN_SQLITE_SYNCHRONOUS")))
-	if synchronous == "" {
-		if tempDB {
-			synchronous = "OFF"
-		} else {
-			synchronous = "NORMAL"
-		}
-	}
-	switch synchronous {
-	case "OFF", "NORMAL", "FULL", "EXTRA":
-	default:
-		_ = db.Close()
-		return nil, fmt.Errorf("unsupported ODIN_SQLITE_SYNCHRONOUS value %q", synchronous)
-	}
-	if _, err := db.Exec(`PRAGMA synchronous = ` + synchronous); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
 	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	if fastTestPragmasEnabled() {
+		for _, statement := range []string{
+			`PRAGMA journal_mode = MEMORY`,
+			`PRAGMA synchronous = OFF`,
+			`PRAGMA temp_store = MEMORY`,
+		} {
+			if _, err := db.Exec(statement); err != nil {
+				_ = db.Close()
+				return nil, err
+			}
+		}
 	}
 
 	if err := db.Ping(); err != nil {
@@ -97,23 +83,8 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-func isTempSQLitePath(path string) bool {
-	if strings.TrimSpace(path) == ":memory:" {
-		return true
-	}
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return false
-	}
-	tempRoot, err := filepath.Abs(os.TempDir())
-	if err != nil {
-		return false
-	}
-	rel, err := filepath.Rel(tempRoot, absPath)
-	if err != nil {
-		return false
-	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+func fastTestPragmasEnabled() bool {
+	return os.Getenv("ODIN_SQLITE_FAST_TEST_PRAGMAS") == "1"
 }
 
 func (store *Store) Close() error {
@@ -217,6 +188,7 @@ func (store *Store) UpsertProject(ctx context.Context, params UpsertProjectParam
 func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExternalIssueParams) (ExternalIssue, error) {
 	now := store.now()
 	var issue ExternalIssue
+	acceptanceCriteriaJSON := EncodeAcceptanceCriteriaJSON(params.AcceptanceCriteria)
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
@@ -231,11 +203,13 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 				state,
 				labels_json,
 				sync_status,
+				sync_cursor,
+				acceptance_criteria_json,
 				last_synced_at,
 				created_at,
 				updated_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(provider, repo, number) DO UPDATE SET
 				project_id = excluded.project_id,
 				title = excluded.title,
@@ -244,6 +218,8 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 				state = excluded.state,
 				labels_json = excluded.labels_json,
 				sync_status = excluded.sync_status,
+				sync_cursor = excluded.sync_cursor,
+				acceptance_criteria_json = excluded.acceptance_criteria_json,
 				last_synced_at = excluded.last_synced_at,
 				updated_at = excluded.updated_at
 		`,
@@ -257,6 +233,8 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 			params.State,
 			params.LabelsJSON,
 			params.SyncStatus,
+			params.SyncCursor,
+			acceptanceCriteriaJSON,
 			formatTime(now),
 			formatTime(now),
 			formatTime(now),
@@ -265,7 +243,7 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 		}
 
 		record, err := scanExternalIssue(tx.QueryRowContext(ctx, `
-			SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, last_synced_at, created_at, updated_at
+			SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, sync_cursor, acceptance_criteria_json, last_synced_at, created_at, updated_at
 			FROM external_issues
 			WHERE provider = ? AND repo = ? AND number = ?
 		`, params.Provider, params.Repo, params.Number))
@@ -277,6 +255,201 @@ func (store *Store) UpsertExternalIssue(ctx context.Context, params UpsertExtern
 	})
 
 	return issue, err
+}
+
+func (store *Store) UpsertPullRequestHandoff(ctx context.Context, params UpsertPullRequestHandoffParams) (PullRequestHandoff, error) {
+	now := store.now()
+	var handoff PullRequestHandoff
+	testsJSON := EncodeStringListJSON(params.Tests)
+	risksJSON := EncodeStringListJSON(params.Risks)
+	blockersJSON := EncodeStringListJSON(params.Blockers)
+	selectedRolesJSON := EncodeStringListJSON(params.SelectedRoles)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO pull_request_handoffs (
+				project_id,
+				provider,
+				repo,
+				number,
+				url,
+				state,
+				issue_url,
+				branch,
+				title,
+				summary,
+				tests_json,
+				risks_json,
+				blockers_json,
+				selected_roles_json,
+				review_state,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(project_id, issue_url, branch, provider, repo, number) DO UPDATE SET
+				url = excluded.url,
+				state = excluded.state,
+				title = excluded.title,
+				summary = excluded.summary,
+				tests_json = excluded.tests_json,
+				risks_json = excluded.risks_json,
+				blockers_json = excluded.blockers_json,
+				selected_roles_json = excluded.selected_roles_json,
+				review_state = excluded.review_state,
+				updated_at = excluded.updated_at
+		`,
+			params.ProjectID,
+			params.Provider,
+			params.Repo,
+			params.Number,
+			params.URL,
+			params.State,
+			params.IssueURL,
+			params.Branch,
+			params.Title,
+			params.Summary,
+			testsJSON,
+			risksJSON,
+			blockersJSON,
+			selectedRolesJSON,
+			params.ReviewState,
+			formatTime(now),
+			formatTime(now),
+		); err != nil {
+			return err
+		}
+
+		record, err := scanPullRequestHandoff(tx.QueryRowContext(ctx, `
+			SELECT id, project_id, provider, repo, number, url, state, issue_url, branch, title, summary, tests_json, risks_json, blockers_json, selected_roles_json, review_state, created_at, updated_at
+			FROM pull_request_handoffs
+			WHERE project_id = ? AND issue_url = ? AND branch = ? AND provider = ? AND repo = ? AND number = ?
+		`, params.ProjectID, params.IssueURL, params.Branch, params.Provider, params.Repo, params.Number))
+		if err != nil {
+			return err
+		}
+		handoff = record
+		return nil
+	})
+
+	return handoff, err
+}
+
+func (store *Store) ListPullRequestHandoffs(ctx context.Context, params ListPullRequestHandoffsParams) ([]PullRequestHandoff, error) {
+	query := `
+		SELECT id, project_id, provider, repo, number, url, state, issue_url, branch, title, summary, tests_json, risks_json, blockers_json, selected_roles_json, review_state, created_at, updated_at
+		FROM pull_request_handoffs
+		WHERE 1=1
+	`
+	args := []any{}
+	if params.ProjectID != nil {
+		query += " AND project_id = ?"
+		args = append(args, *params.ProjectID)
+	}
+	if strings.TrimSpace(params.Repo) != "" {
+		query += " AND repo = ?"
+		args = append(args, strings.TrimSpace(params.Repo))
+	}
+	if strings.TrimSpace(params.ReviewState) != "" {
+		query += " AND review_state = ?"
+		args = append(args, strings.TrimSpace(params.ReviewState))
+	}
+	query += " ORDER BY updated_at DESC, id DESC"
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var handoffs []PullRequestHandoff
+	for rows.Next() {
+		handoff, err := scanPullRequestHandoff(rows)
+		if err != nil {
+			return nil, err
+		}
+		handoffs = append(handoffs, handoff)
+	}
+	return handoffs, rows.Err()
+}
+
+func (store *Store) UpsertPullRequestReviewResult(ctx context.Context, params UpsertPullRequestReviewResultParams) (PullRequestReviewResult, error) {
+	now := store.now()
+	var result PullRequestReviewResult
+	commentsJSON := EncodeStringListJSON(params.Comments)
+	blockersJSON := EncodeStringListJSON(params.Blockers)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO pull_request_review_results (
+				handoff_id,
+				role,
+				state,
+				summary,
+				comments_json,
+				blockers_json,
+				outcome,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(handoff_id, role) DO UPDATE SET
+				state = excluded.state,
+				summary = excluded.summary,
+				comments_json = excluded.comments_json,
+				blockers_json = excluded.blockers_json,
+				outcome = excluded.outcome,
+				updated_at = excluded.updated_at
+		`,
+			params.HandoffID,
+			params.Role,
+			params.State,
+			params.Summary,
+			commentsJSON,
+			blockersJSON,
+			params.Outcome,
+			formatTime(now),
+			formatTime(now),
+		); err != nil {
+			return err
+		}
+
+		record, err := scanPullRequestReviewResult(tx.QueryRowContext(ctx, `
+			SELECT id, handoff_id, role, state, summary, comments_json, blockers_json, outcome, created_at, updated_at
+			FROM pull_request_review_results
+			WHERE handoff_id = ? AND role = ?
+		`, params.HandoffID, params.Role))
+		if err != nil {
+			return err
+		}
+		result = record
+		return nil
+	})
+
+	return result, err
+}
+
+func (store *Store) ListPullRequestReviewResults(ctx context.Context, handoffID int64) ([]PullRequestReviewResult, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT id, handoff_id, role, state, summary, comments_json, blockers_json, outcome, created_at, updated_at
+		FROM pull_request_review_results
+		WHERE handoff_id = ?
+		ORDER BY id
+	`, handoffID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []PullRequestReviewResult
+	for rows.Next() {
+		result, err := scanPullRequestReviewResult(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, rows.Err()
 }
 
 func (store *Store) RecordExternalGitHubIssueEvent(ctx context.Context, params RecordExternalGitHubIssueEventParams) error {
@@ -623,6 +796,8 @@ func (store *Store) CreateIntakeItem(ctx context.Context, params CreateIntakeIte
 				Subject:             params.Subject,
 				DedupeKey:           params.DedupeKey,
 				DedupeRecipeVersion: params.DedupeRecipeVersion,
+				RequestedBy:         intakeSourceFact(sourceFactsJSON, "requested_by"),
+				PayloadPolicy:       intakeSourceFact(sourceFactsJSON, "payload_policy"),
 				Status:              params.Status,
 				Scope:               params.Scope,
 				ScopeKey:            params.ScopeKey,
@@ -632,6 +807,114 @@ func (store *Store) CreateIntakeItem(ctx context.Context, params CreateIntakeIte
 	})
 
 	return item, err
+}
+
+func intakeSourceFact(sourceFactsJSON string, key string) string {
+	var facts map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(sourceFactsJSON), &facts); err != nil {
+		return ""
+	}
+	raw, ok := facts[key]
+	if !ok {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
+}
+
+func (store *Store) CreateIntakeAttachment(ctx context.Context, params CreateIntakeAttachmentParams) (IntakeAttachment, error) {
+	now := store.now()
+	status := strings.TrimSpace(params.Status)
+	if status == "" {
+		status = "stored"
+	}
+	var attachment IntakeAttachment
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := store.getIntakeItemTx(ctx, tx, params.IntakeItemID); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO intake_attachments (
+				intake_item_id,
+				kind,
+				filename,
+				content_type,
+				size_bytes,
+				sha256,
+				status,
+				bytes,
+				created_at,
+				updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			params.IntakeItemID,
+			params.Kind,
+			params.Filename,
+			params.ContentType,
+			params.SizeBytes,
+			params.SHA256,
+			status,
+			params.Bytes,
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+		attachmentID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		attachment = IntakeAttachment{
+			ID:           attachmentID,
+			IntakeItemID: params.IntakeItemID,
+			Kind:         params.Kind,
+			Filename:     params.Filename,
+			ContentType:  params.ContentType,
+			SizeBytes:    params.SizeBytes,
+			SHA256:       params.SHA256,
+			Status:       status,
+			Bytes:        append([]byte(nil), params.Bytes...),
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		return nil
+	})
+	return attachment, err
+}
+
+func (store *Store) ListIntakeAttachments(ctx context.Context, params ListIntakeAttachmentsParams) ([]IntakeAttachment, error) {
+	query := `
+		SELECT id, intake_item_id, kind, filename, content_type, size_bytes, sha256, status, bytes, created_at, updated_at
+		FROM intake_attachments
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.IntakeItemID != 0 {
+		query += ` AND intake_item_id = ?`
+		args = append(args, params.IntakeItemID)
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	attachments := make([]IntakeAttachment, 0)
+	for rows.Next() {
+		attachment, err := scanIntakeAttachment(rows)
+		if err != nil {
+			return nil, err
+		}
+		attachments = append(attachments, attachment)
+	}
+	return attachments, rows.Err()
 }
 
 func (store *Store) ListIntakeItems(ctx context.Context, params ListIntakeItemsParams) ([]IntakeItem, error) {
@@ -748,6 +1031,39 @@ func (store *Store) ProcessIntakeItem(ctx context.Context, params ProcessIntakeI
 	return item, err
 }
 
+func (store *Store) LinkIntakeItemGoal(ctx context.Context, intakeItemID int64, goalID int64) (IntakeItem, error) {
+	if intakeItemID <= 0 {
+		return IntakeItem{}, fmt.Errorf("intake item id is required")
+	}
+	if goalID <= 0 {
+		return IntakeItem{}, fmt.Errorf("goal id is required")
+	}
+	now := store.now()
+	var item IntakeItem
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := store.getGoalTx(ctx, tx, goalID); err != nil {
+			return err
+		}
+		if _, err := store.getIntakeItemTx(ctx, tx, intakeItemID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE intake_items
+			SET goal_id = ?, updated_at = ?
+			WHERE id = ?
+		`, goalID, formatTime(now), intakeItemID); err != nil {
+			return err
+		}
+		linked, err := store.getIntakeItemTx(ctx, tx, intakeItemID)
+		if err != nil {
+			return err
+		}
+		item = linked
+		return nil
+	})
+	return item, err
+}
+
 func (store *Store) ReviewIntakeItem(ctx context.Context, params ReviewIntakeItemParams) (IntakeItem, error) {
 	now := store.now()
 	var item IntakeItem
@@ -791,6 +1107,8 @@ func (store *Store) ReviewIntakeItem(ctx context.Context, params ReviewIntakeIte
 				PolicyReason:      params.PolicyReason,
 				WorkItemID:        params.WorkItemID,
 				WorkItemKey:       params.WorkItemKey,
+				GoalID:            params.GoalID,
+				GoalStatus:        params.GoalStatus,
 				CanonicalIntakeID: existing.CanonicalIntakeItemID,
 			},
 			OccurredAt: now,
@@ -939,6 +1257,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			return fmt.Errorf("automation trigger %s is %s", trigger.Key, trigger.Status)
 		}
 		eventScope := store.automationTriggerEventScopeTx(ctx, tx, trigger)
+		requestEnvelope := automationTriggerEnvelope(trigger, params, source, materializationKey, "not_started", now)
 
 		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamAutomationTrigger,
@@ -955,6 +1274,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 				RequestedBy:        requestedBy,
 				SourceEventID:      params.SourceEventID,
 				SourceEventType:    params.SourceEventType,
+				Envelope:           requestEnvelope,
 			},
 			OccurredAt: now,
 		}); err != nil {
@@ -974,7 +1294,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			if err != nil {
 				return err
 			}
-			if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, false, params.SourceEventID, params.SourceEventType, now); err != nil {
+			if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, false, params, now); err != nil {
 				return err
 			}
 			result = FireAutomationTriggerResult{
@@ -989,13 +1309,28 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			return err
 		}
 
-		project, err := store.getProjectTx(ctx, tx, trigger.ProjectID)
-		if err != nil {
-			return err
-		}
-		task, err := store.createAutomationTriggerTaskTx(ctx, tx, trigger, project, materializationKey, now)
-		if err != nil {
-			return err
+		var task Task
+		createdWorkItem := true
+		if params.ReuseTaskID != nil {
+			var err error
+			task, err = store.getTaskTx(ctx, tx, *params.ReuseTaskID)
+			if err != nil {
+				return err
+			}
+			if task.ProjectID != trigger.ProjectID {
+				return fmt.Errorf("automation trigger %s cannot reuse task %d from project %d", trigger.Key, task.ID, task.ProjectID)
+			}
+			createdWorkItem = false
+		} else {
+			project, err := store.getProjectTx(ctx, tx, trigger.ProjectID)
+			if err != nil {
+				return err
+			}
+			task, err = store.createAutomationTriggerTaskTx(ctx, tx, trigger, project, materializationKey, params, now)
+			if err != nil {
+				return err
+			}
+			eventScope = project.Scope
 		}
 		materialization, err := store.createAutomationTriggerMaterializationTx(ctx, tx, trigger.ID, materializationKey, task.ID, reason, requestedBy, now)
 		if err != nil {
@@ -1008,10 +1343,10 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 		if err != nil {
 			return err
 		}
-		eventScope = project.Scope
-		if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, true, params.SourceEventID, params.SourceEventType, now); err != nil {
+		if err := appendAutomationTriggerEvaluatedEvent(ctx, tx, updated, eventScope, source, materializationKey, createdWorkItem, params, now); err != nil {
 			return err
 		}
+		materializedEnvelope := automationTriggerEnvelope(updated, params, source, materializationKey, "not_started", now)
 		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamAutomationTrigger,
 			StreamID:   updated.ID,
@@ -1029,6 +1364,7 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 				RequestedBy:        requestedBy,
 				SourceEventID:      params.SourceEventID,
 				SourceEventType:    params.SourceEventType,
+				Envelope:           materializedEnvelope,
 			},
 			OccurredAt: now,
 		}); err != nil {
@@ -1038,11 +1374,95 @@ func (store *Store) FireAutomationTrigger(ctx context.Context, params FireAutoma
 			Trigger:         updated,
 			Materialization: materialization,
 			WorkItem:        task,
-			CreatedWorkItem: true,
+			CreatedWorkItem: createdWorkItem,
 		}
 		return nil
 	})
 	return result, err
+}
+
+func (store *Store) RecordAutomationTriggerTest(ctx context.Context, params RecordAutomationTriggerTestParams) error {
+	now := store.now()
+	workspaceID := defaultString(params.WorkspaceID, "default")
+	key := strings.TrimSpace(params.Key)
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		trigger, err := store.getAutomationTriggerByWorkspaceKeyQuery(ctx, tx, workspaceID, key)
+		if err != nil {
+			return err
+		}
+		eventScope := store.automationTriggerEventScopeTx(ctx, tx, trigger)
+		payload := runtimeevents.AutomationTriggerTestedPayload{
+			WorkspaceID:      trigger.WorkspaceID,
+			Key:              trigger.Key,
+			Decision:         strings.TrimSpace(params.Decision),
+			Reason:           strings.TrimSpace(params.Reason),
+			QuietHourEffect:  strings.TrimSpace(params.QuietHourEffect),
+			BatchKey:         strings.TrimSpace(params.BatchKey),
+			BatchWindow:      strings.TrimSpace(params.BatchWindow),
+			ApprovalRequired: params.ApprovalRequired,
+			RecoveryState:    strings.TrimSpace(params.RecoveryState),
+			Mutates:          params.Mutates,
+			Envelope: automationTriggerEnvelope(trigger, FireAutomationTriggerParams{
+				WorkspaceID:      trigger.WorkspaceID,
+				Key:              trigger.Key,
+				Source:           defaultString(params.Source, "test"),
+				Reason:           strings.TrimSpace(params.Reason),
+				DueAt:            params.DueAt,
+				SourceOccurredAt: params.SourceOccurredAt,
+			}, defaultString(params.Source, "test"), strings.TrimSpace(params.MaterializationKey), strings.TrimSpace(params.RecoveryState), now),
+		}
+		if params.DueAt != nil {
+			payload.DueAt = params.DueAt.UTC().Format(time.RFC3339)
+		}
+		if params.NextRun != nil {
+			payload.NextRun = params.NextRun.UTC().Format(time.RFC3339)
+		}
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamAutomationTrigger,
+			StreamID:   trigger.ID,
+			EventType:  runtimeevents.EventAutomationTriggerTested,
+			Scope:      eventScope,
+			ProjectID:  &trigger.ProjectID,
+			Payload:    payload,
+			OccurredAt: now,
+		})
+	})
+}
+
+func (store *Store) RecordSchedulerTick(ctx context.Context, params RecordSchedulerTickParams) error {
+	now := store.now()
+	tickAt := params.Now.UTC()
+	if tickAt.IsZero() {
+		tickAt = now
+	}
+	scope := strings.TrimSpace(params.Scope)
+	if scope == "" {
+		scope = "runtime"
+	}
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamScheduler,
+			StreamID:   0,
+			EventType:  runtimeevents.EventSchedulerTickEvaluated,
+			Scope:      scope,
+			ProjectID:  cloneInt64Ptr(params.ProjectID),
+			Payload: runtimeevents.SchedulerTickEvaluatedPayload{
+				Now:              tickAt.Format(time.RFC3339),
+				DryRun:           params.DryRun,
+				Mutates:          params.Mutates,
+				Evaluated:        params.Evaluated,
+				Materialized:     params.Materialized,
+				Deferred:         params.Deferred,
+				Errored:          params.Errored,
+				WouldRun:         params.WouldRun,
+				WouldDefer:       params.WouldDefer,
+				WouldBatch:       params.WouldBatch,
+				ApprovalRequired: params.ApprovalRequired,
+				RecoveryRan:      params.RecoveryRan,
+			},
+			OccurredAt: now,
+		})
+	})
 }
 
 func (store *Store) DeferAutomationTrigger(ctx context.Context, params DeferAutomationTriggerParams) (AutomationTrigger, error) {
@@ -1078,6 +1498,13 @@ func (store *Store) DeferAutomationTrigger(ctx context.Context, params DeferAuto
 				DueAt:         params.DueAt.UTC().Format(time.RFC3339),
 				DeferredUntil: params.DeferredUntil.UTC().Format(time.RFC3339),
 				Status:        updated.Status,
+				Envelope: automationTriggerEnvelope(updated, FireAutomationTriggerParams{
+					WorkspaceID: updated.WorkspaceID,
+					Key:         updated.Key,
+					Source:      "schedule",
+					Reason:      defaultString(params.Reason, "quiet_hours"),
+					DueAt:       &params.DueAt,
+				}, "schedule", "", "deferred", now),
 			},
 			OccurredAt: now,
 		})
@@ -1136,6 +1563,12 @@ func (store *Store) MarkAutomationTriggerErrored(ctx context.Context, params Mar
 				Key:         updated.Key,
 				Reason:      params.Reason,
 				Error:       params.Error,
+				Envelope: automationTriggerEnvelope(updated, FireAutomationTriggerParams{
+					WorkspaceID: updated.WorkspaceID,
+					Key:         updated.Key,
+					Source:      "evaluation",
+					Reason:      params.Reason,
+				}, "evaluation", "", "errored", now),
 			},
 			OccurredAt: now,
 		})
@@ -1301,6 +1734,9 @@ func (store *Store) ListMemoryEntries(ctx context.Context, params ListMemoryEntr
 func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Task, error) {
 	now := store.now()
 	var task Task
+	acceptanceCriteria := NormalizeAcceptanceCriteria(params.AcceptanceCriteria)
+	acceptanceCriteriaJSON := EncodeAcceptanceCriteriaJSON(acceptanceCriteria)
+	artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
 
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		project, err := store.getProjectTx(ctx, tx, params.ProjectID)
@@ -1313,6 +1749,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				project_id,
 				key,
 				title,
+				acceptance_criteria_json,
 				action_key,
 				status,
 				scope,
@@ -1332,11 +1769,12 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				created_at,
 				updated_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', ?, ?, ?)
 		`,
 			params.ProjectID,
 			params.Key,
 			params.Title,
+			acceptanceCriteriaJSON,
 			params.ActionKey,
 			params.Status,
 			params.Scope,
@@ -1349,9 +1787,106 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			nullIfEmpty(params.WorkKind),
 			params.ExecutionIntent,
 			params.ExecutionIntentSource,
+			artifactsJSON,
 			formatTime(now),
 			formatTime(now),
 		)
+		if err != nil && isMissingTaskExecutionIntentColumns(err) {
+			if hasTaskExecutionIntent(params) {
+				return fmt.Errorf("execution intent requires execution-intent task columns")
+			}
+			result, err = tx.ExecContext(ctx, `
+				INSERT INTO tasks (
+				project_id,
+				key,
+				title,
+				action_key,
+					status,
+					scope,
+					requested_by,
+					workspace_id,
+					initiative_id,
+					companion_id,
+					follow_up_obligation_id,
+					follow_up_occurrence_key,
+					work_kind,
+					current_run_id,
+					summary,
+					terminal_reason,
+					artifacts_json,
+					created_at,
+					updated_at
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', ?, ?, ?)
+			`,
+				params.ProjectID,
+				params.Key,
+				params.Title,
+				params.ActionKey,
+				params.Status,
+				params.Scope,
+				params.RequestedBy,
+				nullInt64(params.WorkspaceID),
+				nullInt64(params.InitiativeID),
+				nullInt64(params.CompanionID),
+				nullInt64(params.FollowUpObligationID),
+				nullIfEmpty(params.FollowUpOccurrenceKey),
+				nullIfEmpty(params.WorkKind),
+				artifactsJSON,
+				formatTime(now),
+				formatTime(now),
+			)
+		}
+		if err != nil && isMissingTaskAcceptanceCriteriaColumn(err) {
+			if len(acceptanceCriteria) > 0 {
+				return fmt.Errorf("acceptance criteria require acceptance-criteria task columns")
+			}
+			result, err = tx.ExecContext(ctx, `
+				INSERT INTO tasks (
+					project_id,
+					key,
+					title,
+					action_key,
+					status,
+					scope,
+					requested_by,
+					workspace_id,
+					initiative_id,
+					companion_id,
+					follow_up_obligation_id,
+					follow_up_occurrence_key,
+					work_kind,
+					execution_intent,
+					execution_intent_source,
+					current_run_id,
+					summary,
+					terminal_reason,
+					artifacts_json,
+					created_at,
+					updated_at
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', ?, ?, ?)
+			`,
+				params.ProjectID,
+				params.Key,
+				params.Title,
+				params.ActionKey,
+				params.Status,
+				params.Scope,
+				params.RequestedBy,
+				nullInt64(params.WorkspaceID),
+				nullInt64(params.InitiativeID),
+				nullInt64(params.CompanionID),
+				nullInt64(params.FollowUpObligationID),
+				nullIfEmpty(params.FollowUpOccurrenceKey),
+				nullIfEmpty(params.WorkKind),
+				params.ExecutionIntent,
+				params.ExecutionIntentSource,
+				artifactsJSON,
+				formatTime(now),
+				formatTime(now),
+			)
+		}
 		if err != nil && isMissingTaskExecutionIntentColumns(err) {
 			if hasTaskExecutionIntent(params) {
 				return fmt.Errorf("execution intent requires execution-intent task columns")
@@ -1378,7 +1913,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 					created_at,
 					updated_at
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', ?, ?, ?)
 			`,
 				params.ProjectID,
 				params.Key,
@@ -1393,6 +1928,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				nullInt64(params.FollowUpObligationID),
 				nullIfEmpty(params.FollowUpOccurrenceKey),
 				nullIfEmpty(params.WorkKind),
+				artifactsJSON,
 				formatTime(now),
 				formatTime(now),
 			)
@@ -1403,10 +1939,10 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			}
 			result, err = tx.ExecContext(ctx, `
 				INSERT INTO tasks (
-					project_id,
-					key,
-					title,
-					action_key,
+				project_id,
+				key,
+				title,
+				action_key,
 					status,
 					scope,
 					requested_by,
@@ -1421,7 +1957,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 					created_at,
 					updated_at
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', '[]', ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', '', ?, ?, ?)
 			`,
 				params.ProjectID,
 				params.Key,
@@ -1434,6 +1970,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 				nullInt64(params.InitiativeID),
 				nullInt64(params.CompanionID),
 				nullIfEmpty(params.WorkKind),
+				artifactsJSON,
 				formatTime(now),
 				formatTime(now),
 			)
@@ -1452,6 +1989,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			ProjectID:             params.ProjectID,
 			Key:                   params.Key,
 			Title:                 params.Title,
+			AcceptanceCriteria:    acceptanceCriteria,
 			ActionKey:             params.ActionKey,
 			Status:                params.Status,
 			Scope:                 params.Scope,
@@ -1464,7 +2002,7 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			WorkKind:              params.WorkKind,
 			ExecutionIntent:       params.ExecutionIntent,
 			ExecutionIntentSource: params.ExecutionIntentSource,
-			ArtifactsJSON:         "[]",
+			ArtifactsJSON:         artifactsJSON,
 			NextEligibleAt:        time.Time{},
 			Priority:              100,
 			LastError:             "",
@@ -1500,6 +2038,37 @@ func (store *Store) CreateTask(ctx context.Context, params CreateTaskParams) (Ta
 			},
 			OccurredAt: now,
 		})
+	})
+
+	return task, err
+}
+
+func (store *Store) UpdateTaskAcceptanceCriteria(ctx context.Context, taskID int64, criteria []string) (Task, error) {
+	now := store.now()
+	var task Task
+	normalized := NormalizeAcceptanceCriteria(criteria)
+	criteriaJSON := EncodeAcceptanceCriteriaJSON(normalized)
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getTaskTx(ctx, tx, taskID)
+		if err != nil {
+			return err
+		}
+		if EncodeAcceptanceCriteriaJSON(current.AcceptanceCriteria) == criteriaJSON {
+			task = current
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET acceptance_criteria_json = ?, updated_at = ?
+			WHERE id = ?
+		`, criteriaJSON, formatTime(now), taskID); err != nil {
+			return err
+		}
+		current.AcceptanceCriteria = normalized
+		current.UpdatedAt = now
+		task = current
+		return nil
 	})
 
 	return task, err
@@ -1581,6 +2150,36 @@ func (store *Store) UpdateTaskQueueState(ctx context.Context, params UpdateTaskQ
 	err := store.withTx(ctx, func(tx *sql.Tx) error {
 		updated, err := store.updateTaskQueueStateTx(ctx, tx, params)
 		if err != nil {
+			return err
+		}
+		task = updated
+		return nil
+	})
+	return task, err
+}
+
+func (store *Store) UpdateTaskExecutionIntent(ctx context.Context, params UpdateTaskExecutionIntentParams) (Task, error) {
+	var task Task
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		intent := strings.TrimSpace(params.ExecutionIntent)
+		source := strings.TrimSpace(params.ExecutionIntentSource)
+		now := store.now()
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET execution_intent = ?, execution_intent_source = ?, updated_at = ?
+			WHERE id = ?
+		`, intent, source, formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+		updated, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
 			return err
 		}
 		task = updated
@@ -1904,7 +2503,9 @@ func appendTaskQueueStateChangedEventTx(ctx context.Context, tx *sql.Tx, previou
 		previous.LastError == updated.LastError &&
 		previous.RetryCount == updated.RetryCount &&
 		previous.MaxAttempts == updated.MaxAttempts &&
-		previous.BlockedReason == updated.BlockedReason {
+		previous.BlockedReason == updated.BlockedReason &&
+		previous.ExecutionIntent == updated.ExecutionIntent &&
+		previous.ExecutionIntentSource == updated.ExecutionIntentSource {
 		return nil
 	}
 
@@ -3006,7 +3607,7 @@ func (store *Store) ResolveStalledRun(ctx context.Context, params ResolveStalled
 		if currentRun.TaskID != params.TaskID {
 			return sql.ErrNoRows
 		}
-		if currentRun.Status != "running" || currentTask.CurrentRunID == nil || *currentTask.CurrentRunID != currentRun.ID {
+		if (currentRun.Status != "running" && currentRun.Status != "executing") || currentTask.CurrentRunID == nil || *currentTask.CurrentRunID != currentRun.ID {
 			return sql.ErrNoRows
 		}
 
@@ -3287,12 +3888,13 @@ func (store *Store) RecordRecoveryAction(ctx context.Context, params RecordRecov
 			TaskID:     contextRow.TaskID,
 			RunID:      recovery.RunID,
 			Payload: runtimeevents.RecoveryActionExecutedPayload{
-				Playbook:    params.Playbook,
-				FaultKey:    params.FaultKey,
-				ActionName:  params.ActionName,
-				Attempt:     params.Attempt,
-				Result:      params.Result,
-				Description: params.Description,
+				Playbook:          params.Playbook,
+				FaultKey:          params.FaultKey,
+				ActionName:        params.ActionName,
+				Attempt:           params.Attempt,
+				Result:            params.Result,
+				Description:       params.Description,
+				ContractViolation: params.ContractViolation,
 			},
 			OccurredAt: now,
 		})
@@ -4053,7 +4655,7 @@ func (store *Store) RecordMemorySummary(ctx context.Context, params RecordMemory
 			UpdatedAt:          now,
 		}
 
-		return appendEventTx(ctx, tx, eventInsert{
+		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamMemorySummary,
 			StreamID:   summary.ID,
 			EventType:  runtimeevents.EventMemorySummaryRecorded,
@@ -4070,7 +4672,23 @@ func (store *Store) RecordMemorySummary(ctx context.Context, params RecordMemory
 				RunID:              summary.RunID,
 			},
 			OccurredAt: now,
-		})
+		}); err != nil {
+			return err
+		}
+		if payload, ok := memoryProposalEventPayload(summary); ok && payload.Status == "pending" {
+			return appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamMemorySummary,
+				StreamID:   summary.ID,
+				EventType:  runtimeevents.EventMemoryProposalCreated,
+				Scope:      summary.Scope,
+				ProjectID:  summary.ProjectID,
+				TaskID:     summary.TaskID,
+				RunID:      summary.RunID,
+				Payload:    payload,
+				OccurredAt: now,
+			})
+		}
+		return nil
 	})
 
 	return summary, err
@@ -4106,7 +4724,7 @@ func (store *Store) UpdateMemorySummaryDetails(ctx context.Context, params Updat
 		current.UpdatedAt = now
 		summary = current
 
-		return appendEventTx(ctx, tx, eventInsert{
+		if err := appendEventTx(ctx, tx, eventInsert{
 			StreamType: runtimeevents.StreamMemorySummary,
 			StreamID:   summary.ID,
 			EventType:  runtimeevents.EventMemorySummaryUpdated,
@@ -4123,13 +4741,114 @@ func (store *Store) UpdateMemorySummaryDetails(ctx context.Context, params Updat
 				RunID:              summary.RunID,
 			},
 			OccurredAt: now,
-		})
+		}); err != nil {
+			return err
+		}
+		if payload, ok := memoryProposalEventPayload(summary); ok && memoryProposalResolvedStatus(payload.Status) {
+			return appendEventTx(ctx, tx, eventInsert{
+				StreamType: runtimeevents.StreamMemorySummary,
+				StreamID:   summary.ID,
+				EventType:  runtimeevents.EventMemoryProposalResolved,
+				Scope:      summary.Scope,
+				ProjectID:  summary.ProjectID,
+				TaskID:     summary.TaskID,
+				RunID:      summary.RunID,
+				Payload:    payload,
+				OccurredAt: now,
+			})
+		}
+		return nil
 	})
 
 	return summary, err
 }
 
+func memoryProposalEventPayload(summary MemorySummary) (runtimeevents.MemoryProposalPayload, bool) {
+	var details struct {
+		Schema   string `json:"schema"`
+		Status   string `json:"status"`
+		Approval string `json:"approval"`
+		Source   struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+			Key  string `json:"key"`
+		} `json:"source"`
+		Provenance struct {
+			ReviewedBy   string `json:"reviewed_by"`
+			ReviewReason string `json:"review_reason"`
+		} `json:"provenance"`
+		Safety struct {
+			Sensitivity string `json:"sensitivity"`
+		} `json:"safety"`
+	}
+	if err := json.Unmarshal([]byte(summary.DetailsJSON), &details); err != nil {
+		return runtimeevents.MemoryProposalPayload{}, false
+	}
+	if strings.TrimSpace(details.Schema) != "memory_proposal.v1" {
+		return runtimeevents.MemoryProposalPayload{}, false
+	}
+	status := strings.TrimSpace(details.Status)
+	if status == "" {
+		status = strings.TrimSpace(details.Approval)
+	}
+	payload := runtimeevents.MemoryProposalPayload{
+		MemoryID:    summary.ID,
+		Scope:       summary.Scope,
+		ScopeKey:    summary.ScopeKey,
+		MemoryType:  summary.MemoryType,
+		Status:      status,
+		Decision:    memoryProposalDecisionForStatus(status),
+		SourceType:  details.Source.Type,
+		SourceID:    details.Source.ID,
+		SourceKey:   details.Source.Key,
+		Sensitivity: details.Safety.Sensitivity,
+		ReviewedBy:  details.Provenance.ReviewedBy,
+		Reason:      details.Provenance.ReviewReason,
+	}
+	return payload, true
+}
+
+func memoryProposalResolvedStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "accepted", "rejected", "archived":
+		return true
+	default:
+		return false
+	}
+}
+
+func memoryProposalDecisionForStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "accepted":
+		return "accept"
+	case "rejected":
+		return "reject"
+	case "archived":
+		return "archive"
+	default:
+		return ""
+	}
+}
+
 func (store *Store) ListMemorySummaries(ctx context.Context, params ListMemorySummariesParams) ([]MemorySummary, error) {
+	return store.listMemorySummariesQuery(ctx, store.db, params)
+}
+
+func (store *Store) listMemorySummariesTx(ctx context.Context, tx *sql.Tx, params RecordMemorySummaryParams) ([]MemorySummary, error) {
+	return store.listMemorySummariesQuery(ctx, tx, ListMemorySummariesParams{
+		ProjectID:          params.ProjectID,
+		SourceTranscriptID: params.SourceTranscriptID,
+		TaskID:             params.TaskID,
+		RunID:              params.RunID,
+		Scope:              params.Scope,
+		ScopeKey:           params.ScopeKey,
+		MemoryType:         params.MemoryType,
+	})
+}
+
+func (store *Store) listMemorySummariesQuery(ctx context.Context, querier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, params ListMemorySummariesParams) ([]MemorySummary, error) {
 	query := `
 		SELECT
 			id,
@@ -4178,7 +4897,7 @@ func (store *Store) ListMemorySummaries(ctx context.Context, params ListMemorySu
 	}
 	query += ` ORDER BY id ASC`
 
-	rows, err := store.db.QueryContext(ctx, query, args...)
+	rows, err := querier.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -4506,6 +5225,7 @@ func (store *Store) GetTaskByFollowUpOccurrence(ctx context.Context, obligationI
 			project_id,
 			key,
 			title,
+			acceptance_criteria_json,
 			action_key,
 			status,
 			scope,
@@ -5185,7 +5905,7 @@ func (store *Store) GetTask(ctx context.Context, taskID int64) (Task, error) {
 
 func (store *Store) GetTaskByProjectAndKey(ctx context.Context, projectID int64, key string) (Task, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		SELECT id, project_id, key, title, acceptance_criteria_json, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE project_id = ? AND key = ?
 	`, projectID, key)
@@ -5194,12 +5914,36 @@ func (store *Store) GetTaskByProjectAndKey(ctx context.Context, projectID int64,
 
 func (store *Store) ListEligibleQueuedTasks(ctx context.Context, now time.Time) ([]Task, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		SELECT id, project_id, key, title, acceptance_criteria_json, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE status = 'queued'
 		  AND next_eligible_at <= ?
 		ORDER BY priority ASC, next_eligible_at ASC, id ASC
 	`, formatTime(now))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		task, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+
+	return tasks, rows.Err()
+}
+
+func (store *Store) ListTasksMissingExecutionIntent(ctx context.Context) ([]Task, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT id, project_id, key, title, acceptance_criteria_json, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		FROM tasks
+		WHERE COALESCE(NULLIF(TRIM(execution_intent), ''), '') = ''
+		ORDER BY id ASC
+	`)
 	if err != nil {
 		return nil, err
 	}
@@ -5332,7 +6076,7 @@ func (store *Store) GetProjectByKey(ctx context.Context, key string) (Project, e
 
 func (store *Store) ListExternalIssues(ctx context.Context, params ListExternalIssuesParams) ([]ExternalIssue, error) {
 	query := `
-		SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, last_synced_at, created_at, updated_at
+		SELECT id, project_id, provider, repo, number, title, body_hash, url, state, labels_json, sync_status, sync_cursor, acceptance_criteria_json, last_synced_at, created_at, updated_at
 		FROM external_issues
 		WHERE 1 = 1
 	`
@@ -6298,6 +7042,77 @@ func (store *Store) UpdateContextPacketStatus(ctx context.Context, params Update
 
 func (store *Store) ReviewContextPacket(ctx context.Context, params ReviewContextPacketParams) (ReviewContextPacketResult, error) {
 	now := store.now()
+	var result ReviewContextPacketResult
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = store.reviewContextPacketTx(ctx, tx, params, now)
+		return err
+	})
+	if err != nil {
+		return ReviewContextPacketResult{}, err
+	}
+	return result, nil
+}
+
+func (store *Store) ReviewContextPacketAndRecordMemorySummary(ctx context.Context, params ReviewContextPacketAndRecordMemorySummaryParams) (ReviewContextPacketAndRecordMemorySummaryResult, error) {
+	now := store.now()
+	var result ReviewContextPacketAndRecordMemorySummaryResult
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		review, err := store.reviewContextPacketTx(ctx, tx, params.Review, now)
+		if err != nil {
+			return err
+		}
+		result.Review = review
+
+		if params.SourceContextPacketID <= 0 {
+			return fmt.Errorf("source context packet id is required")
+		}
+		if review.Packet.ID != params.SourceContextPacketID {
+			return fmt.Errorf("source context packet id %d does not match reviewed packet %d", params.SourceContextPacketID, review.Packet.ID)
+		}
+		if strings.ToLower(strings.TrimSpace(params.Review.Decision)) != "accept" || review.Packet.Status != "active" {
+			return nil
+		}
+		if err := store.validateAcceptedContextPacketMemorySourceTx(ctx, tx, params.SourceContextPacketID, params.Memory); err != nil {
+			return err
+		}
+		memory, err := store.recordContextPacketMemorySummaryTx(ctx, tx, params.Memory, params.SourceContextPacketID, now)
+		if err != nil {
+			return err
+		}
+		result.Memory = &memory
+		return nil
+	})
+	if err != nil {
+		return ReviewContextPacketAndRecordMemorySummaryResult{}, err
+	}
+	return result, nil
+}
+
+func (store *Store) RecordMemorySummaryForAcceptedContextPacket(ctx context.Context, sourceContextPacketID int64, params RecordMemorySummaryParams) (MemorySummary, error) {
+	now := store.now()
+	var summary MemorySummary
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if err := store.validateAcceptedContextPacketMemorySourceTx(ctx, tx, sourceContextPacketID, params); err != nil {
+			return err
+		}
+		recorded, err := store.recordContextPacketMemorySummaryTx(ctx, tx, params, sourceContextPacketID, now)
+		if err != nil {
+			return err
+		}
+		summary = recorded
+		return nil
+	})
+	if err != nil {
+		return MemorySummary{}, err
+	}
+	return summary, nil
+}
+
+func (store *Store) reviewContextPacketTx(ctx context.Context, tx *sql.Tx, params ReviewContextPacketParams, now time.Time) (ReviewContextPacketResult, error) {
 	reviewedBy := strings.TrimSpace(params.ReviewedBy)
 	if reviewedBy == "" {
 		reviewedBy = "operator"
@@ -6306,73 +7121,301 @@ func (store *Store) ReviewContextPacket(ctx context.Context, params ReviewContex
 	if decision == "" {
 		decision = params.Status
 	}
-	var result ReviewContextPacketResult
-
-	err := store.withTx(ctx, func(tx *sql.Tx) error {
-		current, err := store.getContextPacketTx(ctx, tx, params.PacketID)
-		if err != nil {
-			return err
-		}
-		previousStatus := current.Status
-		repeated := current.Status == params.Status
-
-		summary := current.Summary
-		if strings.TrimSpace(params.Summary) != "" {
-			summary = params.Summary
-		}
-		payloadJSON := current.PayloadJSON
-		if strings.TrimSpace(params.PayloadJSON) != "" {
-			payloadJSON = params.PayloadJSON
-		}
-
-		if !repeated || summary != current.Summary || payloadJSON != current.PayloadJSON {
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE context_packets
-				SET status = ?, summary = ?, payload_json = ?
-				WHERE id = ?
-			`, params.Status, summary, payloadJSON, params.PacketID); err != nil {
-				return err
-			}
-			current.Status = params.Status
-			current.Summary = summary
-			current.PayloadJSON = payloadJSON
-		}
-
-		contextRow, err := store.contextPacketContextTx(ctx, tx, current.TaskID, current.RunID)
-		if err != nil {
-			return err
-		}
-		if err := appendEventTx(ctx, tx, eventInsert{
-			StreamType: runtimeevents.StreamContextPacket,
-			StreamID:   current.ID,
-			EventType:  runtimeevents.EventContextPacketReviewed,
-			Scope:      contextRow.Scope,
-			ProjectID:  contextRow.ProjectID,
-			TaskID:     current.TaskID,
-			RunID:      current.RunID,
-			Payload: runtimeevents.ContextPacketReviewedPayload{
-				PacketID:       current.ID,
-				PacketKind:     current.PacketKind,
-				PacketScope:    current.PacketScope,
-				Decision:       decision,
-				Status:         current.Status,
-				PreviousStatus: previousStatus,
-				ReviewedBy:     reviewedBy,
-				Reason:         params.Reason,
-				Repeated:       repeated,
-			},
-			OccurredAt: now,
-		}); err != nil {
-			return err
-		}
-
-		result = ReviewContextPacketResult{Packet: current, Repeated: repeated}
-		return nil
-	})
+	current, err := store.getContextPacketTx(ctx, tx, params.PacketID)
 	if err != nil {
 		return ReviewContextPacketResult{}, err
 	}
-	return result, nil
+	previousStatus := current.Status
+	repeated := current.Status == params.Status
+
+	summary := current.Summary
+	if strings.TrimSpace(params.Summary) != "" {
+		summary = params.Summary
+	}
+	payloadJSON := current.PayloadJSON
+	if strings.TrimSpace(params.PayloadJSON) != "" {
+		payloadJSON = params.PayloadJSON
+	}
+
+	if !repeated || summary != current.Summary || payloadJSON != current.PayloadJSON {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE context_packets
+			SET status = ?, summary = ?, payload_json = ?
+			WHERE id = ?
+		`, params.Status, summary, payloadJSON, params.PacketID); err != nil {
+			return ReviewContextPacketResult{}, err
+		}
+		current.Status = params.Status
+		current.Summary = summary
+		current.PayloadJSON = payloadJSON
+	}
+
+	contextRow, err := store.contextPacketContextTx(ctx, tx, current.TaskID, current.RunID)
+	if err != nil {
+		return ReviewContextPacketResult{}, err
+	}
+	if err := appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamContextPacket,
+		StreamID:   current.ID,
+		EventType:  runtimeevents.EventContextPacketReviewed,
+		Scope:      contextRow.Scope,
+		ProjectID:  contextRow.ProjectID,
+		TaskID:     current.TaskID,
+		RunID:      current.RunID,
+		Payload: runtimeevents.ContextPacketReviewedPayload{
+			PacketID:       current.ID,
+			PacketKind:     current.PacketKind,
+			PacketScope:    current.PacketScope,
+			Decision:       decision,
+			Status:         current.Status,
+			PreviousStatus: previousStatus,
+			ReviewedBy:     reviewedBy,
+			Reason:         params.Reason,
+			Repeated:       repeated,
+		},
+		OccurredAt: now,
+	}); err != nil {
+		return ReviewContextPacketResult{}, err
+	}
+
+	return ReviewContextPacketResult{Packet: current, Repeated: repeated}, nil
+}
+
+func (store *Store) recordContextPacketMemorySummaryTx(ctx context.Context, tx *sql.Tx, params RecordMemorySummaryParams, sourceContextPacketID int64, now time.Time) (MemorySummary, error) {
+	params.Scope = strings.TrimSpace(params.Scope)
+	params.ScopeKey = strings.TrimSpace(params.ScopeKey)
+	params.MemoryType = strings.TrimSpace(params.MemoryType)
+	if params.Scope == "" {
+		return MemorySummary{}, fmt.Errorf("memory summary scope is required")
+	}
+	if params.ScopeKey == "" {
+		return MemorySummary{}, fmt.Errorf("memory summary scope key is required")
+	}
+	if params.MemoryType == "" {
+		return MemorySummary{}, fmt.Errorf("memory summary type is required")
+	}
+	if _, _, _, err := store.validateProjectTaskRunLineageTx(ctx, tx, params.ProjectID, params.TaskID, params.RunID, params.Scope, params.ScopeKey, "memory summary"); err != nil {
+		return MemorySummary{}, err
+	}
+
+	existingForSource, found, err := store.memorySummaryForSourceContextPacketTx(ctx, tx, sourceContextPacketID)
+	if err != nil {
+		return MemorySummary{}, err
+	}
+	if found {
+		return existingForSource, nil
+	}
+
+	existing, err := store.listMemorySummariesTx(ctx, tx, params)
+	if err != nil {
+		return MemorySummary{}, err
+	}
+	for _, summary := range existing {
+		if memorySummarySourceContextPacketID(summary.DetailsJSON) == sourceContextPacketID {
+			return summary, nil
+		}
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO memory_summaries (
+			project_id,
+			source_transcript_id,
+			task_id,
+			run_id,
+			scope,
+			scope_key,
+			memory_type,
+			summary,
+			details_json,
+			created_at,
+			updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		nullInt64(params.ProjectID),
+		nullInt64(params.SourceTranscriptID),
+		nullInt64(params.TaskID),
+		nullInt64(params.RunID),
+		params.Scope,
+		params.ScopeKey,
+		params.MemoryType,
+		params.Summary,
+		params.DetailsJSON,
+		formatTime(now),
+		formatTime(now),
+	)
+	if err != nil {
+		return MemorySummary{}, err
+	}
+	summaryID, err := result.LastInsertId()
+	if err != nil {
+		return MemorySummary{}, err
+	}
+	summary := MemorySummary{
+		ID:                 summaryID,
+		ProjectID:          params.ProjectID,
+		SourceTranscriptID: params.SourceTranscriptID,
+		TaskID:             params.TaskID,
+		RunID:              params.RunID,
+		Scope:              params.Scope,
+		ScopeKey:           params.ScopeKey,
+		MemoryType:         params.MemoryType,
+		Summary:            params.Summary,
+		DetailsJSON:        params.DetailsJSON,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+
+	if err := appendEventTx(ctx, tx, eventInsert{
+		StreamType: runtimeevents.StreamMemorySummary,
+		StreamID:   summary.ID,
+		EventType:  runtimeevents.EventMemorySummaryRecorded,
+		Scope:      summary.Scope,
+		ProjectID:  summary.ProjectID,
+		TaskID:     summary.TaskID,
+		RunID:      summary.RunID,
+		Payload: runtimeevents.MemorySummaryRecordedPayload{
+			Scope:              summary.Scope,
+			ScopeKey:           summary.ScopeKey,
+			MemoryType:         summary.MemoryType,
+			SourceTranscriptID: summary.SourceTranscriptID,
+			TaskID:             summary.TaskID,
+			RunID:              summary.RunID,
+		},
+		OccurredAt: now,
+	}); err != nil {
+		return MemorySummary{}, err
+	}
+
+	return summary, nil
+}
+
+func (store *Store) validateAcceptedContextPacketMemorySourceTx(ctx context.Context, tx *sql.Tx, packetID int64, params RecordMemorySummaryParams) error {
+	packet, err := store.getContextPacketTx(ctx, tx, packetID)
+	if err != nil {
+		return err
+	}
+	if packet.PacketKind != "context_pack" || packet.PacketScope != "operator_context_pack" {
+		return fmt.Errorf("context packet %d is not an operator context pack", packet.ID)
+	}
+	if packet.Status != "active" {
+		return fmt.Errorf("knowledge memory persistence requires accepted proposal")
+	}
+	if packet.TaskID == nil {
+		return fmt.Errorf("context pack proposal %d has no task for memory persistence", packet.ID)
+	}
+	task, err := store.getTaskTx(ctx, tx, *packet.TaskID)
+	if err != nil {
+		return err
+	}
+	project, err := store.getProjectTx(ctx, tx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+	if params.ProjectID == nil || *params.ProjectID != project.ID {
+		return fmt.Errorf("memory summary project must match context pack project %d", project.ID)
+	}
+	if params.TaskID == nil || *params.TaskID != task.ID {
+		return fmt.Errorf("memory summary task must match context pack task %d", task.ID)
+	}
+	if params.RunID != nil {
+		if packet.RunID == nil || *params.RunID != *packet.RunID {
+			return fmt.Errorf("memory summary run does not match context pack run")
+		}
+	}
+	if strings.TrimSpace(params.MemoryType) != "context_pack" {
+		return fmt.Errorf("context pack memory summary type must be context_pack")
+	}
+	if strings.TrimSpace(params.Scope) != task.Scope || strings.TrimSpace(params.ScopeKey) != project.Key {
+		return fmt.Errorf("context pack memory scope must match task project scope")
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT payload_json
+		FROM events
+		WHERE stream_type = ?
+		  AND stream_id = ?
+		  AND event_type = ?
+	`, runtimeevents.StreamContextPacket, packet.ID, runtimeevents.EventContextPacketReviewed)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var payloadJSON string
+		if err := rows.Scan(&payloadJSON); err != nil {
+			return err
+		}
+		var payload runtimeevents.ContextPacketReviewedPayload
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			return err
+		}
+		if payload.Decision == "accept" && payload.Status == "active" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("knowledge memory persistence requires accepted proposal")
+}
+
+func (store *Store) memorySummaryForSourceContextPacketTx(ctx context.Context, tx *sql.Tx, sourceContextPacketID int64) (MemorySummary, bool, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT
+			id,
+			project_id,
+			source_transcript_id,
+			task_id,
+			run_id,
+			scope,
+			scope_key,
+			memory_type,
+			summary,
+			details_json,
+			created_at,
+			updated_at
+		FROM memory_summaries
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return MemorySummary{}, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		summary, err := scanMemorySummary(rows)
+		if err != nil {
+			return MemorySummary{}, false, err
+		}
+		if memorySummarySourceContextPacketID(summary.DetailsJSON) == sourceContextPacketID {
+			return summary, true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return MemorySummary{}, false, err
+	}
+	return MemorySummary{}, false, nil
+}
+
+func memorySummarySourceContextPacketID(detailsJSON string) int64 {
+	var details map[string]any
+	if err := json.Unmarshal([]byte(detailsJSON), &details); err != nil {
+		return 0
+	}
+	switch value := details["source_context_pack_id"].(type) {
+	case float64:
+		return int64(value)
+	case int64:
+		return value
+	case int:
+		return int64(value)
+	case string:
+		var parsed int64
+		if _, err := fmt.Sscan(value, &parsed); err == nil {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func (store *Store) CreateWorktreeLease(ctx context.Context, params CreateWorktreeLeaseParams) (WorktreeLease, error) {
@@ -7036,7 +8079,7 @@ func (store *Store) getWorkspaceByKeyTx(ctx context.Context, tx *sql.Tx, key str
 
 func (store *Store) getTaskQuery(ctx context.Context, queryer sqlQueryRow, taskID int64) (Task, error) {
 	row := queryer.QueryRowContext(ctx, `
-		SELECT id, project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
+		SELECT id, project_id, key, title, acceptance_criteria_json, action_key, status, scope, requested_by, workspace_id, initiative_id, companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent, execution_intent_source, summary, terminal_reason, artifacts_json, current_run_id, next_eligible_at, priority, last_error, retry_count, max_attempts, blocked_reason, created_at, updated_at
 		FROM tasks
 		WHERE id = ?
 	`, taskID)
@@ -7617,7 +8660,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			r.id, r.task_id, r.executor, r.status, r.attempt, r.started_at, r.finished_at, r.summary, r.terminal_reason, r.artifacts_json,
-			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.execution_intent, t.execution_intent_source, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.acceptance_criteria_json, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.execution_intent, t.execution_intent_source, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
 		WHERE r.id = ?
@@ -7629,6 +8672,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	var summary sql.NullString
 	var terminalReason sql.NullString
 	var artifactsJSON sql.NullString
+	var taskAcceptanceCriteriaJSON sql.NullString
 	var taskSummary sql.NullString
 	var taskTerminalReason sql.NullString
 	var taskArtifactsJSON sql.NullString
@@ -7666,6 +8710,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 		&task.ProjectID,
 		&task.Key,
 		&task.Title,
+		&taskAcceptanceCriteriaJSON,
 		&task.ActionKey,
 		&task.Status,
 		&task.Scope,
@@ -7707,6 +8752,7 @@ func (store *Store) getRunWithTaskTx(ctx context.Context, tx *sql.Tx, runID int6
 	run.TerminalReason = terminalReason.String
 	run.ArtifactsJSON = normalizeArtifactsJSON(artifactsJSON.String)
 
+	task.AcceptanceCriteria = DecodeAcceptanceCriteriaJSON(taskAcceptanceCriteriaJSON.String)
 	task.WorkspaceID = nullableInt64Ptr(workspaceID)
 	task.InitiativeID = nullableInt64Ptr(initiativeID)
 	task.CompanionID = nullableInt64Ptr(companionID)
@@ -7744,7 +8790,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	row := tx.QueryRowContext(ctx, `
 		SELECT
 			a.id, a.task_id, a.run_id, a.status, a.requested_at, a.resolved_at, a.decision_by, a.reason,
-			t.id, t.project_id, t.key, t.title, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.execution_intent, t.execution_intent_source, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
+			t.id, t.project_id, t.key, t.title, t.acceptance_criteria_json, t.action_key, t.status, t.scope, t.requested_by, t.workspace_id, t.initiative_id, t.companion_id, t.follow_up_obligation_id, t.follow_up_occurrence_key, t.work_kind, t.execution_intent, t.execution_intent_source, t.summary, t.terminal_reason, t.artifacts_json, t.current_run_id, t.next_eligible_at, t.priority, t.last_error, t.retry_count, t.max_attempts, t.blocked_reason, t.created_at, t.updated_at
 		FROM approvals a
 		JOIN tasks t ON t.id = a.task_id
 		WHERE a.id = ?
@@ -7757,6 +8803,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	var decisionBy sql.NullString
 	var reason sql.NullString
 	var requestedAt string
+	var taskAcceptanceCriteriaJSON sql.NullString
 	var taskSummary sql.NullString
 	var taskTerminalReason sql.NullString
 	var taskArtifactsJSON sql.NullString
@@ -7791,6 +8838,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 		&task.ProjectID,
 		&task.Key,
 		&task.Title,
+		&taskAcceptanceCriteriaJSON,
 		&task.ActionKey,
 		&task.Status,
 		&task.Scope,
@@ -7832,6 +8880,7 @@ func (store *Store) getApprovalWithTaskTx(ctx context.Context, tx *sql.Tx, appro
 	approval.DecisionBy = decisionBy.String
 	approval.Reason = reason.String
 
+	task.AcceptanceCriteria = DecodeAcceptanceCriteriaJSON(taskAcceptanceCriteriaJSON.String)
 	task.WorkspaceID = nullableInt64Ptr(workspaceID)
 	task.InitiativeID = nullableInt64Ptr(initiativeID)
 	task.CompanionID = nullableInt64Ptr(companionID)
@@ -8243,6 +9292,84 @@ func automationTriggerExecutionIntent(trigger AutomationTrigger) (string, string
 	}
 }
 
+func automationTriggerEnvelope(trigger AutomationTrigger, params FireAutomationTriggerParams, source string, materializationKey string, recoveryState string, now time.Time) *runtimeevents.AutomationTriggerEnvelope {
+	if recoveryState == "" {
+		recoveryState = "not_started"
+	}
+	source = defaultString(source, defaultString(params.Source, "manual"))
+	envelope := &runtimeevents.AutomationTriggerEnvelope{
+		Source:        source,
+		TriggerType:   defaultString(trigger.Kind, "schedule"),
+		DedupeKey:     materializationKey,
+		OccurredAt:    now.UTC().Format(time.RFC3339),
+		RecoveryState: recoveryState,
+	}
+	if params.DueAt != nil {
+		envelope.DueAt = params.DueAt.UTC().Format(time.RFC3339)
+	}
+	if params.SourceOccurredAt != nil {
+		envelope.SourceOccurredAt = params.SourceOccurredAt.UTC().Format(time.RFC3339)
+	}
+	metadata := automationTriggerRuleMetadata(trigger)
+	if metadata.schedule != nil {
+		envelope.Schedule = metadata.schedule
+	}
+	if metadata.executionIntent != "" {
+		envelope.Risk = &runtimeevents.AutomationTriggerRiskEnvelope{
+			ExecutionIntent:  metadata.executionIntent,
+			ApprovalRequired: automationTriggerIntentNeedsApproval(metadata.executionIntent),
+		}
+	}
+	return envelope
+}
+
+type automationTriggerRuleMetadataResult struct {
+	schedule        *runtimeevents.AutomationTriggerScheduleEnvelope
+	executionIntent string
+}
+
+func automationTriggerRuleMetadata(trigger AutomationTrigger) automationTriggerRuleMetadataResult {
+	var rule struct {
+		Summary         string `json:"summary"`
+		Cadence         string `json:"cadence"`
+		Cron            string `json:"cron"`
+		QuietHours      string `json:"quiet_hours"`
+		QuietTimezone   string `json:"quiet_timezone"`
+		ExecutionIntent string `json:"execution_intent"`
+		Intent          string `json:"intent"`
+	}
+	_ = json.Unmarshal([]byte(trigger.RuleJSON), &rule)
+	schedule := runtimeevents.AutomationTriggerScheduleEnvelope{
+		Summary:       defaultString(rule.Summary, trigger.RuleSummary),
+		Cadence:       strings.TrimSpace(rule.Cadence),
+		Cron:          strings.TrimSpace(rule.Cron),
+		QuietHours:    strings.TrimSpace(rule.QuietHours),
+		QuietTimezone: strings.TrimSpace(rule.QuietTimezone),
+	}
+	result := automationTriggerRuleMetadataResult{}
+	if schedule.Summary != "" || schedule.Cadence != "" || schedule.Cron != "" || schedule.QuietHours != "" || schedule.QuietTimezone != "" {
+		result.schedule = &schedule
+	}
+	intent := strings.ToLower(strings.TrimSpace(rule.ExecutionIntent))
+	if intent == "" {
+		intent = strings.ToLower(strings.TrimSpace(rule.Intent))
+	}
+	switch intent {
+	case "read_only", "mutation", "governance", "destructive":
+		result.executionIntent = intent
+	}
+	return result
+}
+
+func automationTriggerIntentNeedsApproval(intent string) bool {
+	switch strings.ToLower(strings.TrimSpace(intent)) {
+	case "governance", "destructive":
+		return true
+	default:
+		return false
+	}
+}
+
 func (store *Store) getAutomationTriggerByIDQuery(ctx context.Context, queryer sqlQueryRow, id int64) (AutomationTrigger, error) {
 	row := queryer.QueryRowContext(ctx, automationTriggerSelectSQL()+` WHERE at.id = ?`, id)
 	return scanAutomationTrigger(row)
@@ -8280,7 +9407,7 @@ func (store *Store) getAutomationTriggerMaterializationTx(ctx context.Context, t
 	return scanAutomationTriggerMaterialization(row)
 }
 
-func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, project Project, materializationKey string, now time.Time) (Task, error) {
+func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, project Project, materializationKey string, params FireAutomationTriggerParams, now time.Time) (Task, error) {
 	taskKey := automationTriggerTaskKey(trigger.Key, materializationKey)
 	title := trigger.WorkItemTitle
 	if title == "" {
@@ -8288,6 +9415,11 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 	}
 	requestedBy := "automation_trigger:" + trigger.Key
 	executionIntent, executionIntentSource := automationTriggerExecutionIntent(trigger)
+	if strings.TrimSpace(params.WorkKind) != "" && strings.TrimSpace(params.ArtifactsJSON) != "" {
+		executionIntentSource = "skill_binding:trigger"
+	}
+	workKind := defaultString(strings.TrimSpace(params.WorkKind), "automation_trigger")
+	artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO tasks (
 			project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id,
@@ -8295,15 +9427,17 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 			execution_intent_source, current_run_id,
 			summary, terminal_reason, artifacts_json, created_at, updated_at
 		)
-		VALUES (?, ?, ?, '', 'queued', ?, ?, NULL, NULL, NULL, NULL, NULL, 'automation_trigger', ?, ?, NULL, '', '', '[]', ?, ?)
+		VALUES (?, ?, ?, '', 'queued', ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, NULL, '', '', ?, ?, ?)
 	`,
 		trigger.ProjectID,
 		taskKey,
 		title,
 		project.Scope,
 		requestedBy,
+		workKind,
 		executionIntent,
 		executionIntentSource,
+		artifactsJSON,
 		formatTime(now),
 		formatTime(now),
 	)
@@ -8322,10 +9456,10 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 		Status:                "queued",
 		Scope:                 project.Scope,
 		RequestedBy:           requestedBy,
-		WorkKind:              "automation_trigger",
+		WorkKind:              workKind,
 		ExecutionIntent:       executionIntent,
 		ExecutionIntentSource: executionIntentSource,
-		ArtifactsJSON:         "[]",
+		ArtifactsJSON:         artifactsJSON,
 		NextEligibleAt:        time.Time{},
 		Priority:              100,
 		MaxAttempts:           3,
@@ -8431,7 +9565,7 @@ func (store *Store) automationTriggerEventScopeTx(ctx context.Context, tx *sql.T
 	return "automation_trigger"
 }
 
-func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, scope string, source string, materializationKey string, createdWorkItem bool, sourceEventID *int64, sourceEventType string, now time.Time) error {
+func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trigger AutomationTrigger, scope string, source string, materializationKey string, createdWorkItem bool, params FireAutomationTriggerParams, now time.Time) error {
 	return appendEventTx(ctx, tx, eventInsert{
 		StreamType: runtimeevents.StreamAutomationTrigger,
 		StreamID:   trigger.ID,
@@ -8445,8 +9579,9 @@ func appendAutomationTriggerEvaluatedEvent(ctx context.Context, tx *sql.Tx, trig
 			MaterializationKey: materializationKey,
 			Status:             trigger.Status,
 			CreatedWorkItem:    createdWorkItem,
-			SourceEventID:      sourceEventID,
-			SourceEventType:    sourceEventType,
+			SourceEventID:      params.SourceEventID,
+			SourceEventType:    params.SourceEventType,
+			Envelope:           automationTriggerEnvelope(trigger, params, source, materializationKey, "not_started", now),
 		},
 		OccurredAt: now,
 	})
@@ -8504,6 +9639,7 @@ func scanProject(row interface{ Scan(...any) error }) (Project, error) {
 
 func scanExternalIssue(row interface{ Scan(...any) error }) (ExternalIssue, error) {
 	var issue ExternalIssue
+	var acceptanceCriteriaJSON sql.NullString
 	var lastSyncedAt string
 	var createdAt string
 	var updatedAt string
@@ -8519,6 +9655,8 @@ func scanExternalIssue(row interface{ Scan(...any) error }) (ExternalIssue, erro
 		&issue.State,
 		&issue.LabelsJSON,
 		&issue.SyncStatus,
+		&issue.SyncCursor,
+		&acceptanceCriteriaJSON,
 		&lastSyncedAt,
 		&createdAt,
 		&updatedAt,
@@ -8527,6 +9665,7 @@ func scanExternalIssue(row interface{ Scan(...any) error }) (ExternalIssue, erro
 	}
 
 	var err error
+	issue.AcceptanceCriteria = DecodeAcceptanceCriteriaJSON(acceptanceCriteriaJSON.String)
 	issue.LastSyncedAt, err = parseTime(lastSyncedAt)
 	if err != nil {
 		return ExternalIssue{}, err
@@ -8540,6 +9679,88 @@ func scanExternalIssue(row interface{ Scan(...any) error }) (ExternalIssue, erro
 		return ExternalIssue{}, err
 	}
 	return issue, nil
+}
+
+func scanPullRequestHandoff(row interface{ Scan(...any) error }) (PullRequestHandoff, error) {
+	var handoff PullRequestHandoff
+	var testsJSON sql.NullString
+	var risksJSON sql.NullString
+	var blockersJSON sql.NullString
+	var selectedRolesJSON sql.NullString
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&handoff.ID,
+		&handoff.ProjectID,
+		&handoff.Provider,
+		&handoff.Repo,
+		&handoff.Number,
+		&handoff.URL,
+		&handoff.State,
+		&handoff.IssueURL,
+		&handoff.Branch,
+		&handoff.Title,
+		&handoff.Summary,
+		&testsJSON,
+		&risksJSON,
+		&blockersJSON,
+		&selectedRolesJSON,
+		&handoff.ReviewState,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return PullRequestHandoff{}, err
+	}
+
+	var err error
+	handoff.Tests = DecodeStringListJSON(testsJSON.String)
+	handoff.Risks = DecodeStringListJSON(risksJSON.String)
+	handoff.Blockers = DecodeStringListJSON(blockersJSON.String)
+	handoff.SelectedRoles = DecodeStringListJSON(selectedRolesJSON.String)
+	handoff.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return PullRequestHandoff{}, err
+	}
+	handoff.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return PullRequestHandoff{}, err
+	}
+	return handoff, nil
+}
+
+func scanPullRequestReviewResult(row interface{ Scan(...any) error }) (PullRequestReviewResult, error) {
+	var result PullRequestReviewResult
+	var commentsJSON sql.NullString
+	var blockersJSON sql.NullString
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&result.ID,
+		&result.HandoffID,
+		&result.Role,
+		&result.State,
+		&result.Summary,
+		&commentsJSON,
+		&blockersJSON,
+		&result.Outcome,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return PullRequestReviewResult{}, err
+	}
+
+	var err error
+	result.Comments = DecodeStringListJSON(commentsJSON.String)
+	result.Blockers = DecodeStringListJSON(blockersJSON.String)
+	result.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return PullRequestReviewResult{}, err
+	}
+	result.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return PullRequestReviewResult{}, err
+	}
+	return result, nil
 }
 
 func scanInitiative(row interface{ Scan(...any) error }) (Initiative, error) {
@@ -8771,6 +9992,7 @@ func scanWorkspace(row interface{ Scan(...any) error }) (Workspace, error) {
 
 func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	var task Task
+	var acceptanceCriteriaJSON sql.NullString
 	var summary sql.NullString
 	var terminalReason sql.NullString
 	var artifactsJSON sql.NullString
@@ -8791,6 +10013,7 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 		&task.ProjectID,
 		&task.Key,
 		&task.Title,
+		&acceptanceCriteriaJSON,
 		&task.ActionKey,
 		&task.Status,
 		&task.Scope,
@@ -8820,6 +10043,7 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 	}
 
 	var err error
+	task.AcceptanceCriteria = DecodeAcceptanceCriteriaJSON(acceptanceCriteriaJSON.String)
 	task.WorkspaceID = nullableInt64Ptr(workspaceID)
 	task.InitiativeID = nullableInt64Ptr(initiativeID)
 	task.CompanionID = nullableInt64Ptr(companionID)
@@ -8922,6 +10146,37 @@ func scanIntakeItem(row interface{ Scan(...any) error }) (IntakeItem, error) {
 		return IntakeItem{}, err
 	}
 	return item, nil
+}
+
+func scanIntakeAttachment(row interface{ Scan(...any) error }) (IntakeAttachment, error) {
+	var attachment IntakeAttachment
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&attachment.ID,
+		&attachment.IntakeItemID,
+		&attachment.Kind,
+		&attachment.Filename,
+		&attachment.ContentType,
+		&attachment.SizeBytes,
+		&attachment.SHA256,
+		&attachment.Status,
+		&attachment.Bytes,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return IntakeAttachment{}, err
+	}
+	var err error
+	attachment.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return IntakeAttachment{}, err
+	}
+	attachment.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return IntakeAttachment{}, err
+	}
+	return attachment, nil
 }
 
 func scanAutomationTrigger(row interface{ Scan(...any) error }) (AutomationTrigger, error) {
@@ -9877,6 +11132,13 @@ func isMissingTaskFollowUpColumns(err error) bool {
 	message := err.Error()
 	return strings.Contains(message, "has no column named follow_up_obligation_id") ||
 		strings.Contains(message, "has no column named follow_up_occurrence_key")
+}
+
+func isMissingTaskAcceptanceCriteriaColumn(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "has no column named acceptance_criteria_json")
 }
 
 func isMissingTaskExecutionIntentColumns(err error) bool {

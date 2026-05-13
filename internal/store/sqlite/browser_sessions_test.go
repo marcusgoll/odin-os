@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -272,6 +273,337 @@ func TestBrowserSessionProfileStoragePolicyDeniesWritesByDefault(t *testing.T) {
 	}
 }
 
+func TestBrowserEncryptedProfileArtifactMetadataLifecyclePersistsAndAudits(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "browser-profile-artifacts.db")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	exists, err := store.HasTable(ctx, "browser_encrypted_profile_artifacts")
+	if err != nil {
+		t.Fatalf("HasTable(browser_encrypted_profile_artifacts) error = %v", err)
+	}
+	if !exists {
+		t.Fatal("HasTable(browser_encrypted_profile_artifacts) = false, want true")
+	}
+
+	session, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Marcus Browser",
+		Domain:         "example.com",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	expiresAt := now.Add(24 * time.Hour)
+	artifact, err := store.CreateBrowserEncryptedProfileArtifact(ctx, CreateBrowserEncryptedProfileArtifactParams{
+		SessionID:             session.ID,
+		ProfilePath:           session.ProfilePath,
+		EncryptedArtifactPath: "browser-sessions/encrypted-profiles/profile.enc",
+		EncryptionKeyRef:      "local-key:v1",
+		ExpiresAt:             &expiresAt,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserEncryptedProfileArtifact() error = %v", err)
+	}
+	if artifact.ID <= 0 || artifact.SessionID != session.ID {
+		t.Fatalf("artifact identity = %+v, want persisted session artifact", artifact)
+	}
+	if artifact.Status != BrowserEncryptedProfileArtifactStatusEncrypted {
+		t.Fatalf("artifact.Status = %q, want %q", artifact.Status, BrowserEncryptedProfileArtifactStatusEncrypted)
+	}
+	if artifact.ProfilePath != session.ProfilePath || artifact.EncryptedArtifactPath != "browser-sessions/encrypted-profiles/profile.enc" {
+		t.Fatalf("artifact paths = %q/%q, want session profile path and encrypted artifact path", artifact.ProfilePath, artifact.EncryptedArtifactPath)
+	}
+	if artifact.EncryptionKeyRef != "local-key:v1" {
+		t.Fatalf("artifact.EncryptionKeyRef = %q, want key ref", artifact.EncryptionKeyRef)
+	}
+	if artifact.ExpiresAt == nil || !artifact.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("artifact.ExpiresAt = %v, want %v", artifact.ExpiresAt, expiresAt)
+	}
+	if artifact.RevokedAt != nil || artifact.CleanedAt != nil || artifact.ErrorCode != nil || artifact.ErrorMessage != nil {
+		t.Fatalf("new artifact terminal fields = revoked_at:%v cleaned_at:%v error:%v/%v, want nil", artifact.RevokedAt, artifact.CleanedAt, artifact.ErrorCode, artifact.ErrorMessage)
+	}
+
+	fetched, err := store.GetBrowserEncryptedProfileArtifact(ctx, artifact.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserEncryptedProfileArtifact() error = %v", err)
+	}
+	if fetched.ID != artifact.ID || fetched.EncryptedArtifactPath != artifact.EncryptedArtifactPath {
+		t.Fatalf("fetched artifact = %+v, want %+v", fetched, artifact)
+	}
+
+	listed, err := store.ListBrowserEncryptedProfileArtifacts(ctx, ListBrowserEncryptedProfileArtifactsParams{SessionID: session.ID})
+	if err != nil {
+		t.Fatalf("ListBrowserEncryptedProfileArtifacts() error = %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != artifact.ID {
+		t.Fatalf("listed artifacts = %+v, want created artifact", listed)
+	}
+
+	store.Now = func() time.Time { return now.Add(time.Hour) }
+	revoked, err := store.MarkBrowserEncryptedProfileArtifactRevoked(ctx, MarkBrowserEncryptedProfileArtifactRevokedParams{
+		ID:     artifact.ID,
+		Actor:  "operator",
+		Reason: "manual revocation",
+	})
+	if err != nil {
+		t.Fatalf("MarkBrowserEncryptedProfileArtifactRevoked() error = %v", err)
+	}
+	if revoked.Status != BrowserEncryptedProfileArtifactStatusRevoked {
+		t.Fatalf("revoked.Status = %q, want %q", revoked.Status, BrowserEncryptedProfileArtifactStatusRevoked)
+	}
+	if revoked.RevokedAt == nil || !revoked.RevokedAt.Equal(now.Add(time.Hour)) {
+		t.Fatalf("revoked.RevokedAt = %v, want revoke time", revoked.RevokedAt)
+	}
+	store.Now = func() time.Time { return now.Add(90 * time.Minute) }
+	cleaned, err := store.MarkBrowserEncryptedProfileArtifactCleaned(ctx, MarkBrowserEncryptedProfileArtifactCleanedParams{
+		ID:     revoked.ID,
+		Actor:  "retention",
+		Reason: "encrypted artifact file removed",
+	})
+	if err != nil {
+		t.Fatalf("MarkBrowserEncryptedProfileArtifactCleaned() error = %v", err)
+	}
+	if cleaned.Status != BrowserEncryptedProfileArtifactStatusCleaned {
+		t.Fatalf("cleaned.Status = %q, want %q", cleaned.Status, BrowserEncryptedProfileArtifactStatusCleaned)
+	}
+	if cleaned.CleanedAt == nil || !cleaned.CleanedAt.Equal(now.Add(90*time.Minute)) {
+		t.Fatalf("cleaned.CleanedAt = %v, want cleanup time", cleaned.CleanedAt)
+	}
+
+	store.Now = func() time.Time { return now.Add(2 * time.Hour) }
+	expiring, err := store.CreateBrowserEncryptedProfileArtifact(ctx, CreateBrowserEncryptedProfileArtifactParams{
+		SessionID:             session.ID,
+		ProfilePath:           session.ProfilePath,
+		EncryptedArtifactPath: "browser-sessions/encrypted-profiles/profile-2.enc",
+		EncryptionKeyRef:      "local-key:v2",
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserEncryptedProfileArtifact(expiring) error = %v", err)
+	}
+	expiredCode := "expired"
+	expiredMessage := "profile artifact expired"
+	expired, err := store.MarkBrowserEncryptedProfileArtifactExpired(ctx, MarkBrowserEncryptedProfileArtifactExpiredParams{
+		ID:           expiring.ID,
+		Actor:        "operator",
+		Reason:       "expired by policy",
+		ErrorCode:    &expiredCode,
+		ErrorMessage: &expiredMessage,
+	})
+	if err != nil {
+		t.Fatalf("MarkBrowserEncryptedProfileArtifactExpired() error = %v", err)
+	}
+	if expired.Status != BrowserEncryptedProfileArtifactStatusExpired {
+		t.Fatalf("expired.Status = %q, want %q", expired.Status, BrowserEncryptedProfileArtifactStatusExpired)
+	}
+	if expired.ErrorCode == nil || *expired.ErrorCode != "expired" {
+		t.Fatalf("expired.ErrorCode = %v, want expired", expired.ErrorCode)
+	}
+	cleanupCode := "cleanup_failed"
+	cleanupMessage := "artifact path escaped ODIN_ROOT"
+	failed, err := store.RecordBrowserEncryptedProfileArtifactCleanupFailed(ctx, RecordBrowserEncryptedProfileArtifactCleanupFailedParams{
+		ID:           expired.ID,
+		Actor:        "retention",
+		Reason:       "cleanup failed",
+		ErrorCode:    &cleanupCode,
+		ErrorMessage: &cleanupMessage,
+	})
+	if err != nil {
+		t.Fatalf("RecordBrowserEncryptedProfileArtifactCleanupFailed() error = %v", err)
+	}
+	if failed.Status != BrowserEncryptedProfileArtifactStatusExpired {
+		t.Fatalf("failed.Status = %q, want expired status preserved", failed.Status)
+	}
+	if failed.ErrorCode == nil || *failed.ErrorCode != cleanupCode {
+		t.Fatalf("failed.ErrorCode = %v, want cleanup_failed", failed.ErrorCode)
+	}
+	materialized, err := store.RecordBrowserProfileMaterialized(ctx, RecordBrowserProfileMaterializedParams{
+		ID:                   expiring.ID,
+		MaterializationPath:  "runtime/browser-profile-materializations/proof",
+		MaterializedFilePath: "runtime/browser-profile-materializations/proof/profile.materialized",
+		Actor:                "operator",
+		Reason:               "read-only materialization",
+	})
+	if err != nil {
+		t.Fatalf("RecordBrowserProfileMaterialized() error = %v", err)
+	}
+	if materialized.ID != expiring.ID || materialized.Status != BrowserEncryptedProfileArtifactStatusExpired {
+		t.Fatalf("materialized artifact = %+v, want status-preserving audit", materialized)
+	}
+	materializationCleaned, err := store.RecordBrowserProfileMaterializationCleaned(ctx, RecordBrowserProfileMaterializationCleanedParams{
+		ID:                  expiring.ID,
+		MaterializationPath: "runtime/browser-profile-materializations/proof",
+		Removed:             true,
+		Actor:               "operator",
+		Reason:              "read-only materialization cleanup",
+	})
+	if err != nil {
+		t.Fatalf("RecordBrowserProfileMaterializationCleaned() error = %v", err)
+	}
+	if materializationCleaned.ID != expiring.ID || materializationCleaned.Status != BrowserEncryptedProfileArtifactStatusExpired {
+		t.Fatalf("materializationCleaned artifact = %+v, want status-preserving audit", materializationCleaned)
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	counts := map[runtimeevents.Type]int{}
+	for _, event := range events {
+		if event.StreamType != runtimeevents.StreamBrowserSession {
+			continue
+		}
+		counts[event.Type]++
+		payload := strings.ToLower(string(event.Payload))
+		for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+			if strings.Contains(payload, forbidden) {
+				t.Fatalf("encrypted profile artifact audit payload contains forbidden token %q: %s", forbidden, event.Payload)
+			}
+		}
+	}
+	if counts[runtimeevents.EventBrowserProfileEncrypted] != 2 {
+		t.Fatalf("browser.profile_encrypted events = %d, want 2", counts[runtimeevents.EventBrowserProfileEncrypted])
+	}
+	if counts[runtimeevents.EventBrowserProfileRevoked] != 1 {
+		t.Fatalf("browser.profile_revoked events = %d, want 1", counts[runtimeevents.EventBrowserProfileRevoked])
+	}
+	if counts[runtimeevents.EventBrowserProfileExpired] != 1 {
+		t.Fatalf("browser.profile_expired events = %d, want 1", counts[runtimeevents.EventBrowserProfileExpired])
+	}
+	if counts[runtimeevents.EventBrowserProfileCleaned] != 1 {
+		t.Fatalf("browser.profile_cleaned events = %d, want 1", counts[runtimeevents.EventBrowserProfileCleaned])
+	}
+	if counts[runtimeevents.EventBrowserProfileCleanupFailed] != 1 {
+		t.Fatalf("browser.profile_cleanup_failed events = %d, want 1", counts[runtimeevents.EventBrowserProfileCleanupFailed])
+	}
+	if counts[runtimeevents.EventBrowserProfileMaterialized] != 1 {
+		t.Fatalf("browser.profile_materialized events = %d, want 1", counts[runtimeevents.EventBrowserProfileMaterialized])
+	}
+	if counts[runtimeevents.EventBrowserProfileMaterializationCleaned] != 1 {
+		t.Fatalf("browser.profile_materialization_cleaned events = %d, want 1", counts[runtimeevents.EventBrowserProfileMaterializationCleaned])
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	reopened, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open(reopened) error = %v", err)
+	}
+	defer reopened.Close()
+	if err := reopened.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate(reopened) error = %v", err)
+	}
+	persisted, err := reopened.GetBrowserEncryptedProfileArtifact(ctx, revoked.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserEncryptedProfileArtifact(reopened) error = %v", err)
+	}
+	if persisted.Status != BrowserEncryptedProfileArtifactStatusCleaned || persisted.CleanedAt == nil {
+		t.Fatalf("persisted = %+v, want cleaned artifact with cleaned_at", persisted)
+	}
+}
+
+func TestBrowserEncryptedProfileArtifactRejectsUnsafeMetadata(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "browser-profile-artifact-validation.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	session, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Safe Profile",
+		Domain:         "example.com",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		params CreateBrowserEncryptedProfileArtifactParams
+	}{
+		{
+			name: "absolute artifact path",
+			params: CreateBrowserEncryptedProfileArtifactParams{
+				SessionID:             session.ID,
+				ProfilePath:           session.ProfilePath,
+				EncryptedArtifactPath: "/tmp/profile.enc",
+				EncryptionKeyRef:      "local-key:v1",
+			},
+		},
+		{
+			name: "artifact outside session profile path",
+			params: CreateBrowserEncryptedProfileArtifactParams{
+				SessionID:             session.ID,
+				ProfilePath:           session.ProfilePath,
+				EncryptedArtifactPath: "browser-sessions/profiles/other/profile.enc",
+				EncryptionKeyRef:      "local-key:v1",
+			},
+		},
+		{
+			name: "profile path mismatch",
+			params: CreateBrowserEncryptedProfileArtifactParams{
+				SessionID:             session.ID,
+				ProfilePath:           "browser-sessions/profiles/other",
+				EncryptedArtifactPath: session.ProfilePath + "/profile.enc",
+				EncryptionKeyRef:      "local-key:v1",
+			},
+		},
+		{
+			name: "missing encryption key ref",
+			params: CreateBrowserEncryptedProfileArtifactParams{
+				SessionID:             session.ID,
+				ProfilePath:           session.ProfilePath,
+				EncryptedArtifactPath: session.ProfilePath + "/profile.enc",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := store.CreateBrowserEncryptedProfileArtifact(ctx, tc.params); err == nil {
+				t.Fatal("CreateBrowserEncryptedProfileArtifact() error = nil, want rejection")
+			}
+		})
+	}
+
+	rows, err := store.DB().QueryContext(ctx, `PRAGMA table_info(browser_encrypted_profile_artifacts)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(browser_encrypted_profile_artifacts) error = %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table_info error = %v", err)
+		}
+		lower := strings.ToLower(name)
+		for _, forbidden := range []string{"password", "totp", "backup", "cookie", "credential"} {
+			if strings.Contains(lower, forbidden) {
+				t.Fatalf("browser_encrypted_profile_artifacts column %q contains forbidden marker %q", name, forbidden)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table_info rows error = %v", err)
+	}
+}
+
 func TestBrowserSessionMetadataRejectsCredentialLikeFields(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "browser-sessions-columns.db"))
@@ -431,6 +763,267 @@ func TestBrowserSessionLoginRequestLifecyclePersistsAndAudits(t *testing.T) {
 	}
 	if counts[runtimeevents.EventBrowserSessionLoginExpired] != 1 {
 		t.Fatalf("browser.session_login_expired events = %d, want 1", counts[runtimeevents.EventBrowserSessionLoginExpired])
+	}
+}
+
+func TestBrowserHandoffRunnerMetadataLifecyclePersistsAndAudits(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "browser-handoff-runners.db")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	now := time.Date(2026, 5, 6, 21, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+	store.BrowserSessionHandoffID = func() (string, error) { return "opaque-runner-handoff", nil }
+
+	exists, err := store.HasTable(ctx, "browser_handoff_runners")
+	if err != nil {
+		t.Fatalf("HasTable(browser_handoff_runners) error = %v", err)
+	}
+	if !exists {
+		t.Fatal("HasTable(browser_handoff_runners) = false, want true")
+	}
+
+	session, err := store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		Name:           "Research login",
+		Domain:         "research.example",
+		PermissionTier: BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	requestExpiresAt := now.Add(15 * time.Minute)
+	request, err := store.CreateBrowserSessionLoginRequest(ctx, CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: requestExpiresAt,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest() error = %v", err)
+	}
+
+	bindAddr := "127.0.0.1:5901"
+	privateBaseURL := "https://odin-handoff.tailnet.local"
+	runner, err := store.CreateBrowserHandoffRunner(ctx, CreateBrowserHandoffRunnerParams{
+		SessionID:      session.ID,
+		LoginRequestID: request.ID,
+		HandoffID:      request.HandoffID,
+		BindAddr:       &bindAddr,
+		PrivateBaseURL: &privateBaseURL,
+		ExpiresAt:      now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserHandoffRunner() error = %v", err)
+	}
+	if runner.ID <= 0 || runner.SessionID != session.ID || runner.LoginRequestID != request.ID {
+		t.Fatalf("runner = %+v, want persisted runner linked to session/request", runner)
+	}
+	if runner.Status != BrowserHandoffRunnerStatusRequested {
+		t.Fatalf("runner.Status = %q, want %q", runner.Status, BrowserHandoffRunnerStatusRequested)
+	}
+	if runner.StartedAt != nil || runner.CompletedAt != nil || runner.CancelledAt != nil {
+		t.Fatalf("new runner timestamps = started %v completed %v cancelled %v, want nil", runner.StartedAt, runner.CompletedAt, runner.CancelledAt)
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser handoff runner metadata created browser-sessions directory: err=%v", err)
+	}
+
+	fetched, err := store.GetBrowserHandoffRunner(ctx, runner.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserHandoffRunner() error = %v", err)
+	}
+	if fetched.ID != runner.ID || fetched.HandoffID != request.HandoffID {
+		t.Fatalf("fetched runner = %+v, want %+v", fetched, runner)
+	}
+	listed, err := store.ListBrowserHandoffRunners(ctx, ListBrowserHandoffRunnersParams{LoginRequestID: request.ID})
+	if err != nil {
+		t.Fatalf("ListBrowserHandoffRunners() error = %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != runner.ID {
+		t.Fatalf("listed runners = %+v, want created runner", listed)
+	}
+
+	store.Now = func() time.Time { return now.Add(time.Minute) }
+	viewerURL := "https://odin-handoff.tailnet.local/session/browser-handoff-runner-1"
+	externalRunnerID := "browser-handoff-runner-1"
+	processID := int64(4242)
+	started, err := store.UpdateBrowserHandoffRunnerStatus(ctx, UpdateBrowserHandoffRunnerStatusParams{
+		ID:        runner.ID,
+		Status:    BrowserHandoffRunnerStatusStarted,
+		ViewerURL: &viewerURL,
+		RunnerID:  &externalRunnerID,
+		ProcessID: &processID,
+		Actor:     "operator",
+		Reason:    "handoff runner process started",
+	})
+	if err != nil {
+		t.Fatalf("UpdateBrowserHandoffRunnerStatus(started) error = %v", err)
+	}
+	if started.Status != BrowserHandoffRunnerStatusStarted || started.StartedAt == nil {
+		t.Fatalf("started runner = %+v, want started with timestamp", started)
+	}
+	if started.ViewerURL == nil || *started.ViewerURL != viewerURL || started.RunnerID == nil || *started.RunnerID != externalRunnerID || started.ProcessID == nil || *started.ProcessID != processID {
+		t.Fatalf("started runner metadata = %+v, want viewer, runner id, and pid", started)
+	}
+
+	store.Now = func() time.Time { return now.Add(2 * time.Minute) }
+	completed, err := store.UpdateBrowserHandoffRunnerStatus(ctx, UpdateBrowserHandoffRunnerStatusParams{
+		ID:     runner.ID,
+		Status: BrowserHandoffRunnerStatusCompleted,
+		Actor:  "operator",
+		Reason: "operator completed manual handoff",
+	})
+	if err != nil {
+		t.Fatalf("UpdateBrowserHandoffRunnerStatus(completed) error = %v", err)
+	}
+	if completed.Status != BrowserHandoffRunnerStatusCompleted || completed.CompletedAt == nil {
+		t.Fatalf("completed runner = %+v, want completed with timestamp", completed)
+	}
+	if _, err := store.UpdateBrowserHandoffRunnerStatus(ctx, UpdateBrowserHandoffRunnerStatusParams{
+		ID:     runner.ID,
+		Status: BrowserHandoffRunnerStatusStarted,
+	}); err == nil {
+		t.Fatal("UpdateBrowserHandoffRunnerStatus(completed -> started) error = nil, want rejection")
+	}
+
+	expiring, err := store.CreateBrowserHandoffRunner(ctx, CreateBrowserHandoffRunnerParams{
+		SessionID:      session.ID,
+		LoginRequestID: request.ID,
+		HandoffID:      request.HandoffID,
+		ExpiresAt:      now.Add(11 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserHandoffRunner(expiring) error = %v", err)
+	}
+	store.Now = func() time.Time { return now.Add(3 * time.Minute) }
+	expired, err := store.ExpireBrowserHandoffRunner(ctx, ExpireBrowserHandoffRunnerParams{
+		ID:     expiring.ID,
+		Actor:  "operator",
+		Reason: "handoff runner timed out",
+	})
+	if err != nil {
+		t.Fatalf("ExpireBrowserHandoffRunner() error = %v", err)
+	}
+	if expired.Status != BrowserHandoffRunnerStatusExpired {
+		t.Fatalf("expired.Status = %q, want %q", expired.Status, BrowserHandoffRunnerStatusExpired)
+	}
+
+	cancelling, err := store.CreateBrowserHandoffRunner(ctx, CreateBrowserHandoffRunnerParams{
+		SessionID:      session.ID,
+		LoginRequestID: request.ID,
+		HandoffID:      request.HandoffID,
+		ExpiresAt:      now.Add(12 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserHandoffRunner(cancelling) error = %v", err)
+	}
+	store.Now = func() time.Time { return now.Add(4 * time.Minute) }
+	cancelled, err := store.CancelBrowserHandoffRunner(ctx, CancelBrowserHandoffRunnerParams{
+		ID:     cancelling.ID,
+		Actor:  "operator",
+		Reason: "operator cancelled handoff",
+	})
+	if err != nil {
+		t.Fatalf("CancelBrowserHandoffRunner() error = %v", err)
+	}
+	if cancelled.Status != BrowserHandoffRunnerStatusCancelled || cancelled.CancelledAt == nil {
+		t.Fatalf("cancelled runner = %+v, want cancelled with timestamp", cancelled)
+	}
+
+	failing, err := store.CreateBrowserHandoffRunner(ctx, CreateBrowserHandoffRunnerParams{
+		SessionID:      session.ID,
+		LoginRequestID: request.ID,
+		HandoffID:      request.HandoffID,
+		ExpiresAt:      now.Add(13 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserHandoffRunner(failing) error = %v", err)
+	}
+	store.Now = func() time.Time { return now.Add(5 * time.Minute) }
+	errorCode := "novnc_unavailable"
+	errorMessage := "runner failed before viewer became available"
+	failed, err := store.UpdateBrowserHandoffRunnerStatus(ctx, UpdateBrowserHandoffRunnerStatusParams{
+		ID:           failing.ID,
+		Status:       BrowserHandoffRunnerStatusFailed,
+		ErrorCode:    &errorCode,
+		ErrorMessage: &errorMessage,
+		Actor:        "runner",
+		Reason:       "runner process failed",
+	})
+	if err != nil {
+		t.Fatalf("UpdateBrowserHandoffRunnerStatus(failed) error = %v", err)
+	}
+	if failed.Status != BrowserHandoffRunnerStatusFailed || failed.ErrorCode == nil || *failed.ErrorCode != errorCode {
+		t.Fatalf("failed runner = %+v, want failed with error code", failed)
+	}
+
+	if _, err := store.CreateBrowserHandoffRunner(ctx, CreateBrowserHandoffRunnerParams{
+		SessionID:      session.ID,
+		LoginRequestID: request.ID,
+		HandoffID:      request.HandoffID,
+		ExpiresAt:      requestExpiresAt.Add(time.Minute),
+	}); err == nil {
+		t.Fatal("CreateBrowserHandoffRunner(expires after login request) error = nil, want rejection")
+	}
+
+	events, err := store.ListEvents(ctx, ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	counts := map[runtimeevents.Type]int{}
+	for _, event := range events {
+		if event.StreamType != runtimeevents.StreamBrowserSession {
+			continue
+		}
+		counts[event.Type]++
+		payload := strings.ToLower(string(event.Payload))
+		for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+			if strings.Contains(payload, forbidden) {
+				t.Fatalf("browser handoff runner audit payload contains forbidden token %q: %s", forbidden, payload)
+			}
+		}
+	}
+	if counts[runtimeevents.EventBrowserHandoffRunnerRequested] != 4 {
+		t.Fatalf("browser.handoff_runner_requested events = %d, want 4", counts[runtimeevents.EventBrowserHandoffRunnerRequested])
+	}
+	if counts[runtimeevents.EventBrowserHandoffRunnerStarted] != 1 {
+		t.Fatalf("browser.handoff_runner_started events = %d, want 1", counts[runtimeevents.EventBrowserHandoffRunnerStarted])
+	}
+	if counts[runtimeevents.EventBrowserHandoffRunnerCompleted] != 1 {
+		t.Fatalf("browser.handoff_runner_completed events = %d, want 1", counts[runtimeevents.EventBrowserHandoffRunnerCompleted])
+	}
+	if counts[runtimeevents.EventBrowserHandoffRunnerExpired] != 1 {
+		t.Fatalf("browser.handoff_runner_expired events = %d, want 1", counts[runtimeevents.EventBrowserHandoffRunnerExpired])
+	}
+	if counts[runtimeevents.EventBrowserHandoffRunnerCancelled] != 1 {
+		t.Fatalf("browser.handoff_runner_cancelled events = %d, want 1", counts[runtimeevents.EventBrowserHandoffRunnerCancelled])
+	}
+	if counts[runtimeevents.EventBrowserHandoffRunnerFailed] != 1 {
+		t.Fatalf("browser.handoff_runner_failed events = %d, want 1", counts[runtimeevents.EventBrowserHandoffRunnerFailed])
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	reopened, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open(reopened) error = %v", err)
+	}
+	defer reopened.Close()
+	if err := reopened.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate(reopened) error = %v", err)
+	}
+	persisted, err := reopened.GetBrowserHandoffRunner(ctx, runner.ID)
+	if err != nil {
+		t.Fatalf("GetBrowserHandoffRunner(reopened) error = %v", err)
+	}
+	if persisted.Status != BrowserHandoffRunnerStatusCompleted {
+		t.Fatalf("persisted.Status = %q, want %q", persisted.Status, BrowserHandoffRunnerStatusCompleted)
 	}
 }
 

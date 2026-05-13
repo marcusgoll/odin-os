@@ -1,6 +1,8 @@
 # Odin OS
 
-Odin OS is a workspace-governed orchestration system for durable execution, memory, approvals, and delegated work across software and non-project operations. This context file captures the language boundaries for the control plane that owns ongoing responsibilities and routes bounded execution.
+Odin OS is a proven universal inbox, personal/project operating system, agent orchestration layer, governed automation platform, safe prompt-to-production workflow system, and unified review queue without crossing into unsafe autonomous execution.
+
+This context file captures the language boundaries for the control plane that owns ongoing responsibilities and routes bounded execution.
 
 ## Language
 
@@ -102,6 +104,18 @@ _Avoid_: manual hack, hidden step, background credential handling
 A closed coarse token that states why a **Browser Intervention** requires human action across workflows.
 _Avoid_: driver error, UI failure, workflow-specific blocker string
 
+**Capability Gateway**:
+The Odin-owned runtime surface for dynamic capability discovery, versioned descriptor lookup, policy-gated invocation, and run readback across tools, skills, commands, workflows, and agents.
+_Avoid_: plugin manager, marketplace runtime, provider-specific tool router
+
+**Capability**:
+A discoverable Odin unit such as a `tool`, `skill`, `agent`, `command`, or `workflow` that is exposed through the **Capability Gateway** and governed by Odin policy before invocation.
+_Avoid_: plugin, ad hoc tool, direct integration hook
+
+**Plugin Package**:
+A possible future import or distribution container for capabilities. It is not a v1 Odin runtime kind, policy object, approval object, executor lane, or registry authority.
+_Avoid_: runtime plugin, plugin executor, plugin approval
+
 **Transfer Intent**:
 The operator-approved description of a requested money movement that Odin governs through existing workflow state rather than a dedicated v1 transfer aggregate.
 _Avoid_: transfer row, payment object
@@ -166,6 +180,7 @@ _Avoid_: analytics scrape, crawler result
 
 ## Relationships
 
+- No Odin capability counts as implemented unless a real `odin` command invokes it, persists the result, enforces policy where relevant, and emits audit evidence readable through an **Operator Surface**
 - A **Workspace** owns many **Initiatives**
 - A **Workspace** may assign one or more **Companions** across its **Initiatives**
 - A **Scope** resolves the active **Workspace** and may narrow to one **Initiative**
@@ -221,6 +236,8 @@ _Avoid_: analytics scrape, crawler result
 - A **Browser Intervention** should expose exactly one coarse **Browser Intervention Reason** from the closed v1 set `login_required`, `mfa_required`, `captcha_required`, `human_confirmation_required`, `unexpected_live_blocker`
 - Workflow-specific browser details such as `google_login_required`, `blocked_on_mfa`, `compose_surface_missing`, and `post_button_not_ready` should remain driver artifacts or **Run Attempt** evidence and should not expand the shared **Browser Intervention Reason** vocabulary automatically
 - `unexpected_live_blocker` should be used only when human step-in is required but no narrower shared **Browser Intervention Reason** fits; ordinary browser startup, selector, typing, navigation, or click failures remain driver or execution failures rather than **Browser Interventions**
+- In v1, **Capability Gateway** is the canonical runtime concept for capability discovery and controlled invocation; "plugin" is packaging language only and must not become a parallel runtime authority
+- V1 capability kinds are `tool`, `skill`, `agent`, `command`, and `workflow`; a future **Plugin Package** may publish those normal capabilities but must not introduce a separate plugin kind, executor lane, approval model, or policy system
 - In v1, generic **Browser Control** should reuse the existing `/tool` **Operator Surface** and builtin tool catalog rather than introducing a parallel `/browser` command family
 - On that `/tool` surface, the canonical future generic **Browser Control** tool family should use `browser_*` catalog keys rather than adapter-branded `huginn_*` keys; adapter-specific names may remain compatibility or implementation language during transition, but they are not the long-term platform vocabulary
 - A **Transfer Intent** may be represented in v1 by one governing **Work Item**, its latest **Run Attempt**, the active or terminal **Approval Request** chain, and the linked `approval_wait` wake packet history instead of a dedicated transfer-intent table
@@ -394,9 +411,11 @@ _Avoid_: analytics scrape, crawler result
 
 ## Status ownership
 
-- **Intake Item** intake status should be one of: `received`, `triaging`, `resolved`, `suppressed`, `errored`
+- V1 **Intake Item** intake status should be one of: `received`, `processing`, `review_required`, `needs_clarification`, `duplicate_linked_or_suppressed`, `approval_required`, `accepted`, `rejected`, `approval_denied`, `archived`, `errored`
+- `triaging`, `resolved`, and `suppressed` are compatibility or derived language for V1 intake readbacks; stored intake rows should use the explicit review-oriented statuses above so operator queues can distinguish review, clarification, duplicate, approval, acceptance, denial, and archive outcomes without reinterpreting routing notes
 - **Intake Item** should carry outcome references rather than a large branching status enum, including optional links to a **Conversation Transcript**, linked **Work Items**, canonical duplicate **Intake Item** reference, suppression or dedupe reason, routing notes, its explicit **Dedupe Key**, persisted **Source Facts**, and the **Dedupe Recipe Version**
 - **Work Item** operator status should be one of: `queued`, `running`, `blocked`, `completed`, `failed`, `canceled`
+- Work Item pause/resume is owned by Odin runtime state, not GitHub labels; an operator-paused Work Item should use `status=blocked` with `blocked_reason=operator_paused`, and `odin:paused` should remain a projection label only
 - **Run Attempt** execution status should be one of: `running`, `completed`, `failed`, `cancelled`, `interrupted`
 - **Approval Request** governance status should be one of: `pending`, `approved`, `denied`, `expired`
 - **Follow-Up Obligation** trigger status should be one of: `active`, `paused`, `blocked`, `completed`, `skipped`, `archived`; due or overdue state is a derived schedule view, not the trigger's stored lifecycle status
@@ -1213,12 +1232,12 @@ _Avoid_: analytics scrape, crawler result
 - Marcus's first live X-post runbook had an unresolved final completion rule. Resolved: the loop is complete only when both the `social_outcome` is visibly marked published and the corresponding `social_evidence` memory is visibly recorded in Odin.
 - Marcus's first live X-post runbook had an unresolved binary and working-directory entrypoint. Resolved: standardize the live runbook on `cd /home/orchestrator/odin-os && ./bin/odin` rather than assuming a PATH-installed `odin` binary.
 - Marcus's first live X-post runbook had an unresolved runtime-root policy. Resolved: require an explicit dedicated `ODIN_ROOT` for the live runbook instead of relying on the repo-default local-development runtime layout.
-- Marcus's first live X-post runbook had an unresolved runtime-config loading style. Resolved: require a persistent machine-local env file such as `~/.config/odin/odin.env` to hold the dedicated `ODIN_ROOT` and X driver env vars instead of relying on per-session manual exports.
-- Marcus's first live X-post runbook had an unresolved interactive shell env-loading rule. Resolved: require an explicit shell bootstrap step that loads the machine-local `~/.config/odin/odin.env` before launching `./bin/odin` rather than assuming Marcus's login shell already exports the required runtime and driver vars.
-- Marcus's first live X-post runbook had an unresolved driver-config scope inside the machine-local env file. Resolved: require that `~/.config/odin/odin.env` define all three live-loop driver vars `ODIN_HUGINN_VISUAL_DRIVER`, `ODIN_HUGINN_X_PUBLISH_DRIVER`, and `ODIN_HUGINN_X_POST_DRIVER` so compose preflight, native publish, and visible evidence share one canonical config surface.
-- Marcus's first live X-post runbook had an unresolved interactive bootstrap command shape. Resolved: keep `~/.config/odin/odin.env` as a plain assignment file for systemd compatibility and require an explicit shell bootstrap such as `set -a; . ~/.config/odin/odin.env; set +a` before launching `./bin/odin`.
+- Marcus's first live X-post runbook had an unresolved runtime-config loading style. Resolved: require the persistent machine-local env file `~/.config/odin/odin-os.env` to hold the dedicated `ODIN_ROOT` and X driver env vars instead of relying on per-session manual exports.
+- Marcus's first live X-post runbook had an unresolved interactive shell env-loading rule. Resolved: require an explicit shell bootstrap step that loads the machine-local `~/.config/odin/odin-os.env` before launching `./bin/odin` rather than assuming Marcus's login shell already exports the required runtime and driver vars.
+- Marcus's first live X-post runbook had an unresolved driver-config scope inside the machine-local env file. Resolved: require that `~/.config/odin/odin-os.env` define all three live-loop driver vars `ODIN_HUGINN_VISUAL_DRIVER`, `ODIN_HUGINN_X_PUBLISH_DRIVER`, and `ODIN_HUGINN_X_POST_DRIVER` so compose preflight, native publish, and visible evidence share one canonical config surface.
+- Marcus's first live X-post runbook had an unresolved interactive bootstrap command shape. Resolved: keep `~/.config/odin/odin-os.env` as a plain assignment file for systemd compatibility and require an explicit shell bootstrap such as `set -a; . ~/.config/odin/odin-os.env; set +a` before launching `./bin/odin`.
 - Marcus's first live X-post runbook had an unresolved post-bootstrap shell-state proof rule. Resolved: require an explicit shell-side confirmation step after bootstrap that checks `ODIN_ROOT`, `ODIN_HUGINN_VISUAL_DRIVER`, `ODIN_HUGINN_X_PUBLISH_DRIVER`, and `ODIN_HUGINN_X_POST_DRIVER` before launching `./bin/odin`, rather than relying on later Odin behavior to reveal misconfiguration.
-- Marcus's first live X-post runbook had an unresolved machine-local env-file path convention. Resolved: standardize the first live runbook on the literal path `~/.config/odin/odin.env` to match the current `odin.service` unit, rather than trying to be XDG-aware before the platform-level path mismatch is fixed.
+- Marcus's first live X-post runbook had an unresolved machine-local env-file path convention. Resolved: standardize the runbook on the canonical deployment env path `~/.config/odin/odin-os.env`; the older `~/.config/odin/odin.env` path belongs only to legacy `odin.service` compatibility.
 - Marcus's first live X-post runbook had an unresolved driver-path proof rule inside the post-bootstrap shell check. Resolved: require the shell-side confirmation step to verify that `ODIN_HUGINN_VISUAL_DRIVER`, `ODIN_HUGINN_X_PUBLISH_DRIVER`, and `ODIN_HUGINN_X_POST_DRIVER` each point to an existing executable command, not merely that the variables are non-empty.
 - Marcus's first live X-post runbook had an unresolved dependency on long-running service mode. Resolved: keep the first live loop on the existing repo-local interactive shell path and do not require `odin serve`; service mode remains a separate runtime surface, while the Marcus social operator examples and verification model already treat scripted or interactive `odin` shell behavior as a complete real command path.
 - Marcus's first live X-post runbook had an unresolved location for the `doctor` readiness check. Resolved: require `cd /home/orchestrator/odin-os && ./bin/odin doctor --json` as a top-level preflight command before launching the interactive shell, rather than using `/doctor json` inside the REPL session.

@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"odin-os/internal/runtime/browserprofileartifacts"
+	"odin-os/internal/runtime/browserprofilecrypto"
+	"odin-os/internal/runtime/browserprofilekeys"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -53,91 +56,57 @@ func TestRunBrowserRunRecordsGoalEvidenceAndKeepsGoalStatus(t *testing.T) {
 	}
 }
 
-func TestRunBrowserRunFromWorkSurfacesEvidenceInReviewAndOverview(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	root := testRepoRoot(t)
-
-	run := func(args ...string) string {
-		t.Helper()
-		var output bytes.Buffer
-		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
-			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
-		}
-		return output.String()
+func TestRunBrowserRunTaskRecordsWorkEvidence(t *testing.T) {
+	ctx := context.Background()
+	app := newLifecycleReviewTestApp(t, ctx)
+	project, err := app.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "browser-work",
+		Name:          "Browser Work",
+		Scope:         "project",
+		GitRoot:       t.TempDir(),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := app.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "browser-evidence-task",
+		Title:       "Collect browser evidence for work",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
 	}
 
-	run("work", "start", "--project", "odin-core", "--title", "Collect browser evidence for docs", "--intent", "read_only")
-	browserRun := run("browser", "run", "--task-id", "1", "--url", "https://example.com/research", "--objective", "Collect public documentation", "--allowed-domain", "example.com", "--max-pages", "2", "--max-duration-seconds", "30", "--evidence-required", "--json")
+	var stdout bytes.Buffer
+	if err := runBrowser(ctx, app, []string{"run", "--task-id", int64String(task.ID), "--url", "https://example.com/research", "--allowed-domain", "example.com", "--objective", "Collect browser evidence", "--worker-mode", "browser", "--json"}, &stdout); err != nil {
+		t.Fatalf("runBrowser(task) error = %v\n%s", err, stdout.String())
+	}
 	for _, want := range []string{
 		`"status": "recorded"`,
 		`"task_id": 1`,
 		`"run_id": 1`,
-		`"adapter_kind": "stub_local"`,
-		`"screenshot_metadata":`,
+		`"run_artifact_id": 1`,
 		`"selected_links":`,
+		`"downloaded_files":`,
 		`"form_state_summary":`,
-		`"confidence": "medium"`,
+		`"confidence":`,
+		`"limitations":`,
 	} {
-		if !strings.Contains(browserRun, want) {
-			t.Fatalf("browser run output = %s, want %s", browserRun, want)
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("browser run output = %s, want %s", stdout.String(), want)
 		}
 	}
-
-	reviewList := run("review", "list", "--json")
-	for _, want := range []string{`"queue_id": "browser-evidence:1"`, `"source_type": "browser_evidence"`, `"allowed_actions": [`} {
-		if !strings.Contains(reviewList, want) {
-			t.Fatalf("review list output = %s, want %s", reviewList, want)
-		}
+	shown, err := app.Store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
 	}
-	reviewShow := run("review", "show", "browser-evidence:1", "--json")
-	for _, want := range []string{`"source_type": "browser_evidence"`, `"evidence": [`, `"adapter_status": "completed"`, `"selected_links":`} {
-		if !strings.Contains(reviewShow, want) {
-			t.Fatalf("review show output = %s, want %s", reviewShow, want)
-		}
-	}
-	overview := run("overview", "--json")
-	for _, want := range []string{`"blocked_reason": "browser_evidence_review"`, `"browser_evidence": [`, `"evidence_type": "browser_readonly"`} {
-		if !strings.Contains(overview, want) {
-			t.Fatalf("overview output = %s, want %s", overview, want)
-		}
-	}
-}
-
-func TestRunBrowserFailedCaptureCreatesRecoveryRecommendation(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	root := testRepoRoot(t)
-	fixture := filepath.Join(t.TempDir(), "huginn-fail.sh")
-	if err := os.WriteFile(fixture, []byte("#!/usr/bin/env bash\ncat >/dev/null\nprintf '{\"status\":\"failed\",\"adapter_kind\":\"huginn_live\",\"error_code\":\"selector_missing\",\"error_message\":\"selector missing\",\"extracted_text_summary\":\"Huginn live browser adapter did not produce browsing evidence.\"}'\n"), 0o755); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-	t.Setenv("ODIN_BROWSER_ADAPTER", "live")
-	t.Setenv("ODIN_HUGINN_BROWSER_COMMAND", fixture)
-	t.Setenv("ODIN_HUGINN_BROWSER_ALLOWED_COMMANDS", fixture)
-
-	run := func(args ...string) string {
-		t.Helper()
-		var output bytes.Buffer
-		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
-			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
-		}
-		return output.String()
-	}
-
-	run("work", "start", "--project", "odin-core", "--title", "Capture failing browser evidence", "--intent", "read_only")
-	run("browser", "run", "--task-id", "1", "--url", "https://example.com/research", "--allowed-domain", "example.com", "--json")
-	reviewList := run("review", "list", "--json")
-	for _, want := range []string{
-		`"queue_id": "failed-work:1"`,
-		`"source_type": "failed_work"`,
-		`"recovery_recommendation": "Browser evidence capture failed.`,
-	} {
-		if !strings.Contains(reviewList, want) {
-			t.Fatalf("review list output = %s, want %s", reviewList, want)
-		}
-	}
-	overview := run("overview", "--json")
-	if !strings.Contains(overview, `"source": "browser_evidence"`) || !strings.Contains(overview, `"recovery_recommendation": "Browser evidence capture failed.`) {
-		t.Fatalf("overview output = %s, want browser recovery guidance", overview)
+	if shown.Status != "queued" {
+		t.Fatalf("task status = %q, want queued after successful evidence capture", shown.Status)
 	}
 }
 
@@ -161,6 +130,57 @@ func TestRunBrowserRunRejectsUnsafeInputs(t *testing.T) {
 	err = Run(context.Background(), root, []string{"browser", "run", "--goal-id", int64String(created.ID), "--url", "https://example.com/research", "--objective", "Collect public documentation", "--action", "submit_form", "--json"}, strings.NewReader(""), &actionOut)
 	if err == nil || !strings.Contains(err.Error(), "mutation action") {
 		t.Fatalf("Run(browser mutation action) error = %v output=%s, want mutation action rejection", err, actionOut.String())
+	}
+}
+
+func TestRunBrowserRunCanReferenceBrowserSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	goal := decodeGoalEnvelope(t, []byte(run("goal", "create", "--title", "Collect browser evidence", "--json")))
+	session := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "google-main",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--account-hint", "marcus",
+		"--json",
+	)))
+	verified := decodeBrowserSessionEnvelope(t, []byte(run("browser", "session", "status", "--id", int64String(session.ID), "--status", "verified", "--json")))
+	if verified.Status != "verified" {
+		t.Fatalf("verified.Status = %q, want verified", verified.Status)
+	}
+
+	browserRun := run("browser", "run", "--goal-id", int64String(goal.ID), "--url", "https://example.com/account", "--objective", "Collect account evidence", "--allowed-domain", "example.com", "--session-id", int64String(session.ID), "--worker-mode", "browser", "--json")
+	for _, want := range []string{
+		`"status": "recorded"`,
+		`"browser_session":`,
+		`"id": 1`,
+		`"domain": "example.com"`,
+		`"profile_path": "browser-sessions/profiles/google-main"`,
+	} {
+		if !strings.Contains(browserRun, want) {
+			t.Fatalf("browser run output = %s, want %s", browserRun, want)
+		}
+	}
+
+	logs := run("logs", "--json")
+	if !strings.Contains(logs, `"type": "goal.evidence_recorded"`) || !strings.Contains(logs, `"browser_session"`) {
+		t.Fatalf("logs output = %s, want evidence event with safe browser session metadata", logs)
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
 	}
 }
 
@@ -227,6 +247,11 @@ func TestRunBrowserSessionCreateListShowStatusAndRevoke(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("profile path entries = %v, want empty directory only", entries)
+	}
+
+	requiresLogin := decodeBrowserSessionEnvelope(t, []byte(run("browser", "session", "status", "--id", int64String(created.ID), "--status", "requires_attended_login", "--json")))
+	if requiresLogin.Status != "requires_attended_login" {
+		t.Fatalf("requiresLogin.Status = %q, want requires_attended_login", requiresLogin.Status)
 	}
 
 	verified := decodeBrowserSessionEnvelope(t, []byte(run("browser", "session", "status", "--id", int64String(created.ID), "--status", "verified", "--json")))
@@ -334,6 +359,679 @@ func TestRunBrowserSessionLoginRequestCreateAndList(t *testing.T) {
 		if strings.Contains(strings.ToLower(logs), forbidden) {
 			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
 		}
+	}
+}
+
+func TestRunBrowserSessionRunnerMetadataCommands(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "google-main",
+		"--domain", "google.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+	if runner.ID != 1 || runner.SessionID != created.ID || runner.LoginRequestID != loginRequest.ID || runner.HandoffID != loginRequest.HandoffID {
+		t.Fatalf("runner = %+v, want linked runner metadata", runner)
+	}
+	if runner.Status != "requested" || runner.ViewerURL != nil || runner.RunnerID != nil || runner.ProcessID != nil || runner.ExpiresAt == "" {
+		t.Fatalf("runner = %+v, want requested metadata-only runner with nil process fields", runner)
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser-sessions directory exists after runner create err=%v, want metadata-only runner", err)
+	}
+
+	listOutput := run("browser", "session", "runner", "list", "--login-request-id", int64String(loginRequest.ID), "--json")
+	if !strings.Contains(listOutput, `"runners":`) || !strings.Contains(listOutput, `"status": "requested"`) || !strings.Contains(listOutput, `"viewer_url": null`) {
+		t.Fatalf("runner list output = %s, want requested runner metadata list", listOutput)
+	}
+
+	shown := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "show", "--id", int64String(runner.ID), "--json")))
+	if shown.ID != runner.ID || shown.HandoffID != runner.HandoffID {
+		t.Fatalf("shown runner = %+v, want created runner", shown)
+	}
+
+	started := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "status", "--id", int64String(runner.ID), "--status", "started", "--json")))
+	if started.Status != "started" || started.StartedAt == "" {
+		t.Fatalf("started runner = %+v, want started with timestamp", started)
+	}
+
+	completed := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "status", "--id", int64String(runner.ID), "--status", "completed", "--json")))
+	if completed.Status != "completed" || completed.CompletedAt == "" || completed.ExitedAt == "" {
+		t.Fatalf("completed runner = %+v, want completed with completion and exit timestamps", completed)
+	}
+
+	cancelRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	cancelRunner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(cancelRequest.ID), "--json")))
+	cancelled := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "cancel", "--id", int64String(cancelRunner.ID), "--json")))
+	if cancelled.Status != "cancelled" || cancelled.CancelledAt == "" || cancelled.ExitedAt == "" {
+		t.Fatalf("cancelled runner = %+v, want cancelled with cancellation and exit timestamps", cancelled)
+	}
+
+	verifiedRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	run("browser", "session", "verify", "--id", int64String(created.ID), "--login-request-id", int64String(verifiedRequest.ID), "--json")
+	var completedRequestOutput bytes.Buffer
+	err := Run(context.Background(), root, []string{"browser", "session", "runner", "create", "--login-request-id", int64String(verifiedRequest.ID), "--json"}, strings.NewReader(""), &completedRequestOutput)
+	if err == nil || !strings.Contains(err.Error(), `status "completed"`) {
+		t.Fatalf("Run(runner create completed request) error = %v output=%s, want completed request rejection", err, completedRequestOutput.String())
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("Open store error = %v", err)
+	}
+	defer store.Close()
+	expiredRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	if _, err := store.DB().ExecContext(context.Background(), `UPDATE browser_session_login_requests SET expires_at = ? WHERE id = ?`, "2000-01-01T00:00:00.000000000Z", expiredRequest.ID); err != nil {
+		t.Fatalf("expire login request metadata error = %v", err)
+	}
+	var expiredRequestOutput bytes.Buffer
+	err = Run(context.Background(), root, []string{"browser", "session", "runner", "create", "--login-request-id", int64String(expiredRequest.ID), "--json"}, strings.NewReader(""), &expiredRequestOutput)
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("Run(runner create expired request) error = %v output=%s, want expired request rejection", err, expiredRequestOutput.String())
+	}
+
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "browser.handoff_runner_requested"`,
+		`"type": "browser.handoff_runner_started"`,
+		`"type": "browser.handoff_runner_completed"`,
+		`"type": "browser.handoff_runner_cancelled"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func TestRunBrowserSessionRunnerStartUsesStubRunnerSafely(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "stub-start",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	started := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if started.Status != "failed" {
+		t.Fatalf("started runner status = %q, want failed for StubRunner not_implemented", started.Status)
+	}
+	if started.ErrorCode == nil || *started.ErrorCode != "not_implemented" {
+		t.Fatalf("started runner error_code = %v, want not_implemented", started.ErrorCode)
+	}
+	if started.ViewerURL != nil || started.RunnerID != nil || started.ProcessID != nil {
+		t.Fatalf("started runner = %+v, want no viewer/process metadata from StubRunner", started)
+	}
+	if started.StartedAt != "" {
+		t.Fatalf("started.StartedAt = %q, want empty because StubRunner did not start", started.StartedAt)
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser-sessions directory exists after runner start err=%v, want metadata-only stub start", err)
+	}
+
+	logs := run("logs", "--json")
+	if !strings.Contains(logs, `"type": "browser.handoff_runner_failed"`) || !strings.Contains(logs, `"error_code": "not_implemented"`) {
+		t.Fatalf("logs output = %s, want failed not_implemented runner audit event", logs)
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+
+	completedRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	completedRunner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(completedRequest.ID), "--json")))
+	run("browser", "session", "verify", "--id", int64String(created.ID), "--login-request-id", int64String(completedRequest.ID), "--json")
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{"browser", "session", "runner", "start", "--id", int64String(completedRunner.ID), "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), `status "completed"`) {
+		t.Fatalf("Run(runner start completed request) error = %v output=%s, want completed request rejection", err, output.String())
+	}
+}
+
+func TestRunBrowserSessionRunnerStartUsesNoVNCFixtureLaunchSafely(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	commandPath := testLifecycleExecutablePath(t, "true")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "novnc")
+	t.Setenv("ODIN_NOVNC_BROWSER_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_DISPLAY_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_WEBSOCKIFY_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_ALLOWED_COMMANDS", commandPath)
+	t.Setenv("ODIN_NOVNC_BIND_ADDR", "127.0.0.1:6080")
+	t.Setenv("ODIN_NOVNC_PRIVATE_BASE_URL", "https://odin-handoff.tailnet.local")
+	t.Setenv("ODIN_NOVNC_TIMEOUT_SECONDS", "300")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "novnc-start",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	started := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if started.Status != "completed" {
+		t.Fatalf("started runner status = %q, want completed for harmless NoVNC fixture launch", started.Status)
+	}
+	if started.ErrorCode != nil || started.ErrorMessage != nil {
+		t.Fatalf("started runner error metadata = %v/%v, want empty after completion", started.ErrorCode, started.ErrorMessage)
+	}
+	if started.ViewerURL == nil || !strings.HasPrefix(*started.ViewerURL, "https://odin-handoff.tailnet.local/session/novnc-") {
+		t.Fatalf("started runner viewer_url = %v, want private NoVNC fixture viewer URL", started.ViewerURL)
+	}
+	if started.RunnerID == nil || !strings.HasPrefix(*started.RunnerID, "novnc-") || started.ProcessID == nil || *started.ProcessID <= 0 || started.StartedAt == "" || started.CompletedAt == "" {
+		t.Fatalf("started runner = %+v, want runner/process and started/completed metadata", started)
+	}
+	if started.BindAddr == nil || *started.BindAddr != "127.0.0.1:6080" || started.PrivateBaseURL == nil || *started.PrivateBaseURL != "https://odin-handoff.tailnet.local" {
+		t.Fatalf("started runner network metadata = bind %v base %v, want validated private metadata", started.BindAddr, started.PrivateBaseURL)
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser-sessions directory exists after runner start err=%v, want fixture process proof only", err)
+	}
+	assertNoBrowserSessionArtifacts(t, root)
+
+	logs := run("logs", "--json")
+	if !strings.Contains(logs, `"type": "browser.handoff_runner_started"`) || !strings.Contains(logs, `"type": "browser.handoff_runner_completed"`) {
+		t.Fatalf("logs output = %s, want started and completed runner audit events", logs)
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func TestRunBrowserSessionRunnerStartUsesRealWebsockifyGateWithFakeBackends(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	commandPath := testLifecycleExecutablePath(t, "true")
+	markerPath := filepath.Join(t.TempDir(), "websockify.marker")
+	websockifyPath := writeLifecycleExecutable(t, "websockify", "#!/bin/sh\nprintf ran > "+shellQuote(markerPath)+"\n")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "novnc")
+	t.Setenv("ODIN_NOVNC_BROWSER_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_DISPLAY_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_WEBSOCKIFY_COMMAND", websockifyPath)
+	t.Setenv("ODIN_NOVNC_ALLOWED_COMMANDS", strings.Join([]string{commandPath, websockifyPath}, ","))
+	t.Setenv("ODIN_NOVNC_BIND_ADDR", "127.0.0.1:6080")
+	t.Setenv("ODIN_NOVNC_PRIVATE_BASE_URL", "https://odin-handoff.tailnet.local")
+	t.Setenv("ODIN_NOVNC_TIMEOUT_SECONDS", "2")
+	t.Setenv("ODIN_NOVNC_REAL_WEBSOCKIFY", "true")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "websockify-start",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	completed := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if completed.Status != "completed" {
+		t.Fatalf("completed runner status = %q, want completed for real websockify role with fake backends", completed.Status)
+	}
+	if completed.ViewerURL == nil || !strings.HasPrefix(*completed.ViewerURL, "https://odin-handoff.tailnet.local/session/novnc-") {
+		t.Fatalf("completed runner viewer_url = %v, want private NoVNC viewer URL", completed.ViewerURL)
+	}
+	if payload, err := os.ReadFile(markerPath); err != nil || string(payload) != "ran" {
+		t.Fatalf("websockify marker payload=%q err=%v, want real websockify role executable to run", string(payload), err)
+	}
+	assertNoBrowserSessionArtifacts(t, root)
+
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.handoff_runner_started"`, `"type": "browser.handoff_runner_completed"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func TestRunBrowserSessionRunnerStartUsesRealDisplayGateWithFakeBrowser(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	commandPath := testLifecycleExecutablePath(t, "true")
+	markerPath := filepath.Join(t.TempDir(), "display.marker")
+	displayPath := writeLifecycleExecutable(t, "display-vnc", "#!/bin/sh\nprintf ran > "+shellQuote(markerPath)+"\n")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "novnc")
+	t.Setenv("ODIN_NOVNC_BROWSER_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_DISPLAY_COMMAND", displayPath)
+	t.Setenv("ODIN_NOVNC_WEBSOCKIFY_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_ALLOWED_COMMANDS", strings.Join([]string{commandPath, displayPath}, ","))
+	t.Setenv("ODIN_NOVNC_BIND_ADDR", "127.0.0.1:6080")
+	t.Setenv("ODIN_NOVNC_PRIVATE_BASE_URL", "https://odin-handoff.tailnet.local")
+	t.Setenv("ODIN_NOVNC_TIMEOUT_SECONDS", "2")
+	t.Setenv("ODIN_NOVNC_REAL_DISPLAY", "true")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "display-start",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	completed := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if completed.Status != "completed" {
+		t.Fatalf("completed runner status = %q, want completed for real display role with fake browser", completed.Status)
+	}
+	if completed.ViewerURL == nil || !strings.HasPrefix(*completed.ViewerURL, "https://odin-handoff.tailnet.local/session/novnc-") {
+		t.Fatalf("completed runner viewer_url = %v, want private NoVNC viewer URL", completed.ViewerURL)
+	}
+	if payload, err := os.ReadFile(markerPath); err != nil || string(payload) != "ran" {
+		t.Fatalf("display marker payload=%q err=%v, want real display role executable to run", string(payload), err)
+	}
+	assertNoBrowserSessionArtifacts(t, root)
+
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.handoff_runner_started"`, `"type": "browser.handoff_runner_completed"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func TestRunBrowserSessionRunnerStartUsesRealBrowserGateWithFakeBackends(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	commandPath := testLifecycleExecutablePath(t, "true")
+	markerPath := filepath.Join(t.TempDir(), "browser.marker")
+	browserPath := writeLifecycleExecutable(t, "browser", "#!/bin/sh\nprintf ran > "+shellQuote(markerPath)+"\n")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "novnc")
+	t.Setenv("ODIN_NOVNC_BROWSER_COMMAND", browserPath)
+	t.Setenv("ODIN_NOVNC_DISPLAY_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_WEBSOCKIFY_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_ALLOWED_COMMANDS", strings.Join([]string{commandPath, browserPath}, ","))
+	t.Setenv("ODIN_NOVNC_BIND_ADDR", "127.0.0.1:6080")
+	t.Setenv("ODIN_NOVNC_PRIVATE_BASE_URL", "https://odin-handoff.tailnet.local")
+	t.Setenv("ODIN_NOVNC_TIMEOUT_SECONDS", "2")
+	t.Setenv("ODIN_NOVNC_REAL_BROWSER", "true")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "browser-start",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	completed := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if completed.Status != "completed" {
+		t.Fatalf("completed runner status = %q, want completed for real browser role with fake backends", completed.Status)
+	}
+	if completed.ViewerURL == nil || !strings.HasPrefix(*completed.ViewerURL, "https://odin-handoff.tailnet.local/session/novnc-") {
+		t.Fatalf("completed runner viewer_url = %v, want private NoVNC viewer URL", completed.ViewerURL)
+	}
+	if payload, err := os.ReadFile(markerPath); err != nil || string(payload) != "ran" {
+		t.Fatalf("browser marker payload=%q err=%v, want real browser role executable to run", string(payload), err)
+	}
+	assertNoBrowserSessionArtifacts(t, root)
+
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.handoff_runner_started"`, `"type": "browser.handoff_runner_completed"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func TestRunBrowserSessionRunnerStartRealBrowserDoesNotReusePreparedProfile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	commandPath := testLifecycleExecutablePath(t, "true")
+	markerPath := filepath.Join(t.TempDir(), "browser.marker")
+	browserPath := writeLifecycleExecutable(t, "browser", "#!/bin/sh\nprintf ran > "+shellQuote(markerPath)+"\n")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "novnc")
+	t.Setenv("ODIN_NOVNC_BROWSER_COMMAND", browserPath)
+	t.Setenv("ODIN_NOVNC_DISPLAY_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_WEBSOCKIFY_COMMAND", commandPath)
+	t.Setenv("ODIN_NOVNC_ALLOWED_COMMANDS", strings.Join([]string{commandPath, browserPath}, ","))
+	t.Setenv("ODIN_NOVNC_BIND_ADDR", "127.0.0.1:6080")
+	t.Setenv("ODIN_NOVNC_PRIVATE_BASE_URL", "https://odin-handoff.tailnet.local")
+	t.Setenv("ODIN_NOVNC_TIMEOUT_SECONDS", "2")
+	t.Setenv("ODIN_NOVNC_REAL_BROWSER", "true")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "browser-prepared-profile",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	run("browser", "session", "prepare-profile", "--id", int64String(created.ID), "--json")
+	profileDir := filepath.Join(root, filepath.FromSlash(created.ProfilePath))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	completed := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if completed.Status != "completed" {
+		t.Fatalf("completed runner status = %q, want completed for real browser role with prepared profile metadata", completed.Status)
+	}
+	if payload, err := os.ReadFile(markerPath); err != nil || string(payload) != "ran" {
+		t.Fatalf("browser marker payload=%q err=%v, want real browser role executable to run", string(payload), err)
+	}
+	entries, err := os.ReadDir(profileDir)
+	if err != nil {
+		t.Fatalf("ReadDir(profileDir) error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("profile directory entries = %v, want browser runner to leave prepared profile empty", entries)
+	}
+	for _, path := range []string{"cookies", "credentials"} {
+		if _, err := os.Stat(filepath.Join(root, path)); !os.IsNotExist(err) {
+			t.Fatalf("%s exists after runner start err=%v, want no credential/session artifact", path, err)
+		}
+	}
+
+	logs := run("logs", "--json")
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func TestRunBrowserSessionRunnerPlanNoVNCIsReadOnly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	commandPath := testLifecycleExecutablePath(t, "true")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "novnc-plan",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+	logsBefore := run("logs", "--json")
+
+	plan := decodeBrowserSessionRunnerPlanEnvelope(t, []byte(run(novncPlanArgs(runner.ID, commandPath, "127.0.0.1:6080")...)))
+	if plan.ID != runner.ID || plan.SessionID != created.ID || plan.LoginRequestID != loginRequest.ID || plan.HandoffID != loginRequest.HandoffID {
+		t.Fatalf("plan = %+v, want linked runner/session/request metadata", plan)
+	}
+	if plan.ViewerURL != "https://odin-handoff.tailnet.local/session/dry-run-"+loginRequest.HandoffID {
+		t.Fatalf("plan.ViewerURL = %q, want private dry-run viewer URL", plan.ViewerURL)
+	}
+	if plan.BindAddr != "127.0.0.1:6080" || plan.PrivateBaseURL != "https://odin-handoff.tailnet.local" || plan.TimeoutSeconds != 300 {
+		t.Fatalf("plan config = %+v, want validated bind/base/timeout", plan)
+	}
+	if len(plan.Commands) != 3 {
+		t.Fatalf("plan.Commands = %+v, want planned display/browser/novnc commands", plan.Commands)
+	}
+
+	shown := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "show", "--id", int64String(runner.ID), "--json")))
+	if shown.Status != "requested" || shown.ViewerURL != nil || shown.RunnerID != nil || shown.ProcessID != nil || shown.StartedAt != "" {
+		t.Fatalf("shown runner after plan = %+v, want unmutated requested metadata", shown)
+	}
+	logsAfter := run("logs", "--json")
+	if logsAfter != logsBefore {
+		t.Fatalf("logs changed after plan-novnc\nbefore=%s\nafter=%s", logsBefore, logsAfter)
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser-sessions directory exists after plan-novnc err=%v, want dry-run only", err)
+	}
+
+	var unsafeOutput bytes.Buffer
+	err := Run(context.Background(), root, novncPlanArgs(runner.ID, commandPath, "0.0.0.0:6080"), strings.NewReader(""), &unsafeOutput)
+	if err == nil || !strings.Contains(err.Error(), "bind_addr") {
+		t.Fatalf("Run(plan-novnc unsafe bind) error = %v output=%s, want bind_addr rejection", err, unsafeOutput.String())
+	}
+	if logsAfterUnsafe := run("logs", "--json"); logsAfterUnsafe != logsBefore {
+		t.Fatalf("logs changed after rejected plan-novnc\nbefore=%s\nafter=%s", logsBefore, logsAfterUnsafe)
+	}
+}
+
+func TestRunBrowserSessionRunnerStartFixtureCompletesThroughSupervisor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	fixtureCommand := testLifecycleExecutablePath(t, "true")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "fixture")
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_COMMAND", fixtureCommand)
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_ALLOWED_COMMANDS", fixtureCommand)
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_TIMEOUT_SECONDS", "2")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "fixture-start",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	completed := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if completed.Status != "completed" || completed.StartedAt == "" || completed.CompletedAt == "" || completed.ExitedAt == "" {
+		t.Fatalf("completed runner = %+v, want supervisor start and completion metadata", completed)
+	}
+	if completed.RunnerID == nil || *completed.RunnerID == "" || completed.ProcessID == nil || *completed.ProcessID <= 0 {
+		t.Fatalf("completed runner = %+v, want fixture runner id and process id", completed)
+	}
+	if completed.ViewerURL != nil {
+		t.Fatalf("completed runner viewer_url = %v, want null fixture viewer URL", completed.ViewerURL)
+	}
+	if _, err := os.Stat(filepath.Join(root, "browser-sessions")); !os.IsNotExist(err) {
+		t.Fatalf("browser-sessions directory exists after fixture runner start err=%v, want metadata-only fixture start", err)
+	}
+
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.handoff_runner_started"`, `"type": "browser.handoff_runner_completed"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func TestRunBrowserSessionRunnerStartFixtureTimeoutThroughSupervisor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	fixtureCommand := testLifecycleExecutablePath(t, "sleep")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "fixture")
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_COMMAND", fixtureCommand)
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_ARGS", "5")
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_ALLOWED_COMMANDS", fixtureCommand)
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_TIMEOUT_SECONDS", "1")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "fixture-timeout",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	expired := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if expired.Status != "expired" || expired.StartedAt == "" || expired.ExitedAt == "" {
+		t.Fatalf("expired runner = %+v, want supervisor timeout metadata", expired)
+	}
+	if expired.ErrorCode == nil || *expired.ErrorCode != "fixture_timeout" {
+		t.Fatalf("expired runner error_code = %v, want fixture_timeout", expired.ErrorCode)
+	}
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.handoff_runner_started"`, `"type": "browser.handoff_runner_expired"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+}
+
+func TestRunBrowserSessionRunnerStartFixtureRejectsDisallowedCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	markerPath := filepath.Join(t.TempDir(), "marker")
+	fixtureCommand := writeLifecycleExecutable(t, "mark.sh", "#!/bin/sh\nprintf ran > "+shellQuote(markerPath)+"\n")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "fixture")
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_COMMAND", fixtureCommand)
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_ALLOWED_COMMANDS", testLifecycleExecutablePath(t, "true"))
+	t.Setenv("ODIN_BROWSER_HANDOFF_FIXTURE_TIMEOUT_SECONDS", "2")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "fixture-disallowed",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{"browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("Run(disallowed fixture start) error = %v output=%s, want allowlist rejection", err, output.String())
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("marker stat error = %v, want no marker because disallowed command was not executed", err)
+	}
+	shown := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "show", "--id", int64String(runner.ID), "--json")))
+	if shown.Status != "requested" || shown.StartedAt != "" || shown.ExitedAt != "" {
+		t.Fatalf("shown runner after rejected start = %+v, want unchanged requested runner", shown)
 	}
 }
 
@@ -659,9 +1357,8 @@ func TestRunBrowserSessionPrepareProfileRejectsRevokedAndUnsafeMetadata(t *testi
 	}
 }
 
-func TestRunBrowserSessionProfileArtifactMaterializeAndCleanup(t *testing.T) {
+func TestRunBrowserSessionProfileRetentionCleanupDryRunAndApply(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("ODIN_BROWSER_PROFILE_KEY_B64", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32))))
 	root := testRepoRoot(t)
 
 	run := func(args ...string) string {
@@ -675,74 +1372,521 @@ func TestRunBrowserSessionProfileArtifactMaterializeAndCleanup(t *testing.T) {
 
 	created := decodeBrowserSessionEnvelope(t, []byte(run(
 		"browser", "session", "create",
-		"--name", "google-main",
-		"--domain", "google.com",
+		"--name", "retention-cli",
+		"--domain", "example.com",
 		"--permission-tier", "authenticated_read",
 		"--json",
 	)))
-	plaintextPath := filepath.Join(t.TempDir(), "profile-state.json")
-	if err := os.WriteFile(plaintextPath, []byte(`{"state":"safe fixture"}`), 0o600); err != nil {
+
+	store := openLifecycleBrowserStore(t, root)
+	active := createLifecycleBrowserArtifact(t, context.Background(), store, root, created, "active-cli.enc")
+	revoked := createLifecycleBrowserArtifact(t, context.Background(), store, root, created, "revoked-cli.enc")
+	expired := createLifecycleBrowserArtifact(t, context.Background(), store, root, created, "expired-cli.enc")
+	if _, err := store.MarkBrowserEncryptedProfileArtifactRevoked(context.Background(), sqlite.MarkBrowserEncryptedProfileArtifactRevokedParams{
+		ID:     revoked.ID,
+		Actor:  "test",
+		Reason: "retention cli test revoke",
+	}); err != nil {
+		t.Fatalf("MarkBrowserEncryptedProfileArtifactRevoked() error = %v", err)
+	}
+	if _, err := store.MarkBrowserEncryptedProfileArtifactExpired(context.Background(), sqlite.MarkBrowserEncryptedProfileArtifactExpiredParams{
+		ID:     expired.ID,
+		Actor:  "test",
+		Reason: "retention cli test expire",
+	}); err != nil {
+		t.Fatalf("MarkBrowserEncryptedProfileArtifactExpired() error = %v", err)
+	}
+	protectedPaths := []string{
+		"browser-sessions/encrypted-profiles/not-an-artifact.txt",
+	}
+	for _, rel := range protectedPaths {
+		writeLifecycleRetentionMarker(t, filepath.Join(root, filepath.FromSlash(rel)))
+	}
+	closeLifecycleBrowserStore(t, store)
+
+	dryRun := decodeBrowserSessionProfileRetentionEnvelope(t, []byte(run("browser", "session", "profile", "retention", "cleanup", "--json")))
+	if !dryRun.DryRun || dryRun.Apply || dryRun.Eligible != 2 || dryRun.Cleaned != 0 || dryRun.Failed != 0 || dryRun.Skipped != 1 {
+		t.Fatalf("dry-run retention = %+v, want two eligible, one skipped, no mutation", dryRun)
+	}
+	if len(dryRun.Artifacts) != 2 {
+		t.Fatalf("dry-run artifacts = %d, want 2", len(dryRun.Artifacts))
+	}
+	for _, item := range dryRun.Artifacts {
+		if item.Action != "would_clean" || item.Removed {
+			t.Fatalf("dry-run item = %+v, want would_clean without removal", item)
+		}
+	}
+	for _, artifact := range []sqlite.BrowserEncryptedProfileArtifact{active, revoked, expired} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(artifact.EncryptedArtifactPath))); err != nil {
+			t.Fatalf("artifact %d missing after dry-run: %v", artifact.ID, err)
+		}
+	}
+
+	afterDryRun := openLifecycleBrowserStore(t, root)
+	assertLifecycleBrowserArtifactStatus(t, afterDryRun, active.ID, sqlite.BrowserEncryptedProfileArtifactStatusEncrypted)
+	assertLifecycleBrowserArtifactStatus(t, afterDryRun, revoked.ID, sqlite.BrowserEncryptedProfileArtifactStatusRevoked)
+	assertLifecycleBrowserArtifactStatus(t, afterDryRun, expired.ID, sqlite.BrowserEncryptedProfileArtifactStatusExpired)
+	closeLifecycleBrowserStore(t, afterDryRun)
+
+	applied := decodeBrowserSessionProfileRetentionEnvelope(t, []byte(run(
+		"browser", "session", "profile", "retention", "cleanup",
+		"--session-id", int64String(created.ID),
+		"--apply",
+		"--json",
+	)))
+	if applied.DryRun || !applied.Apply || applied.Eligible != 2 || applied.Cleaned != 2 || applied.Failed != 0 || applied.Skipped != 1 {
+		t.Fatalf("apply retention = %+v, want two cleaned and one skipped", applied)
+	}
+	for _, item := range applied.Artifacts {
+		if item.Action != "cleaned" || !item.Removed {
+			t.Fatalf("apply item = %+v, want cleaned removal", item)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(revoked.EncryptedArtifactPath))); !os.IsNotExist(err) {
+		t.Fatalf("revoked artifact still exists after apply: err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(expired.EncryptedArtifactPath))); !os.IsNotExist(err) {
+		t.Fatalf("expired artifact still exists after apply: err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(active.EncryptedArtifactPath))); err != nil {
+		t.Fatalf("active artifact missing after apply: %v", err)
+	}
+	for _, rel := range protectedPaths {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("protected path %q was touched by retention cleanup: %v", rel, err)
+		}
+	}
+	for _, rel := range []string{created.ProfilePath, "cookies", "credentials"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Fatalf("path %q exists after retention cleanup err=%v, want no profile/cookie/credential writes", rel, err)
+		}
+	}
+
+	afterApply := openLifecycleBrowserStore(t, root)
+	assertLifecycleBrowserArtifactStatus(t, afterApply, active.ID, sqlite.BrowserEncryptedProfileArtifactStatusEncrypted)
+	assertLifecycleBrowserArtifactStatus(t, afterApply, revoked.ID, sqlite.BrowserEncryptedProfileArtifactStatusCleaned)
+	assertLifecycleBrowserArtifactStatus(t, afterApply, expired.ID, sqlite.BrowserEncryptedProfileArtifactStatusCleaned)
+	closeLifecycleBrowserStore(t, afterApply)
+
+	logs := run("logs", "--json")
+	if strings.Count(logs, `"type": "browser.profile_cleaned"`) != 2 {
+		t.Fatalf("logs output = %s, want two browser.profile_cleaned audit events", logs)
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden marker %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func TestRunBrowserSessionProfileArtifactCreateFixtureEncryptsAndRecordsMetadata(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	key := bytes.Repeat([]byte{0x52}, browserprofilecrypto.KeySize)
+	t.Setenv(browserprofilekeys.EnvKeyB64, base64.StdEncoding.EncodeToString(key))
+	plaintext := []byte("fixture plaintext sentinel for cli artifact")
+	plaintextPath := filepath.Join(t.TempDir(), "fixture-profile.txt")
+	if err := os.WriteFile(plaintextPath, plaintext, 0o600); err != nil {
 		t.Fatalf("WriteFile(plaintext fixture) error = %v", err)
 	}
 
-	artifact := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(run(
-		"browser", "session", "profile", "artifact", "create-fixture",
-		"--session-id", int64String(created.ID),
-		"--name", "google-main",
-		"--plaintext-file", plaintextPath,
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "fixture-cli",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
 		"--json",
 	)))
-	if artifact.SessionID != created.ID || artifact.Status != "encrypted" || artifact.ArtifactPath != "browser-sessions/encrypted-profiles/google-main.enc" {
-		t.Fatalf("artifact = %+v, want encrypted artifact metadata for created session", artifact)
+	output := run(
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "fixture-one",
+		"--plaintext-file", plaintextPath,
+		"--json",
+	)
+	if strings.Contains(output, string(plaintext)) || strings.Contains(output, plaintextPath) {
+		t.Fatalf("create-fixture output leaked plaintext/source path: %s", output)
 	}
-	encryptedBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(artifact.ArtifactPath)))
+	artifact := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(output))
+	if artifact.ID <= 0 || artifact.SessionID != created.ID || artifact.Status != "encrypted" {
+		t.Fatalf("artifact = %+v, want encrypted artifact linked to session", artifact)
+	}
+	if artifact.ArtifactPath != "browser-sessions/encrypted-profiles/fixture-one.enc" {
+		t.Fatalf("artifact.ArtifactPath = %q, want safe encrypted artifact path", artifact.ArtifactPath)
+	}
+	if artifact.ProfilePath != created.ProfilePath {
+		t.Fatalf("artifact.ProfilePath = %q, want session profile path %q", artifact.ProfilePath, created.ProfilePath)
+	}
+	if artifact.EncryptionKeyRef != "env:"+browserprofilekeys.EnvKeyB64 {
+		t.Fatalf("artifact.EncryptionKeyRef = %q, want env key ref", artifact.EncryptionKeyRef)
+	}
+	artifactBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(artifact.ArtifactPath)))
 	if err != nil {
 		t.Fatalf("ReadFile(encrypted artifact) error = %v", err)
 	}
-	if strings.Contains(string(encryptedBytes), "safe fixture") {
-		t.Fatalf("encrypted artifact contains plaintext fixture bytes: %s", string(encryptedBytes))
+	if bytes.Contains(artifactBytes, plaintext) {
+		t.Fatalf("encrypted artifact contains fixture plaintext")
 	}
-
-	targetDir := "runtime/browser-profile-materializations/google-main"
-	materialization := decodeBrowserSessionProfileMaterializationEnvelope(t, []byte(run(
-		"browser", "session", "profile", "artifact", "materialize",
-		"--id", int64String(artifact.ID),
-		"--target-dir", targetDir,
-		"--json",
-	)))
-	if materialization.ArtifactID != artifact.ID || materialization.SessionID != created.ID || materialization.MaterializationPath != targetDir || materialization.MaterializedFilePath == "" || !materialization.ReadOnly {
-		t.Fatalf("materialization = %+v, want read-only materialized profile artifact", materialization)
-	}
-	materializedBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(materialization.MaterializedFilePath)))
+	readPlaintext, err := browserprofileartifacts.Read(browserprofileartifacts.ReadParams{
+		ODINRoot:     root,
+		ArtifactPath: artifact.ArtifactPath,
+		KeyProvider:  browserprofilekeys.LoadFromEnv,
+	})
 	if err != nil {
-		t.Fatalf("ReadFile(materialized file) error = %v", err)
+		t.Fatalf("Read(encrypted artifact) error = %v", err)
 	}
-	if string(materializedBytes) != `{"state":"safe fixture"}` {
-		t.Fatalf("materialized bytes = %q, want original fixture plaintext", string(materializedBytes))
+	if !bytes.Equal(readPlaintext, plaintext) {
+		t.Fatalf("decrypted artifact plaintext = %q, want fixture plaintext", readPlaintext)
 	}
 
-	cleanup := decodeBrowserSessionProfileMaterializationEnvelope(t, []byte(run(
-		"browser", "session", "profile", "artifact", "cleanup-materialization",
-		"--id", int64String(artifact.ID),
-		"--target-dir", targetDir,
-		"--json",
-	)))
-	if cleanup.ArtifactID != artifact.ID || !cleanup.Removed {
-		t.Fatalf("cleanup = %+v, want materialization removed", cleanup)
+	store := openLifecycleBrowserStore(t, root)
+	persisted := assertLifecycleBrowserArtifactStatus(t, store, artifact.ID, sqlite.BrowserEncryptedProfileArtifactStatusEncrypted)
+	closeLifecycleBrowserStore(t, store)
+	if persisted.EncryptedArtifactPath != artifact.ArtifactPath || persisted.EncryptionKeyRef != artifact.EncryptionKeyRef {
+		t.Fatalf("persisted artifact = %+v, want CLI metadata %+v", persisted, artifact)
 	}
-	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(targetDir))); !os.IsNotExist(err) {
-		t.Fatalf("materialization dir stat error = %v, want removed", err)
+
+	retention := decodeBrowserSessionProfileRetentionEnvelope(t, []byte(run("browser", "session", "profile", "retention", "cleanup", "--json")))
+	if retention.Eligible != 0 || retention.Skipped != 1 || retention.Cleaned != 0 {
+		t.Fatalf("retention = %+v, want active encrypted artifact skipped by cleanup", retention)
+	}
+	for _, rel := range []string{created.ProfilePath, "cookies", "credentials"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Fatalf("path %q exists after create-fixture err=%v, want no profile/cookie/credential writes", rel, err)
+		}
 	}
 
 	logs := run("logs", "--json")
-	for _, want := range []string{`"type": "browser.profile_encrypted"`, `"type": "browser.profile_materialized"`, `"type": "browser.profile_materialization_cleaned"`} {
-		if !strings.Contains(logs, want) {
-			t.Fatalf("logs output = %s, want %s", logs, want)
+	if !strings.Contains(logs, `"type": "browser.profile_encrypted"`) {
+		t.Fatalf("logs output = %s, want browser.profile_encrypted audit event", logs)
+	}
+	for _, forbidden := range []string{string(plaintext), plaintextPath, "password", "totp", "backup_code", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), strings.ToLower(forbidden)) {
+			t.Fatalf("logs output contains forbidden marker %q: %s", forbidden, logs)
 		}
 	}
-	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes", "safe fixture"} {
-		if strings.Contains(strings.ToLower(logs), forbidden) {
-			t.Fatalf("logs output contains forbidden token %q: %s", forbidden, logs)
+}
+
+func TestRunBrowserSessionProfileArtifactCreateFixtureFailsClosed(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	plaintextPath := filepath.Join(t.TempDir(), "fixture-profile.txt")
+	if err := os.WriteFile(plaintextPath, []byte("fixture plaintext"), 0o600); err != nil {
+		t.Fatalf("WriteFile(plaintext fixture) error = %v", err)
+	}
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "fixture-fail-closed",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "missing-key",
+		"--plaintext-file", plaintextPath,
+		"--json",
+	}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), browserprofilekeys.EnvKeyB64) {
+		t.Fatalf("Run(create-fixture missing key) error = %v output=%s, want missing key rejection", err, output.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "browser-sessions", "encrypted-profiles", "missing-key.enc")); !os.IsNotExist(statErr) {
+		t.Fatalf("artifact exists after missing-key rejection: err=%v", statErr)
+	}
+
+	key := bytes.Repeat([]byte{0x61}, browserprofilecrypto.KeySize)
+	t.Setenv(browserprofilekeys.EnvKeyB64, base64.StdEncoding.EncodeToString(key))
+	output.Reset()
+	err = Run(context.Background(), root, []string{
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "cookies",
+		"--plaintext-file", plaintextPath,
+		"--json",
+	}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "forbidden") {
+		t.Fatalf("Run(create-fixture credential-looking name) error = %v output=%s, want forbidden name rejection", err, output.String())
+	}
+
+	output.Reset()
+	err = Run(context.Background(), root, []string{
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "missing-file",
+		"--plaintext-file", filepath.Join(t.TempDir(), "missing.txt"),
+		"--json",
+	}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "read plaintext fixture") {
+		t.Fatalf("Run(create-fixture missing file) error = %v output=%s, want missing file rejection", err, output.String())
+	}
+}
+
+func TestRunBrowserSessionProfileArtifactMaterializeAndCleanup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	key := bytes.Repeat([]byte{0x6d}, browserprofilecrypto.KeySize)
+	encodedKey := base64.StdEncoding.EncodeToString(key)
+	t.Setenv(browserprofilekeys.EnvKeyB64, encodedKey)
+	secretText := "fixture plaintext sentinel for materialization"
+	plaintextPath := filepath.Join(t.TempDir(), "materialize-profile.txt")
+	if err := os.WriteFile(plaintextPath, []byte(secretText), 0o600); err != nil {
+		t.Fatalf("WriteFile(plaintext fixture) error = %v", err)
+	}
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "materialize-cli",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	artifact := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(run(
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "materialize-flow",
+		"--plaintext-file", plaintextPath,
+		"--json",
+	)))
+	materializationDir := "runtime/browser-profile-materializations/cli-proof"
+	materializeOutput := run(
+		"browser", "session", "profile", "artifact", "materialize",
+		"--id", int64String(artifact.ID),
+		"--target-dir", materializationDir,
+		"--json",
+	)
+	for _, forbidden := range []string{secretText, plaintextPath, encodedKey} {
+		if strings.Contains(materializeOutput, forbidden) {
+			t.Fatalf("materialize output leaked forbidden marker %q: %s", forbidden, materializeOutput)
+		}
+	}
+	materialization := decodeBrowserSessionProfileMaterializationEnvelope(t, []byte(materializeOutput))
+	if materialization.ArtifactID != artifact.ID || materialization.SessionID != created.ID || materialization.MaterializationPath != materializationDir || materialization.MaterializedFilePath == "" {
+		t.Fatalf("materialization = %+v, want artifact materialized under requested temp path", materialization)
+	}
+	materializedAbs := filepath.Join(root, filepath.FromSlash(materialization.MaterializedFilePath))
+	materializedBytes, err := os.ReadFile(materializedAbs)
+	if err != nil {
+		t.Fatalf("ReadFile(materialized) error = %v", err)
+	}
+	if string(materializedBytes) != secretText {
+		t.Fatalf("materialized bytes = %q, want fixture text", materializedBytes)
+	}
+	artifactAbs := filepath.Join(root, filepath.FromSlash(artifact.ArtifactPath))
+	if _, err := os.Stat(artifactAbs); err != nil {
+		t.Fatalf("encrypted artifact missing after materialize: %v", err)
+	}
+	for _, rel := range []string{created.ProfilePath, "cookies", "cookie", "credentials", "profile-bytes"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Fatalf("forbidden path %q exists after materialize err=%v", rel, err)
+		}
+	}
+
+	cleanupOutput := run(
+		"browser", "session", "profile", "artifact", "cleanup-materialization",
+		"--id", int64String(artifact.ID),
+		"--target-dir", materializationDir,
+		"--json",
+	)
+	cleanup := decodeBrowserSessionProfileMaterializationEnvelope(t, []byte(cleanupOutput))
+	if cleanup.ArtifactID != artifact.ID || cleanup.MaterializationPath != materializationDir || !cleanup.Removed {
+		t.Fatalf("cleanup = %+v, want materialization removed", cleanup)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(materializationDir))); !os.IsNotExist(err) {
+		t.Fatalf("materialization dir exists after cleanup err=%v", err)
+	}
+	if _, err := os.Stat(artifactAbs); err != nil {
+		t.Fatalf("encrypted artifact missing after cleanup: %v", err)
+	}
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.profile_materialized"`, `"type": "browser.profile_materialization_cleaned"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+	for _, forbidden := range []string{secretText, plaintextPath, encodedKey} {
+		if strings.Contains(logs, forbidden) {
+			t.Fatalf("logs output leaked forbidden marker %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func TestRunBrowserSessionProfileArtifactStatusRevokeAndRetentionFlow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	key := bytes.Repeat([]byte{0x73}, browserprofilecrypto.KeySize)
+	encodedKey := base64.StdEncoding.EncodeToString(key)
+	t.Setenv(browserprofilekeys.EnvKeyB64, encodedKey)
+	secretText := "fixture plaintext sentinel for artifact revoke flow"
+	activeText := "fixture plaintext sentinel for active artifact"
+	plaintextPath := filepath.Join(t.TempDir(), "revoked-profile.txt")
+	activePlaintextPath := filepath.Join(t.TempDir(), "active-profile.txt")
+	if err := os.WriteFile(plaintextPath, []byte(secretText), 0o600); err != nil {
+		t.Fatalf("WriteFile(revoked plaintext) error = %v", err)
+	}
+	if err := os.WriteFile(activePlaintextPath, []byte(activeText), 0o600); err != nil {
+		t.Fatalf("WriteFile(active plaintext) error = %v", err)
+	}
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "artifact-status-cli",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	revokedArtifact := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(run(
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "revoke-flow",
+		"--plaintext-file", plaintextPath,
+		"--json",
+	)))
+	activeArtifact := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(run(
+		"browser", "session", "profile", "artifact", "create-fixture",
+		"--session-id", int64String(created.ID),
+		"--name", "active-flow",
+		"--plaintext-file", activePlaintextPath,
+		"--json",
+	)))
+
+	listOutput := run(
+		"browser", "session", "profile", "artifact", "list",
+		"--session-id", int64String(created.ID),
+		"--json",
+	)
+	forbiddenJSONMarkers := []string{secretText, activeText, plaintextPath, activePlaintextPath, encodedKey}
+	for _, forbidden := range forbiddenJSONMarkers {
+		if strings.Contains(listOutput, forbidden) {
+			t.Fatalf("artifact list output leaked forbidden marker %q: %s", forbidden, listOutput)
+		}
+	}
+	list := decodeBrowserSessionProfileArtifactListEnvelope(t, []byte(listOutput))
+	if len(list) != 2 || list[0].ID != revokedArtifact.ID || list[1].ID != activeArtifact.ID {
+		t.Fatalf("artifact list = %+v, want two persisted artifacts in id order", list)
+	}
+
+	showOutput := run(
+		"browser", "session", "profile", "artifact", "show",
+		"--id", int64String(revokedArtifact.ID),
+		"--json",
+	)
+	for _, forbidden := range forbiddenJSONMarkers {
+		if strings.Contains(showOutput, forbidden) {
+			t.Fatalf("artifact show output leaked forbidden marker %q: %s", forbidden, showOutput)
+		}
+	}
+	show := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(showOutput))
+	if show.ID != revokedArtifact.ID || show.SessionID != created.ID || show.Status != "encrypted" || show.ArtifactPath == "" || show.EncryptionKeyRef != "env:"+browserprofilekeys.EnvKeyB64 {
+		t.Fatalf("show artifact = %+v, want metadata-only encrypted artifact", show)
+	}
+
+	revoke := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(run(
+		"browser", "session", "profile", "artifact", "revoke",
+		"--id", int64String(revokedArtifact.ID),
+		"--json",
+	)))
+	if revoke.ID != revokedArtifact.ID || revoke.Status != "revoked" || revoke.RevokedAt == "" {
+		t.Fatalf("revoke artifact = %+v, want revoked artifact with timestamp", revoke)
+	}
+	revokedArtifactAbsPath := filepath.Join(root, filepath.FromSlash(revokedArtifact.ArtifactPath))
+	activeArtifactAbsPath := filepath.Join(root, filepath.FromSlash(activeArtifact.ArtifactPath))
+	if _, err := os.Stat(revokedArtifactAbsPath); err != nil {
+		t.Fatalf("revoked artifact file missing after revoke: %v", err)
+	}
+	if _, err := os.Stat(activeArtifactAbsPath); err != nil {
+		t.Fatalf("active artifact file missing after revoke: %v", err)
+	}
+
+	dryRun := decodeBrowserSessionProfileRetentionEnvelope(t, []byte(run(
+		"browser", "session", "profile", "retention", "cleanup",
+		"--session-id", int64String(created.ID),
+		"--json",
+	)))
+	if !dryRun.DryRun || dryRun.Apply || dryRun.Eligible != 1 || dryRun.Cleaned != 0 || dryRun.Failed != 0 || dryRun.Skipped != 1 {
+		t.Fatalf("dry-run retention = %+v, want one revoked eligible and one active skipped", dryRun)
+	}
+	if len(dryRun.Artifacts) != 1 || dryRun.Artifacts[0].ArtifactID != revokedArtifact.ID || dryRun.Artifacts[0].Action != "would_clean" || dryRun.Artifacts[0].Removed {
+		t.Fatalf("dry-run retention artifacts = %+v, want revoked artifact would_clean", dryRun.Artifacts)
+	}
+	if _, err := os.Stat(revokedArtifactAbsPath); err != nil {
+		t.Fatalf("revoked artifact file missing after dry-run: %v", err)
+	}
+
+	applied := decodeBrowserSessionProfileRetentionEnvelope(t, []byte(run(
+		"browser", "session", "profile", "retention", "cleanup",
+		"--session-id", int64String(created.ID),
+		"--apply",
+		"--json",
+	)))
+	if applied.DryRun || !applied.Apply || applied.Eligible != 1 || applied.Cleaned != 1 || applied.Failed != 0 || applied.Skipped != 1 {
+		t.Fatalf("apply retention = %+v, want one revoked cleaned and one active skipped", applied)
+	}
+	if _, err := os.Stat(revokedArtifactAbsPath); !os.IsNotExist(err) {
+		t.Fatalf("revoked artifact file exists after apply: err=%v", err)
+	}
+	if _, err := os.Stat(activeArtifactAbsPath); err != nil {
+		t.Fatalf("active artifact missing after apply: %v", err)
+	}
+
+	store := openLifecycleBrowserStore(t, root)
+	assertLifecycleBrowserArtifactStatus(t, store, revokedArtifact.ID, sqlite.BrowserEncryptedProfileArtifactStatusCleaned)
+	assertLifecycleBrowserArtifactStatus(t, store, activeArtifact.ID, sqlite.BrowserEncryptedProfileArtifactStatusEncrypted)
+	closeLifecycleBrowserStore(t, store)
+
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.profile_encrypted"`, `"type": "browser.profile_revoked"`, `"type": "browser.profile_cleaned"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want audit event %s", logs, want)
+		}
+	}
+	for _, forbidden := range forbiddenJSONMarkers {
+		if strings.Contains(logs, forbidden) {
+			t.Fatalf("logs output leaked forbidden marker %q: %s", forbidden, logs)
+		}
+	}
+	for _, rel := range []string{created.ProfilePath, "cookies", "credentials"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Fatalf("path %q exists after artifact status flow err=%v, want no profile/cookie/credential writes", rel, err)
 		}
 	}
 }
@@ -766,6 +1910,53 @@ type browserSessionPrepareProfileJSON struct {
 	ProfilePath       string `json:"profile_path"`
 	ProfilePathExists bool   `json:"profile_path_exists"`
 	Created           bool   `json:"created"`
+}
+
+type browserSessionProfileRetentionJSON struct {
+	DryRun    bool                                         `json:"dry_run"`
+	Apply     bool                                         `json:"apply"`
+	Eligible  int                                          `json:"eligible"`
+	Cleaned   int                                          `json:"cleaned"`
+	Failed    int                                          `json:"failed"`
+	Skipped   int                                          `json:"skipped"`
+	Artifacts []browserSessionProfileRetentionArtifactJSON `json:"artifacts"`
+}
+
+type browserSessionProfileRetentionArtifactJSON struct {
+	ArtifactID   int64  `json:"artifact_id"`
+	SessionID    int64  `json:"session_id"`
+	Status       string `json:"status"`
+	ArtifactPath string `json:"artifact_path"`
+	Action       string `json:"action"`
+	Removed      bool   `json:"removed"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+type browserSessionProfileArtifactJSON struct {
+	ID               int64  `json:"id"`
+	SessionID        int64  `json:"session_id"`
+	Status           string `json:"status"`
+	ProfilePath      string `json:"profile_path"`
+	ArtifactPath     string `json:"artifact_path"`
+	EncryptionKeyRef string `json:"encryption_key_ref"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
+	ExpiresAt        string `json:"expires_at,omitempty"`
+	RevokedAt        string `json:"revoked_at,omitempty"`
+	CleanedAt        string `json:"cleaned_at,omitempty"`
+	ErrorCode        string `json:"error_code,omitempty"`
+	ErrorMessage     string `json:"error_message,omitempty"`
+}
+
+type browserSessionProfileMaterializationJSON struct {
+	ArtifactID           int64  `json:"artifact_id"`
+	SessionID            int64  `json:"session_id"`
+	ArtifactPath         string `json:"artifact_path"`
+	MaterializationPath  string `json:"materialization_path"`
+	MaterializedFilePath string `json:"materialized_file_path,omitempty"`
+	ReadOnly             bool   `json:"read_only,omitempty"`
+	Removed              bool   `json:"removed,omitempty"`
 }
 
 type browserSessionLoginRequestJSON struct {
@@ -792,29 +1983,45 @@ type browserSessionHandoffJSON struct {
 	AllowedActions string `json:"allowed_actions"`
 }
 
-type browserSessionProfileArtifactJSON struct {
-	ID               int64  `json:"id"`
-	SessionID        int64  `json:"session_id"`
-	Status           string `json:"status"`
-	ProfilePath      string `json:"profile_path"`
-	ArtifactPath     string `json:"artifact_path"`
-	EncryptionKeyRef string `json:"encryption_key_ref"`
-	CreatedAt        string `json:"created_at"`
-	UpdatedAt        string `json:"updated_at"`
-	RevokedAt        string `json:"revoked_at,omitempty"`
-	CleanedAt        string `json:"cleaned_at,omitempty"`
-	ErrorCode        string `json:"error_code,omitempty"`
-	ErrorMessage     string `json:"error_message,omitempty"`
+type browserSessionRunnerJSON struct {
+	ID             int64   `json:"id"`
+	SessionID      int64   `json:"session_id"`
+	LoginRequestID int64   `json:"login_request_id"`
+	HandoffID      string  `json:"handoff_id"`
+	Status         string  `json:"status"`
+	ViewerURL      *string `json:"viewer_url"`
+	RunnerID       *string `json:"runner_id"`
+	ProcessID      *int64  `json:"process_id"`
+	BindAddr       *string `json:"bind_addr"`
+	PrivateBaseURL *string `json:"private_base_url"`
+	PublicBaseURL  *string `json:"public_base_url"`
+	ExpiresAt      string  `json:"expires_at"`
+	StartedAt      string  `json:"started_at,omitempty"`
+	ExitedAt       string  `json:"exited_at,omitempty"`
+	CompletedAt    string  `json:"completed_at,omitempty"`
+	CancelledAt    string  `json:"cancelled_at,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
+	ErrorCode      *string `json:"error_code"`
+	ErrorMessage   *string `json:"error_message"`
 }
 
-type browserSessionProfileMaterializationJSON struct {
-	ArtifactID           int64  `json:"artifact_id"`
-	SessionID            int64  `json:"session_id"`
-	ArtifactPath         string `json:"artifact_path"`
-	MaterializationPath  string `json:"materialization_path"`
-	MaterializedFilePath string `json:"materialized_file_path,omitempty"`
-	ReadOnly             bool   `json:"read_only,omitempty"`
-	Removed              bool   `json:"removed,omitempty"`
+type browserSessionRunnerPlanJSON struct {
+	ID             int64                                 `json:"id"`
+	SessionID      int64                                 `json:"session_id"`
+	LoginRequestID int64                                 `json:"login_request_id"`
+	HandoffID      string                                `json:"handoff_id"`
+	Commands       []browserSessionRunnerPlanCommandJSON `json:"commands"`
+	BindAddr       string                                `json:"bind_addr"`
+	PrivateBaseURL string                                `json:"private_base_url"`
+	ViewerURL      string                                `json:"viewer_url"`
+	TimeoutSeconds int                                   `json:"timeout_seconds"`
+}
+
+type browserSessionRunnerPlanCommandJSON struct {
+	Role string   `json:"role"`
+	Path string   `json:"path"`
+	Args []string `json:"args"`
 }
 
 func decodeBrowserSessionPrepareProfileEnvelope(t *testing.T, payload []byte) browserSessionPrepareProfileJSON {
@@ -826,6 +2033,50 @@ func decodeBrowserSessionPrepareProfileEnvelope(t *testing.T, payload []byte) br
 		t.Fatalf("browser session prepare profile json decode error = %v; output=%s", err, string(payload))
 	}
 	return envelope.Profile
+}
+
+func decodeBrowserSessionProfileRetentionEnvelope(t *testing.T, payload []byte) browserSessionProfileRetentionJSON {
+	t.Helper()
+	var envelope struct {
+		Retention browserSessionProfileRetentionJSON `json:"retention"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session profile retention json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Retention
+}
+
+func decodeBrowserSessionProfileArtifactEnvelope(t *testing.T, payload []byte) browserSessionProfileArtifactJSON {
+	t.Helper()
+	var envelope struct {
+		Artifact browserSessionProfileArtifactJSON `json:"artifact"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session profile artifact json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Artifact
+}
+
+func decodeBrowserSessionProfileArtifactListEnvelope(t *testing.T, payload []byte) []browserSessionProfileArtifactJSON {
+	t.Helper()
+	var envelope struct {
+		Artifacts []browserSessionProfileArtifactJSON `json:"artifacts"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session profile artifact list json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Artifacts
+}
+
+func decodeBrowserSessionProfileMaterializationEnvelope(t *testing.T, payload []byte) browserSessionProfileMaterializationJSON {
+	t.Helper()
+	var envelope struct {
+		Materialization browserSessionProfileMaterializationJSON `json:"materialization"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session profile materialization json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Materialization
 }
 
 func decodeBrowserSessionEnvelope(t *testing.T, payload []byte) browserSessionJSON {
@@ -861,24 +2112,135 @@ func decodeBrowserSessionHandoffEnvelope(t *testing.T, payload []byte) browserSe
 	return envelope.Handoff
 }
 
-func decodeBrowserSessionProfileArtifactEnvelope(t *testing.T, payload []byte) browserSessionProfileArtifactJSON {
+func decodeBrowserSessionRunnerEnvelope(t *testing.T, payload []byte) browserSessionRunnerJSON {
 	t.Helper()
 	var envelope struct {
-		Artifact browserSessionProfileArtifactJSON `json:"artifact"`
+		Runner browserSessionRunnerJSON `json:"runner"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil {
-		t.Fatalf("browser session profile artifact json decode error = %v; output=%s", err, string(payload))
+		t.Fatalf("browser session runner json decode error = %v; output=%s", err, string(payload))
 	}
-	return envelope.Artifact
+	return envelope.Runner
 }
 
-func decodeBrowserSessionProfileMaterializationEnvelope(t *testing.T, payload []byte) browserSessionProfileMaterializationJSON {
+func decodeBrowserSessionRunnerPlanEnvelope(t *testing.T, payload []byte) browserSessionRunnerPlanJSON {
 	t.Helper()
 	var envelope struct {
-		Materialization browserSessionProfileMaterializationJSON `json:"materialization"`
+		Plan browserSessionRunnerPlanJSON `json:"plan"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil {
-		t.Fatalf("browser session profile materialization json decode error = %v; output=%s", err, string(payload))
+		t.Fatalf("browser session runner plan json decode error = %v; output=%s", err, string(payload))
 	}
-	return envelope.Materialization
+	return envelope.Plan
+}
+
+func novncPlanArgs(runnerID int64, commandPath string, bindAddr string) []string {
+	return []string{
+		"browser", "session", "runner", "plan-novnc",
+		"--id", int64String(runnerID),
+		"--browser-command", commandPath,
+		"--browser-allowed-command", commandPath,
+		"--display-command", commandPath,
+		"--display-allowed-command", commandPath,
+		"--novnc-command", commandPath,
+		"--novnc-allowed-command", commandPath,
+		"--bind-addr", bindAddr,
+		"--private-base-url", "https://odin-handoff.tailnet.local",
+		"--timeout-seconds", "300",
+		"--json",
+	}
+}
+
+func testLifecycleExecutablePath(t *testing.T, name string) string {
+	t.Helper()
+	for _, dir := range []string{"/usr/bin", "/bin"} {
+		path := filepath.Join(dir, name)
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	t.Fatalf("required fixture executable %q not found", name)
+	return ""
+}
+
+func assertNoBrowserSessionArtifacts(t *testing.T, root string) {
+	t.Helper()
+	for _, relativePath := range []string{
+		"browser-sessions",
+		"cookies",
+		"cookie",
+		"credentials",
+		"profile-bytes",
+	} {
+		if _, err := os.Stat(filepath.Join(root, relativePath)); !os.IsNotExist(err) {
+			t.Fatalf("%s exists after NoVNC fixture launch err=%v, want absent", relativePath, err)
+		}
+	}
+}
+
+func openLifecycleBrowserStore(t *testing.T, root string) *sqlite.Store {
+	t.Helper()
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("Open store error = %v", err)
+	}
+	return store
+}
+
+func closeLifecycleBrowserStore(t *testing.T, store *sqlite.Store) {
+	t.Helper()
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close store error = %v", err)
+	}
+}
+
+func createLifecycleBrowserArtifact(t *testing.T, ctx context.Context, store *sqlite.Store, root string, session browserSessionJSON, name string) sqlite.BrowserEncryptedProfileArtifact {
+	t.Helper()
+	path := filepath.ToSlash(filepath.Join("browser-sessions", "encrypted-profiles", name))
+	writeLifecycleRetentionMarker(t, filepath.Join(root, filepath.FromSlash(path)))
+	artifact, err := store.CreateBrowserEncryptedProfileArtifact(ctx, sqlite.CreateBrowserEncryptedProfileArtifactParams{
+		SessionID:             session.ID,
+		ProfilePath:           session.ProfilePath,
+		EncryptedArtifactPath: path,
+		EncryptionKeyRef:      "test-key:v1",
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserEncryptedProfileArtifact(%s) error = %v", name, err)
+	}
+	return artifact
+}
+
+func assertLifecycleBrowserArtifactStatus(t *testing.T, store *sqlite.Store, id int64, want sqlite.BrowserEncryptedProfileArtifactStatus) sqlite.BrowserEncryptedProfileArtifact {
+	t.Helper()
+	artifact, err := store.GetBrowserEncryptedProfileArtifact(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetBrowserEncryptedProfileArtifact(%d) error = %v", id, err)
+	}
+	if artifact.Status != want {
+		t.Fatalf("artifact %d status = %q, want %q", id, artifact.Status, want)
+	}
+	return artifact
+}
+
+func writeLifecycleRetentionMarker(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte("fixture marker"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+}
+
+func writeLifecycleExecutable(t *testing.T, name string, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+	return path
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }

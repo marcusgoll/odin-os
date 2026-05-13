@@ -264,11 +264,11 @@ printf '{"status":"completed","tool_key":"browser_x_post_publish","summary":"Pub
 		"post_text": "Approved X post ready to publish natively.",
 		"label":     "social-outcome-2",
 	})
-	if err != nil {
-		t.Fatalf("browser_x_post_publish invoke error = %v", err)
+	if err == nil {
+		t.Fatalf("browser_x_post_publish invoke error = nil, result = %+v, want approval-required refusal", xPublishResult)
 	}
-	if !containsString(xPublishResult.Artifacts, "publish_url=https://x.com/marcus/status/999999999") {
-		t.Fatalf("x publish artifacts = %+v, want publish url", xPublishResult.Artifacts)
+	if !strings.Contains(err.Error(), "approval_required") {
+		t.Fatalf("browser_x_post_publish invoke error = %v, want approval_required", err)
 	}
 
 	xReplyPublishResult, err := xPublish.Invoke(map[string]string{
@@ -277,22 +277,11 @@ printf '{"status":"completed","tool_key":"browser_x_post_publish","summary":"Pub
 		"in_reply_to_url": "https://x.com/example/status/123",
 		"label":           "social-outcome-9",
 	})
-	if err != nil {
-		t.Fatalf("browser_x_post_publish reply invoke error = %v", err)
+	if err == nil {
+		t.Fatalf("browser_x_post_publish reply invoke error = nil, result = %+v, want approval-required refusal", xReplyPublishResult)
 	}
-	if !containsString(xReplyPublishResult.Artifacts, "publish_url=https://x.com/marcus/status/999999999") {
-		t.Fatalf("x reply publish artifacts = %+v, want publish url", xReplyPublishResult.Artifacts)
-	}
-
-	requestBytes, err = os.ReadFile(requestPath)
-	if err != nil {
-		t.Fatalf("ReadFile(requestPath x publish) error = %v", err)
-	}
-	if !strings.Contains(string(requestBytes), `"content_kind":"reply"`) {
-		t.Fatalf("x publish request = %q, want reply content_kind", string(requestBytes))
-	}
-	if !strings.Contains(string(requestBytes), `"in_reply_to_url":"https://x.com/example/status/123"`) {
-		t.Fatalf("x publish request = %q, want in_reply_to_url", string(requestBytes))
+	if !strings.Contains(err.Error(), "approval_required") {
+		t.Fatalf("browser_x_post_publish reply invoke error = %v, want approval_required", err)
 	}
 }
 

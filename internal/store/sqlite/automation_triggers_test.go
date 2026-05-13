@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -117,5 +118,24 @@ func TestAutomationTriggerFireMaterializesGovernedWorkItemIdempotently(t *testin
 	}
 	if counts[runtimeevents.EventAutomationTriggerMaterialized] != 1 {
 		t.Fatalf("materialized events = %d, want one idempotent materialization", counts[runtimeevents.EventAutomationTriggerMaterialized])
+	}
+	var duplicateEvaluated runtimeevents.AutomationTriggerEvaluatedPayload
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != runtimeevents.EventAutomationTriggerEvaluated {
+			continue
+		}
+		if err := json.Unmarshal(events[i].Payload, &duplicateEvaluated); err != nil {
+			t.Fatalf("decode evaluated payload: %v", err)
+		}
+		break
+	}
+	if duplicateEvaluated.CreatedWorkItem {
+		t.Fatalf("duplicate evaluated CreatedWorkItem = true, want reused materialization evidence")
+	}
+	if duplicateEvaluated.Envelope == nil {
+		t.Fatalf("duplicate evaluated envelope = nil, want deterministic envelope")
+	}
+	if duplicateEvaluated.Envelope.DedupeKey != "default:nightly-ops:manual:operator-check" {
+		t.Fatalf("duplicate evaluated dedupe_key = %q, want stable materialization key", duplicateEvaluated.Envelope.DedupeKey)
 	}
 }

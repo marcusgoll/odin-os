@@ -15,13 +15,21 @@ func TestParseBrowserRunDefaultsAllowedDomainFromURL(t *testing.T) {
 	}
 }
 
+func TestParseBrowserRunAcceptsTaskIDForWorkEvidence(t *testing.T) {
+	command, err := ParseBrowser([]string{"run", "--task-id", "77", "--url", "https://example.com/research", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser() error = %v", err)
+	}
+	if command.TaskID != 77 || command.GoalID != 0 {
+		t.Fatalf("TaskID/GoalID = %d/%d, want 77/0", command.TaskID, command.GoalID)
+	}
+}
+
 func TestParseBrowserRunAcceptsSafetyOptions(t *testing.T) {
 	command, err := ParseBrowser([]string{
 		"run",
 		"--goal-id", "42",
-		"--task-id", "9",
 		"--url", "https://docs.example.com/research",
-		"--session-id", "7",
 		"--objective", "Collect public docs",
 		"--allowed-domain", "example.com",
 		"--max-pages", "3",
@@ -34,21 +42,25 @@ func TestParseBrowserRunAcceptsSafetyOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseBrowser() error = %v", err)
 	}
-	if command.TaskID != 9 || command.Objective != "Collect public docs" || command.SessionID != 7 || command.AllowedDomains[0] != "example.com" || command.MaxPages != 3 || command.MaxDurationSeconds != 45 || command.WorkerMode != "browser" || !command.EvidenceRequired || command.Actions[0] != "read" {
+	if command.Objective != "Collect public docs" || command.AllowedDomains[0] != "example.com" || command.MaxPages != 3 || command.MaxDurationSeconds != 45 || command.WorkerMode != "browser" || !command.EvidenceRequired || command.Actions[0] != "read" {
 		t.Fatalf("command = %+v, want parsed safety options", command)
 	}
 }
 
-func TestParseBrowserRunCanTargetWorkItemWithoutGoal(t *testing.T) {
-	command, err := ParseBrowser([]string{"run", "--task-id", "7", "--url", "https://example.com/research", "--json"})
+func TestParseBrowserRunAcceptsBrowserSessionReference(t *testing.T) {
+	command, err := ParseBrowser([]string{
+		"run",
+		"--goal-id", "42",
+		"--url", "https://docs.example.com/research",
+		"--allowed-domain", "example.com",
+		"--session-id", "7",
+		"--json",
+	})
 	if err != nil {
 		t.Fatalf("ParseBrowser() error = %v", err)
 	}
-	if command.TaskID != 7 || command.GoalID != 0 {
-		t.Fatalf("command IDs = task:%d goal:%d, want task only", command.TaskID, command.GoalID)
-	}
-	if len(command.AllowedDomains) != 1 || command.AllowedDomains[0] != "example.com" {
-		t.Fatalf("AllowedDomains = %#v, want default host", command.AllowedDomains)
+	if command.SessionID != 7 {
+		t.Fatalf("command.SessionID = %d, want 7", command.SessionID)
 	}
 }
 
@@ -92,6 +104,9 @@ func TestParseBrowserSessionValidatesRequiredFields(t *testing.T) {
 	if _, err := ParseBrowser([]string{"session", "status", "--id", "42", "--status", "unknown", "--json"}); err == nil {
 		t.Fatal("ParseBrowser(session status unknown status) error = nil, want error")
 	}
+	if _, err := ParseBrowser([]string{"session", "status", "--id", "42", "--status", "requires_attended_login", "--json"}); err != nil {
+		t.Fatalf("ParseBrowser(session status requires_attended_login) error = %v", err)
+	}
 }
 
 func TestParseBrowserSessionLoginRequestCommands(t *testing.T) {
@@ -132,6 +147,96 @@ func TestParseBrowserSessionHandoffShowCommand(t *testing.T) {
 	}
 }
 
+func TestParseBrowserSessionRunnerCommands(t *testing.T) {
+	create, err := ParseBrowser([]string{"session", "runner", "create", "--login-request-id", "7", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner create) error = %v", err)
+	}
+	if create.Name != "session" || create.SessionAction != "runner" || create.RunnerAction != "create" || create.LoginRequestID != 7 || !create.JSON {
+		t.Fatalf("create command = %+v, want parsed runner create", create)
+	}
+
+	list, err := ParseBrowser([]string{"session", "runner", "list", "--login-request-id", "7", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner list) error = %v", err)
+	}
+	if list.SessionAction != "runner" || list.RunnerAction != "list" || list.LoginRequestID != 7 || !list.JSON {
+		t.Fatalf("list command = %+v, want parsed runner list", list)
+	}
+
+	show, err := ParseBrowser([]string{"session", "runner", "show", "--id", "3", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner show) error = %v", err)
+	}
+	if show.SessionAction != "runner" || show.RunnerAction != "show" || show.ID != 3 || !show.JSON {
+		t.Fatalf("show command = %+v, want parsed runner show", show)
+	}
+
+	start, err := ParseBrowser([]string{"session", "runner", "start", "--id", "3", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner start) error = %v", err)
+	}
+	if start.SessionAction != "runner" || start.RunnerAction != "start" || start.ID != 3 || !start.JSON {
+		t.Fatalf("start command = %+v, want parsed runner start", start)
+	}
+
+	status, err := ParseBrowser([]string{"session", "runner", "status", "--id", "3", "--status", "started", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner status) error = %v", err)
+	}
+	if status.SessionAction != "runner" || status.RunnerAction != "status" || status.ID != 3 || status.Status != "started" || !status.JSON {
+		t.Fatalf("status command = %+v, want parsed runner status", status)
+	}
+
+	cancel, err := ParseBrowser([]string{"session", "runner", "cancel", "--id", "3", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner cancel) error = %v", err)
+	}
+	if cancel.SessionAction != "runner" || cancel.RunnerAction != "cancel" || cancel.ID != 3 || !cancel.JSON {
+		t.Fatalf("cancel command = %+v, want parsed runner cancel", cancel)
+	}
+
+	plan, err := ParseBrowser([]string{
+		"session", "runner", "plan-novnc",
+		"--id", "3",
+		"--browser-command", "/usr/bin/chromium",
+		"--browser-allowed-command", "/usr/bin/chromium",
+		"--display-command", "/usr/bin/x11vnc",
+		"--display-allowed-command", "/usr/bin/x11vnc",
+		"--novnc-command", "/usr/bin/websockify",
+		"--novnc-allowed-command", "/usr/bin/websockify",
+		"--bind-addr", "127.0.0.1:6080",
+		"--private-base-url", "https://odin-handoff.tailnet.local",
+		"--timeout-seconds", "300",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session runner plan-novnc) error = %v", err)
+	}
+	if plan.SessionAction != "runner" || plan.RunnerAction != "plan-novnc" || plan.ID != 3 || plan.NoVNCBrowserCommand != "/usr/bin/chromium" || plan.NoVNCDisplayCommand != "/usr/bin/x11vnc" || plan.NoVNCCommand != "/usr/bin/websockify" || plan.NoVNCBindAddr != "127.0.0.1:6080" || plan.NoVNCPrivateBaseURL != "https://odin-handoff.tailnet.local" || plan.NoVNCTimeoutSeconds != 300 || !plan.JSON {
+		t.Fatalf("plan command = %+v, want parsed NoVNC dry-run plan config", plan)
+	}
+	if len(plan.NoVNCBrowserAllowedCommands) != 1 || plan.NoVNCBrowserAllowedCommands[0] != "/usr/bin/chromium" || len(plan.NoVNCDisplayAllowedCommands) != 1 || plan.NoVNCDisplayAllowedCommands[0] != "/usr/bin/x11vnc" || len(plan.NoVNCAllowedCommands) != 1 || plan.NoVNCAllowedCommands[0] != "/usr/bin/websockify" {
+		t.Fatalf("plan allowed commands = browser %+v display %+v novnc %+v, want parsed allowlists", plan.NoVNCBrowserAllowedCommands, plan.NoVNCDisplayAllowedCommands, plan.NoVNCAllowedCommands)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "runner", "create", "--id", "3", "--login-request-id", "7", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session runner create with id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "runner", "status", "--id", "3", "--status", "requested", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session runner status requested) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "runner", "start", "--id", "3", "--status", "started", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session runner start with status) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "runner", "plan-novnc", "--id", "3", "--status", "started", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session runner plan-novnc with status) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "runner", "approve", "--id", "3", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(session runner unsupported action) error = nil, want rejection")
+	}
+}
+
 func TestParseBrowserSessionVerifyCommand(t *testing.T) {
 	command, err := ParseBrowser([]string{"session", "verify", "--id", "42", "--login-request-id", "7", "--json"})
 	if err != nil {
@@ -162,24 +267,160 @@ func TestParseBrowserSessionPrepareProfileCommand(t *testing.T) {
 	}
 }
 
-func TestParseBrowserSessionProfileArtifactCommands(t *testing.T) {
-	create, err := ParseBrowser([]string{"session", "profile", "artifact", "create-fixture", "--session-id", "42", "--name", "google-main", "--plaintext-file", "/tmp/profile-fixture.json", "--json"})
+func TestParseBrowserSessionProfileRetentionCleanupCommand(t *testing.T) {
+	command, err := ParseBrowser([]string{"session", "profile", "retention", "cleanup", "--session-id", "42", "--apply", "--json"})
 	if err != nil {
-		t.Fatalf("ParseBrowser(profile artifact create-fixture) error = %v", err)
+		t.Fatalf("ParseBrowser(session profile retention cleanup) error = %v", err)
 	}
-	if create.Name != "session" || create.SessionAction != "profile" || create.ProfileAction != "artifact" || create.ArtifactAction != "create-fixture" || create.SessionID != 42 || create.ArtifactName != "google-main" || create.PlaintextFile != "/tmp/profile-fixture.json" || !create.JSON {
-		t.Fatalf("create command = %+v, want parsed profile artifact create-fixture", create)
+	if command.Name != "session" || command.SessionAction != "profile" || command.ProfileAction != "retention" || command.RetentionAction != "cleanup" || command.SessionID != 42 || !command.Apply || !command.JSON {
+		t.Fatalf("command = %+v, want parsed profile retention cleanup", command)
 	}
 
-	materialize, err := ParseBrowser([]string{"session", "profile", "artifact", "materialize", "--id", "9", "--target-dir", "runtime/browser-profile-materializations/google-main", "--json"})
+	dryRun, err := ParseBrowser([]string{"session", "profile", "retention", "cleanup", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session profile retention cleanup dry-run) error = %v", err)
+	}
+	if dryRun.Apply || dryRun.SessionID != 0 || dryRun.ProfileAction != "retention" || dryRun.RetentionAction != "cleanup" {
+		t.Fatalf("dryRun command = %+v, want global dry-run cleanup", dryRun)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "profile", "retention", "cleanup", "--id", "42", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile retention cleanup with --id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "retention", "cleanup", "--session-id", "0", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile retention cleanup with invalid session id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "rotate", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile rotate) error = nil, want rejection")
+	}
+}
+
+func TestParseBrowserSessionProfileArtifactCreateFixtureCommand(t *testing.T) {
+	command, err := ParseBrowser([]string{
+		"session", "profile", "artifact", "create-fixture",
+		"--session-id", "42",
+		"--name", "fixture-one",
+		"--plaintext-file", "/tmp/fixture-profile.txt",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session profile artifact create-fixture) error = %v", err)
+	}
+	if command.Name != "session" || command.SessionAction != "profile" || command.ProfileAction != "artifact" || command.ArtifactAction != "create-fixture" || command.SessionID != 42 || command.ArtifactName != "fixture-one" || command.PlaintextFile != "/tmp/fixture-profile.txt" || !command.JSON {
+		t.Fatalf("command = %+v, want parsed fixture artifact create", command)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "create-fixture", "--name", "fixture-one", "--plaintext-file", "/tmp/fixture-profile.txt", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(create-fixture missing session id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "create-fixture", "--session-id", "42", "--plaintext-file", "/tmp/fixture-profile.txt", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(create-fixture missing name) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "create-fixture", "--session-id", "42", "--name", "fixture-one", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(create-fixture missing plaintext file) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "create-fixture", "--session-id", "42", "--name", "fixture-one", "--plaintext-file", "/tmp/fixture-profile.txt", "--apply", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(create-fixture with apply) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "rotate", "--session-id", "42", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact unsupported action) error = nil, want rejection")
+	}
+}
+
+func TestParseBrowserSessionProfileArtifactStatusCommands(t *testing.T) {
+	show, err := ParseBrowser([]string{
+		"session", "profile", "artifact", "show",
+		"--id", "9",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(profile artifact show) error = %v", err)
+	}
+	if show.Name != "session" || show.SessionAction != "profile" || show.ProfileAction != "artifact" || show.ArtifactAction != "show" || show.ID != 9 || !show.JSON {
+		t.Fatalf("show command = %+v, want parsed artifact show", show)
+	}
+
+	list, err := ParseBrowser([]string{
+		"session", "profile", "artifact", "list",
+		"--session-id", "42",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(profile artifact list) error = %v", err)
+	}
+	if list.SessionAction != "profile" || list.ProfileAction != "artifact" || list.ArtifactAction != "list" || list.SessionID != 42 || !list.JSON {
+		t.Fatalf("list command = %+v, want parsed artifact list", list)
+	}
+
+	revoke, err := ParseBrowser([]string{
+		"session", "profile", "artifact", "revoke",
+		"--id", "9",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(profile artifact revoke) error = %v", err)
+	}
+	if revoke.SessionAction != "profile" || revoke.ProfileAction != "artifact" || revoke.ArtifactAction != "revoke" || revoke.ID != 9 || !revoke.JSON {
+		t.Fatalf("revoke command = %+v, want parsed artifact revoke", revoke)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "show", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact show missing id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "list", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact list missing session id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "revoke", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact revoke missing id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "show", "--id", "9", "--plaintext-file", "/tmp/plain", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact show with plaintext file) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "list", "--session-id", "42", "--apply", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact list with apply) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "revoke", "--id", "9", "--session-id", "42", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact revoke with session id) error = nil, want rejection")
+	}
+}
+
+func TestParseBrowserSessionProfileArtifactMaterializationCommands(t *testing.T) {
+	materialize, err := ParseBrowser([]string{
+		"session", "profile", "artifact", "materialize",
+		"--id", "9",
+		"--target-dir", "runtime/browser-profile-materializations/proof",
+		"--json",
+	})
 	if err != nil {
 		t.Fatalf("ParseBrowser(profile artifact materialize) error = %v", err)
 	}
-	if materialize.ArtifactAction != "materialize" || materialize.ID != 9 || materialize.TargetDir != "runtime/browser-profile-materializations/google-main" || !materialize.JSON {
-		t.Fatalf("materialize command = %+v, want parsed materialize", materialize)
+	if materialize.SessionAction != "profile" || materialize.ProfileAction != "artifact" || materialize.ArtifactAction != "materialize" || materialize.ID != 9 || materialize.TargetDir != "runtime/browser-profile-materializations/proof" || !materialize.JSON {
+		t.Fatalf("materialize command = %+v, want parsed artifact materialization", materialize)
 	}
 
-	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "create-fixture", "--session-id", "42", "--name", "google-main", "--json"}); err == nil || !strings.Contains(err.Error(), "--plaintext-file is required") {
-		t.Fatalf("ParseBrowser(profile artifact create-fixture missing plaintext) error = %v, want plaintext requirement", err)
+	cleanup, err := ParseBrowser([]string{
+		"session", "profile", "artifact", "cleanup-materialization",
+		"--id", "9",
+		"--target-dir", "runtime/browser-profile-materializations/proof",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseBrowser(profile artifact cleanup-materialization) error = %v", err)
+	}
+	if cleanup.ArtifactAction != "cleanup-materialization" || cleanup.ID != 9 || cleanup.TargetDir != "runtime/browser-profile-materializations/proof" || !cleanup.JSON {
+		t.Fatalf("cleanup command = %+v, want parsed artifact materialization cleanup", cleanup)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "materialize", "--target-dir", "runtime/browser-profile-materializations/proof", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact materialize missing id) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "materialize", "--id", "9", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact materialize missing target dir) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "cleanup-materialization", "--id", "9", "--target-dir", "runtime/browser-profile-materializations/proof", "--plaintext-file", "/tmp/plain", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact cleanup-materialization with plaintext file) error = nil, want rejection")
+	}
+	if _, err := ParseBrowser([]string{"session", "profile", "artifact", "materialize", "--id", "9", "--target-dir", "runtime/browser-profile-materializations/proof", "--apply", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(profile artifact materialize with apply) error = nil, want rejection")
 	}
 }

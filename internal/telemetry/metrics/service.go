@@ -11,20 +11,23 @@ import (
 )
 
 type Snapshot struct {
-	GeneratedAt        time.Time
-	ActiveRuns         int
-	BlockedItems       int
-	ApprovalsWaiting   int
-	OpenIncidents      int
-	EscalatedIncidents int
-	ActiveRecoveries   int
-	QueuedTasks        int
-	StaleExecutors     int
-	StaleSources       int
-	StaleProjections   int
-	MediaOpenIncidents int
-	MediaCandidates    int
-	OS                 OSSnapshot
+	GeneratedAt             time.Time
+	ActiveRuns              int
+	BlockedItems            int
+	ApprovalsWaiting        int
+	OpenIncidents           int
+	EscalatedIncidents      int
+	ActiveRecoveries        int
+	QueuedTasks             int
+	ReviewQueueItems        int
+	FailedWorkItems         int
+	RecoveryRecommendations int
+	StaleExecutors          int
+	StaleSources            int
+	StaleProjections        int
+	MediaOpenIncidents      int
+	MediaCandidates         int
+	OS                      OSSnapshot
 }
 
 type OSSnapshot struct {
@@ -84,6 +87,9 @@ func Render(snapshot Snapshot) string {
 		fmt.Sprintf("odin_escalated_incidents %d", snapshot.EscalatedIncidents),
 		fmt.Sprintf("odin_active_recoveries %d", snapshot.ActiveRecoveries),
 		fmt.Sprintf("odin_queued_tasks %d", snapshot.QueuedTasks),
+		fmt.Sprintf("odin_review_queue_items %d", snapshot.ReviewQueueItems),
+		fmt.Sprintf("odin_failed_work_items %d", snapshot.FailedWorkItems),
+		fmt.Sprintf("odin_recovery_recommendations %d", snapshot.RecoveryRecommendations),
 		fmt.Sprintf("odin_stale_executors %d", snapshot.StaleExecutors),
 		fmt.Sprintf("odin_stale_sources %d", snapshot.StaleSources),
 		fmt.Sprintf("odin_stale_projections %d", snapshot.StaleProjections),
@@ -178,6 +184,10 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	recoveries, err := projections.ListRecoveryViews(ctx, service.DB)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	actualUse, err := projections.GetActualUseSummaryView(ctx, service.DB, "")
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -290,19 +300,22 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 	}
 
 	snapshot := Snapshot{
-		GeneratedAt:        now,
-		ActiveRuns:         len(activeRuns),
-		BlockedItems:       len(blocked),
-		ApprovalsWaiting:   len(approvals),
-		OpenIncidents:      len(incidents),
-		EscalatedIncidents: escalatedIncidents,
-		ActiveRecoveries:   countActiveRecoveries(recoveries),
-		QueuedTasks:        queuedTasks,
-		StaleExecutors:     staleExecutors,
-		StaleSources:       staleSources,
-		StaleProjections:   staleProjections,
-		MediaOpenIncidents: mediaOpenIncidents,
-		MediaCandidates:    mediaCandidates,
+		GeneratedAt:             now,
+		ActiveRuns:              len(activeRuns),
+		BlockedItems:            len(blocked),
+		ApprovalsWaiting:        len(approvals),
+		OpenIncidents:           len(incidents),
+		EscalatedIncidents:      escalatedIncidents,
+		ActiveRecoveries:        countActiveRecoveries(recoveries),
+		QueuedTasks:             queuedTasks,
+		ReviewQueueItems:        actualUse.ReviewQueueItems,
+		FailedWorkItems:         actualUse.FailedWorkItems,
+		RecoveryRecommendations: actualUse.RecoveryRecommendations,
+		StaleExecutors:          staleExecutors,
+		StaleSources:            staleSources,
+		StaleProjections:        staleProjections,
+		MediaOpenIncidents:      mediaOpenIncidents,
+		MediaCandidates:         mediaCandidates,
 	}
 	snapshot.OS = deriveOSSnapshot(snapshot, executorSamples == 0 || sourceSamples == 0 || projectionSamples == 0 || staleExecutorTelemetry > 0, countActiveIncidents(incidents))
 	return snapshot, nil

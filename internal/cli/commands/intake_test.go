@@ -134,6 +134,27 @@ func TestParseIntakeRawCreateTextShorthand(t *testing.T) {
 	}
 }
 
+func TestParseIntakeRawCreateBodyAlias(t *testing.T) {
+	t.Parallel()
+
+	command, err := ParseIntake([]string{
+		"raw",
+		"create",
+		"--source", "cli",
+		"--body", "Test intake: create a draft task to review Odin readiness",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseIntake(raw create --body) error = %v", err)
+	}
+	if command.Name != "raw" || command.RawAction != "create" || command.Title != "Test intake: create a draft task to review Odin readiness" {
+		t.Fatalf("command = %+v, want raw create body title", command)
+	}
+	if command.Source != "cli" || command.Type != "request" || command.DedupKey == "" || command.RequestedBy != "cli" || !command.JSON {
+		t.Fatalf("command = %+v, want source cli with default type/dedupe/requested-by/json", command)
+	}
+}
+
 func TestParseIntakeRawListAndShow(t *testing.T) {
 	t.Parallel()
 
@@ -184,6 +205,23 @@ func TestParseIntakeReviewCommands(t *testing.T) {
 		}
 		if command.Name != "review" || command.ReviewAction != action || command.ShowRef != "intake-42" || !command.JSON {
 			t.Fatalf("command = %+v, want review %s intake-42 json", command, action)
+		}
+	}
+}
+
+func TestParseIntakeNestedHelp(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{"raw", "create", "--help"},
+		{"review", "list", "--help"},
+	} {
+		command, err := ParseIntake(args)
+		if err != nil {
+			t.Fatalf("ParseIntake(%v) error = %v", args, err)
+		}
+		if command.Name != "help" {
+			t.Fatalf("ParseIntake(%v) = %+v, want help command", args, command)
 		}
 	}
 }

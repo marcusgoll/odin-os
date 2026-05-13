@@ -15,7 +15,9 @@ import (
 	"odin-os/internal/cli/scope"
 	clistate "odin-os/internal/cli/state"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/skillbinding"
 	"odin-os/internal/runtime/jobs"
+	"odin-os/internal/runtime/projections"
 	"odin-os/internal/skills"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/telemetry/logs"
@@ -27,7 +29,7 @@ func runSkills(ctx context.Context, app bootstrap.App, args []string, stdout io.
 		return err
 	}
 	if len(remaining) == 0 {
-		return fmt.Errorf("usage: odin skills [list|get|create|update|delete|invoke|artifacts|artifact] ... [--json]")
+		return fmt.Errorf("usage: odin skills [list|get|create|update|delete|invoke|run|artifacts|artifact] ... [--json]")
 	}
 
 	logger := logs.Logger{Writer: os.Stderr}
@@ -269,9 +271,126 @@ func runSkills(ctx context.Context, app bootstrap.App, args []string, stdout io.
 		}
 		_, err = fmt.Fprintf(stdout, "skill=%s status=%s summary=%s\n", response.SkillKey, response.Status, response.Summary)
 		return err
+	case "run":
+		if len(remaining) != 2 {
+			return fmt.Errorf("usage: odin skills run <task-id|task-key> [--json]")
+		}
+		return runSkillInvocationBinding(ctx, app, service, remaining[1], jsonOutput, stdout)
 	default:
 		return fmt.Errorf("unknown skills subcommand: %s", remaining[0])
 	}
+}
+
+type skillInvocationRunView struct {
+	TaskID        int64                 `json:"task_id"`
+	TaskKey       string                `json:"task_key"`
+	TaskStatus    string                `json:"task_status"`
+	SkillKey      string                `json:"skill_key"`
+	Status        string                `json:"status"`
+	Summary       string                `json:"summary"`
+	RuntimeEffect string                `json:"runtime_effect"`
+	ArtifactID    int64                 `json:"artifact_id,omitempty"`
+	ReviewID      string                `json:"review_id,omitempty"`
+	Response      skills.InvokeResponse `json:"response"`
+}
+
+func runSkillInvocationBinding(ctx context.Context, app bootstrap.App, service skills.Service, taskRef string, jsonOutput bool, stdout io.Writer) error {
+	if app.Store == nil {
+		return fmt.Errorf("skill invocation binding requires runtime store")
+	}
+	task, err := findSkillInvocationTask(ctx, app.Store, taskRef)
+	if err != nil {
+		return err
+	}
+	if task.Status != "queued" {
+		return fmt.Errorf("skill invocation task %s must be queued, got %s", task.Key, task.Status)
+	}
+	binding, ok, err := skillbinding.DecodeArtifacts(task.ArtifactsJSON)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("task %s has no skill invocation binding", task.Key)
+	}
+	project, err := app.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+	manifest, ok := app.Registry.Lookup(project.Key)
+	if !ok {
+		return fmt.Errorf("unknown project %q", project.Key)
+	}
+	input, err := skillbinding.InputMap(binding)
+	if err != nil {
+		return err
+	}
+	response, err := service.Invoke(ctx, skills.InvokeRequest{
+		Key:   binding.SkillKey,
+		Input: input,
+		Context: skills.InvocationContext{
+			ResolvedScopeKind: task.Scope,
+			Project: &skills.InvocationProject{
+				ID:            project.ID,
+				Key:           project.Key,
+				SystemProject: manifest.SystemProject,
+			},
+			Manifest: manifest,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	artifactID := int64(0)
+	reviewID := ""
+	if response.ReviewArtifact != nil {
+		artifactID = response.ReviewArtifact.ID
+		reviewID = fmt.Sprintf("skill-artifact:%d", artifactID)
+	}
+	updated, err := app.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID:         task.ID,
+		Status:         "completed",
+		Summary:        response.Summary,
+		TerminalReason: "skill_invocation_completed",
+		ArtifactsJSON:  task.ArtifactsJSON,
+	})
+	if err != nil {
+		return err
+	}
+	view := skillInvocationRunView{
+		TaskID:        updated.ID,
+		TaskKey:       updated.Key,
+		TaskStatus:    updated.Status,
+		SkillKey:      response.SkillKey,
+		Status:        response.Status,
+		Summary:       response.Summary,
+		RuntimeEffect: response.RuntimeEffect,
+		ArtifactID:    artifactID,
+		ReviewID:      reviewID,
+		Response:      response,
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "task=%s skill=%s status=%s artifact_id=%d\n", view.TaskKey, view.SkillKey, view.Status, view.ArtifactID)
+	return err
+}
+
+func findSkillInvocationTask(ctx context.Context, store *sqlite.Store, ref string) (sqlite.Task, error) {
+	ref = strings.TrimSpace(ref)
+	idRef := strings.TrimPrefix(ref, "task-")
+	if id, err := strconv.ParseInt(idRef, 10, 64); err == nil && id > 0 {
+		return store.GetTask(ctx, id)
+	}
+	views, err := projections.ListTaskStatusViews(ctx, store.DB())
+	if err != nil {
+		return sqlite.Task{}, err
+	}
+	for _, view := range views {
+		if view.TaskKey == ref {
+			return store.GetTask(ctx, view.TaskID)
+		}
+	}
+	return sqlite.Task{}, fmt.Errorf("task %q not found", ref)
 }
 
 type skillArtifactReviewDecisionView struct {

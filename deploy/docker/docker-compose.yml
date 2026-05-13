@@ -17,7 +17,7 @@ services:
       ODIN_ROOT: /var/lib/odin-os
       ODIN_HTTP_ADDR: 0.0.0.0:9444
     ports:
-      - "127.0.0.1:9444:9444"
+      - "${ODIN_COMPOSE_HTTP_BIND:-127.0.0.1:9444}:9444"
     volumes:
       - odin-os-state:/var/lib/odin-os
       - odin-os-cache:/tmp

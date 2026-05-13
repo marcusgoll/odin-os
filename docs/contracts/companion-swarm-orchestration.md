@@ -30,6 +30,14 @@ The runtime swarm substrate is:
 
 `delegations` are the durable child-assignment contract. They are not a parallel work queue.
 
+## Registry admission
+
+Registry agents are role definitions by default. A registry agent may launch bounded child work only when it declares an enabled delegatable profile in `registry/agents/*.md` and that profile compiles successfully.
+
+The delegatable profile compiles into the normal runtime substrate: parent task, optional parent run, child `delegations`, child tasks and runs, and `delegation_artifacts`. It must not introduce a second agent runtime, provider-native swarm path, or hidden worker queue.
+
+Agents without an enabled delegatable profile are advisory or descriptive. Operator surfaces must reject them before creating runtime records.
+
 ## Admission rules
 
 A swarm may be admitted only when all are true:

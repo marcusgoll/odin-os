@@ -7,12 +7,15 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/odin ./cmd/odin
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/odin ./cmd/odin \
+  && mkdir -p /out/odin-root /out/tmp
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /app
 COPY --from=build /out/odin /usr/local/bin/odin
+COPY --from=build --chown=nonroot:nonroot /out/odin-root /var/lib/odin-os
+COPY --from=build --chown=nonroot:nonroot /out/tmp /tmp
 COPY --chown=nonroot:nonroot config ./config
 COPY --chown=nonroot:nonroot registry ./registry
 COPY --chown=nonroot:nonroot prompts ./prompts

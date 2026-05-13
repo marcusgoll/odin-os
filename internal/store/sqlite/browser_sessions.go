@@ -19,14 +19,16 @@ type BrowserSessionStatus string
 type BrowserSessionPermissionTier string
 type BrowserSessionProfileStoragePolicy string
 type BrowserSessionLoginRequestStatus string
+type BrowserHandoffRunnerStatus string
 type BrowserEncryptedProfileArtifactStatus string
 
 const (
-	BrowserSessionStatusCreated        BrowserSessionStatus = "created"
-	BrowserSessionStatusLoginRequested BrowserSessionStatus = "login_requested"
-	BrowserSessionStatusVerified       BrowserSessionStatus = "verified"
-	BrowserSessionStatusExpired        BrowserSessionStatus = "expired"
-	BrowserSessionStatusRevoked        BrowserSessionStatus = "revoked"
+	BrowserSessionStatusCreated               BrowserSessionStatus = "created"
+	BrowserSessionStatusLoginRequested        BrowserSessionStatus = "login_requested"
+	BrowserSessionStatusRequiresAttendedLogin BrowserSessionStatus = "requires_attended_login"
+	BrowserSessionStatusVerified              BrowserSessionStatus = "verified"
+	BrowserSessionStatusExpired               BrowserSessionStatus = "expired"
+	BrowserSessionStatusRevoked               BrowserSessionStatus = "revoked"
 )
 
 const (
@@ -45,6 +47,15 @@ const (
 	BrowserSessionLoginRequestStatusCompleted BrowserSessionLoginRequestStatus = "completed"
 	BrowserSessionLoginRequestStatusExpired   BrowserSessionLoginRequestStatus = "expired"
 	BrowserSessionLoginRequestStatusCancelled BrowserSessionLoginRequestStatus = "cancelled"
+)
+
+const (
+	BrowserHandoffRunnerStatusRequested BrowserHandoffRunnerStatus = "requested"
+	BrowserHandoffRunnerStatusStarted   BrowserHandoffRunnerStatus = "started"
+	BrowserHandoffRunnerStatusCompleted BrowserHandoffRunnerStatus = "completed"
+	BrowserHandoffRunnerStatusExpired   BrowserHandoffRunnerStatus = "expired"
+	BrowserHandoffRunnerStatusCancelled BrowserHandoffRunnerStatus = "cancelled"
+	BrowserHandoffRunnerStatusFailed    BrowserHandoffRunnerStatus = "failed"
 )
 
 const (
@@ -86,6 +97,29 @@ type BrowserSessionLoginHandoff struct {
 	HandoffID    string
 	LoginRequest BrowserSessionLoginRequest
 	Session      BrowserSession
+}
+
+type BrowserHandoffRunner struct {
+	ID             int64
+	SessionID      int64
+	LoginRequestID int64
+	HandoffID      string
+	Status         BrowserHandoffRunnerStatus
+	ViewerURL      *string
+	RunnerID       *string
+	ProcessID      *int64
+	BindAddr       *string
+	PrivateBaseURL *string
+	PublicBaseURL  *string
+	ExpiresAt      time.Time
+	StartedAt      *time.Time
+	ExitedAt       *time.Time
+	CompletedAt    *time.Time
+	CancelledAt    *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	ErrorCode      *string
+	ErrorMessage   *string
 }
 
 type BrowserEncryptedProfileArtifact struct {
@@ -146,12 +180,66 @@ type RecordBrowserSessionProfilePreparedParams struct {
 	Actor       string
 }
 
-type RecordBrowserProfileAttachedParams struct {
+type CreateBrowserSessionLoginRequestParams struct {
+	SessionID      int64
+	HandoffBaseURL string
+	ExpiresAt      time.Time
+}
+
+type ListBrowserSessionLoginRequestsParams struct {
 	SessionID int64
-	GoalID    int64
-	TaskID    int64
-	Actor     string
-	Reason    string
+}
+
+type CompleteBrowserSessionLoginRequestParams struct {
+	RequestID int64
+}
+
+type ExpireBrowserSessionLoginRequestParams struct {
+	RequestID int64
+}
+
+type CreateBrowserHandoffRunnerParams struct {
+	SessionID      int64
+	LoginRequestID int64
+	HandoffID      string
+	ViewerURL      *string
+	RunnerID       *string
+	ProcessID      *int64
+	BindAddr       *string
+	PrivateBaseURL *string
+	PublicBaseURL  *string
+	ExpiresAt      time.Time
+}
+
+type ListBrowserHandoffRunnersParams struct {
+	LoginRequestID int64
+}
+
+type UpdateBrowserHandoffRunnerStatusParams struct {
+	ID             int64
+	Status         BrowserHandoffRunnerStatus
+	ViewerURL      *string
+	RunnerID       *string
+	ProcessID      *int64
+	BindAddr       *string
+	PrivateBaseURL *string
+	PublicBaseURL  *string
+	ErrorCode      *string
+	ErrorMessage   *string
+	Actor          string
+	Reason         string
+}
+
+type ExpireBrowserHandoffRunnerParams struct {
+	ID     int64
+	Actor  string
+	Reason string
+}
+
+type CancelBrowserHandoffRunnerParams struct {
+	ID     int64
+	Actor  string
+	Reason string
 }
 
 type CreateBrowserEncryptedProfileArtifactParams struct {
@@ -213,24 +301,6 @@ type RecordBrowserProfileMaterializationCleanedParams struct {
 	Removed             bool
 	Actor               string
 	Reason              string
-}
-
-type CreateBrowserSessionLoginRequestParams struct {
-	SessionID      int64
-	HandoffBaseURL string
-	ExpiresAt      time.Time
-}
-
-type ListBrowserSessionLoginRequestsParams struct {
-	SessionID int64
-}
-
-type CompleteBrowserSessionLoginRequestParams struct {
-	RequestID int64
-}
-
-type ExpireBrowserSessionLoginRequestParams struct {
-	RequestID int64
 }
 
 func (store *Store) CreateBrowserSession(ctx context.Context, params CreateBrowserSessionParams) (BrowserSession, error) {
@@ -563,49 +633,6 @@ func (store *Store) RecordBrowserSessionProfilePrepared(ctx context.Context, par
 	})
 }
 
-func (store *Store) RecordBrowserProfileAttached(ctx context.Context, params RecordBrowserProfileAttachedParams) error {
-	if params.SessionID <= 0 {
-		return fmt.Errorf("browser session id must be positive")
-	}
-	now := store.now()
-	return store.withTx(ctx, func(tx *sql.Tx) error {
-		session, err := getBrowserSessionTx(ctx, tx, params.SessionID)
-		if err != nil {
-			return err
-		}
-		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserProfileAttached, runtimeevents.BrowserProfileAttachedPayload{
-			SessionID:            session.ID,
-			GoalID:               params.GoalID,
-			TaskID:               params.TaskID,
-			Domain:               session.Domain,
-			PermissionTier:       string(session.PermissionTier),
-			ProfileStoragePolicy: string(session.ProfileStoragePolicy),
-			ProfilePath:          session.ProfilePath,
-			Actor:                strings.TrimSpace(params.Actor),
-			Reason:               strings.TrimSpace(params.Reason),
-		}, now)
-	})
-}
-
-func browserSessionStatusChangedPayload(session BrowserSession, previousStatus BrowserSessionStatus, actor string, reason string) runtimeevents.BrowserSessionStatusChangedPayload {
-	return runtimeevents.BrowserSessionStatusChangedPayload{
-		SessionID:      session.ID,
-		PreviousStatus: string(previousStatus),
-		Status:         string(session.Status),
-		Actor:          strings.TrimSpace(actor),
-		Reason:         strings.TrimSpace(reason),
-		LastVerifiedAt: formatNullableTime(session.LastVerifiedAt),
-		ExpiresAt:      formatNullableTime(session.ExpiresAt),
-	}
-}
-
-func formatNullableTime(value *time.Time) string {
-	if value == nil {
-		return ""
-	}
-	return formatTime(*value)
-}
-
 func (store *Store) CreateBrowserEncryptedProfileArtifact(ctx context.Context, params CreateBrowserEncryptedProfileArtifactParams) (BrowserEncryptedProfileArtifact, error) {
 	if params.SessionID <= 0 {
 		return BrowserEncryptedProfileArtifact{}, fmt.Errorf("browser session id must be positive")
@@ -647,9 +674,9 @@ func (store *Store) CreateBrowserEncryptedProfileArtifact(ctx context.Context, p
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO browser_encrypted_profile_artifacts (
 				session_id, profile_path, encrypted_artifact_path, encryption_key_ref, status,
-				created_at, updated_at, expires_at, revoked_at, cleaned_at, error_code, error_message
+				created_at, updated_at, expires_at, revoked_at, error_code, error_message
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
 		`,
 			artifact.SessionID,
 			artifact.ProfilePath,
@@ -837,9 +864,6 @@ func (store *Store) RecordBrowserProfileMaterialized(ctx context.Context, params
 		if err != nil {
 			return err
 		}
-		if current.Status != BrowserEncryptedProfileArtifactStatusEncrypted {
-			return fmt.Errorf("browser encrypted profile artifact status %q cannot be materialized", current.Status)
-		}
 		artifact = current
 		session, err := getBrowserSessionTx(ctx, tx, current.SessionID)
 		if err != nil {
@@ -962,21 +986,6 @@ func (store *Store) CreateBrowserSessionLoginRequest(ctx context.Context, params
 		if session.Status == BrowserSessionStatusRevoked {
 			return fmt.Errorf("revoked browser session cannot create login request")
 		}
-		if session.Status != BrowserSessionStatusLoginRequested {
-			previousStatus := session.Status
-			session.Status = BrowserSessionStatusLoginRequested
-			session.UpdatedAt = now
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE browser_session_profiles
-				SET status = ?, updated_at = ?
-				WHERE id = ?
-			`, string(session.Status), formatTime(now), session.ID); err != nil {
-				return err
-			}
-			if err := appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserSessionStatusChanged, browserSessionStatusChangedPayload(session, previousStatus, "operator", "browser session attended login requested"), now); err != nil {
-				return err
-			}
-		}
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO browser_session_login_requests (
 				session_id, status, handoff_id, handoff_url, expires_at, completed_at, created_at, updated_at
@@ -997,6 +1006,30 @@ func (store *Store) CreateBrowserSessionLoginRequest(ctx context.Context, params
 		request.ID, err = result.LastInsertId()
 		if err != nil {
 			return err
+		}
+		if session.Status != BrowserSessionStatusLoginRequested {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE browser_session_profiles
+				SET status = ?, updated_at = ?
+				WHERE id = ?
+			`, string(BrowserSessionStatusLoginRequested), formatTime(now), session.ID); err != nil {
+				return err
+			}
+			updated := session
+			updated.Status = BrowserSessionStatusLoginRequested
+			updated.UpdatedAt = now
+			if err := appendBrowserSessionEventTx(ctx, tx, updated, runtimeevents.EventBrowserSessionStatusChanged, runtimeevents.BrowserSessionStatusChangedPayload{
+				SessionID:      updated.ID,
+				PreviousStatus: string(session.Status),
+				Status:         string(updated.Status),
+				Actor:          "system",
+				Reason:         "browser session login requested",
+				LastVerifiedAt: formatOptionalTime(updated.LastVerifiedAt),
+				ExpiresAt:      formatOptionalTime(updated.ExpiresAt),
+			}, now); err != nil {
+				return err
+			}
+			session = updated
 		}
 		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserSessionLoginRequested, runtimeevents.BrowserSessionLoginRequestedPayload{
 			SessionID:      session.ID,
@@ -1172,6 +1205,246 @@ func (store *Store) ExpireBrowserSessionLoginRequest(ctx context.Context, params
 	return updated, err
 }
 
+func (store *Store) CreateBrowserHandoffRunner(ctx context.Context, params CreateBrowserHandoffRunnerParams) (BrowserHandoffRunner, error) {
+	if params.SessionID <= 0 {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser session id must be positive")
+	}
+	if params.LoginRequestID <= 0 {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser session login request id must be positive")
+	}
+	handoffID := strings.TrimSpace(params.HandoffID)
+	if handoffID == "" {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser session handoff id is required")
+	}
+	expiresAt := params.ExpiresAt.UTC()
+	if expiresAt.IsZero() {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser handoff runner expires_at is required")
+	}
+	now := store.now()
+	runner := BrowserHandoffRunner{
+		SessionID:      params.SessionID,
+		LoginRequestID: params.LoginRequestID,
+		HandoffID:      handoffID,
+		Status:         BrowserHandoffRunnerStatusRequested,
+		ViewerURL:      cloneStringPtr(params.ViewerURL),
+		RunnerID:       cloneStringPtr(params.RunnerID),
+		ProcessID:      cloneInt64Ptr(params.ProcessID),
+		BindAddr:       cloneStringPtr(params.BindAddr),
+		PrivateBaseURL: cloneStringPtr(params.PrivateBaseURL),
+		PublicBaseURL:  cloneStringPtr(params.PublicBaseURL),
+		ExpiresAt:      expiresAt,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		session, err := getBrowserSessionTx(ctx, tx, params.SessionID)
+		if err != nil {
+			return err
+		}
+		if session.Status == BrowserSessionStatusRevoked {
+			return fmt.Errorf("revoked browser session cannot create handoff runner")
+		}
+		request, err := getBrowserSessionLoginRequestTx(ctx, tx, params.LoginRequestID)
+		if err != nil {
+			return err
+		}
+		if request.SessionID != session.ID {
+			return fmt.Errorf("browser session login request %d does not belong to session %d", request.ID, session.ID)
+		}
+		if request.HandoffID != runner.HandoffID {
+			return fmt.Errorf("browser session login request handoff id mismatch")
+		}
+		if request.Status != BrowserSessionLoginRequestStatusRequested {
+			return fmt.Errorf("browser session login request status %q cannot create handoff runner", request.Status)
+		}
+		if !request.ExpiresAt.After(now) {
+			return fmt.Errorf("browser session login request expired at %s", formatTime(request.ExpiresAt))
+		}
+		if runner.ExpiresAt.After(request.ExpiresAt) {
+			return fmt.Errorf("browser handoff runner expires_at cannot exceed login request expires_at")
+		}
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO browser_handoff_runners (
+				session_id, login_request_id, handoff_id, status, viewer_url, runner_id, process_id,
+				bind_addr, private_base_url, public_base_url, expires_at, started_at, completed_at,
+				cancelled_at, created_at, updated_at, error_code, error_message
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL)
+		`,
+			runner.SessionID,
+			runner.LoginRequestID,
+			runner.HandoffID,
+			string(runner.Status),
+			nullStringPtr(runner.ViewerURL),
+			nullStringPtr(runner.RunnerID),
+			nullInt64Ptr(runner.ProcessID),
+			nullStringPtr(runner.BindAddr),
+			nullStringPtr(runner.PrivateBaseURL),
+			nullStringPtr(runner.PublicBaseURL),
+			formatTime(runner.ExpiresAt),
+			formatTime(now),
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+		runner.ID, err = result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserHandoffRunnerRequested, browserHandoffRunnerLifecyclePayload(runner, "", "", ""), now)
+	})
+	return runner, err
+}
+
+func (store *Store) GetBrowserHandoffRunner(ctx context.Context, id int64) (BrowserHandoffRunner, error) {
+	if id <= 0 {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser handoff runner id must be positive")
+	}
+	row := store.db.QueryRowContext(ctx, browserHandoffRunnerSelectSQL()+` WHERE id = ?`, id)
+	return scanBrowserHandoffRunner(row)
+}
+
+func (store *Store) ListBrowserHandoffRunners(ctx context.Context, params ListBrowserHandoffRunnersParams) ([]BrowserHandoffRunner, error) {
+	if params.LoginRequestID <= 0 {
+		return nil, fmt.Errorf("browser session login request id must be positive")
+	}
+	rows, err := store.db.QueryContext(ctx, browserHandoffRunnerSelectSQL()+` WHERE login_request_id = ? ORDER BY id ASC`, params.LoginRequestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runners := make([]BrowserHandoffRunner, 0)
+	for rows.Next() {
+		runner, err := scanBrowserHandoffRunner(rows)
+		if err != nil {
+			return nil, err
+		}
+		runners = append(runners, runner)
+	}
+	return runners, rows.Err()
+}
+
+func (store *Store) UpdateBrowserHandoffRunnerStatus(ctx context.Context, params UpdateBrowserHandoffRunnerStatusParams) (BrowserHandoffRunner, error) {
+	if params.ID <= 0 {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser handoff runner id must be positive")
+	}
+	status := normalizeBrowserHandoffRunnerStatus(params.Status)
+	if status == "" || status == BrowserHandoffRunnerStatusRequested {
+		return BrowserHandoffRunner{}, fmt.Errorf("browser handoff runner status is required")
+	}
+	now := store.now()
+	var updated BrowserHandoffRunner
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := getBrowserHandoffRunnerTx(ctx, tx, params.ID)
+		if err != nil {
+			return err
+		}
+		if current.Status == status {
+			updated = current
+			return nil
+		}
+		if !canTransitionBrowserHandoffRunner(current.Status, status) {
+			return fmt.Errorf("browser handoff runner status %q cannot transition to %q", current.Status, status)
+		}
+		updated = current
+		updated.Status = status
+		updated.UpdatedAt = now
+		if params.ViewerURL != nil {
+			updated.ViewerURL = cloneStringPtr(params.ViewerURL)
+		}
+		if params.RunnerID != nil {
+			updated.RunnerID = cloneStringPtr(params.RunnerID)
+		}
+		if params.ProcessID != nil {
+			updated.ProcessID = cloneInt64Ptr(params.ProcessID)
+		}
+		if params.BindAddr != nil {
+			updated.BindAddr = cloneStringPtr(params.BindAddr)
+		}
+		if params.PrivateBaseURL != nil {
+			updated.PrivateBaseURL = cloneStringPtr(params.PrivateBaseURL)
+		}
+		if params.PublicBaseURL != nil {
+			updated.PublicBaseURL = cloneStringPtr(params.PublicBaseURL)
+		}
+		if params.ErrorCode != nil {
+			updated.ErrorCode = cloneStringPtr(params.ErrorCode)
+		}
+		if params.ErrorMessage != nil {
+			updated.ErrorMessage = cloneStringPtr(params.ErrorMessage)
+		}
+		switch status {
+		case BrowserHandoffRunnerStatusStarted:
+			if updated.StartedAt == nil {
+				updated.StartedAt = &now
+			}
+		case BrowserHandoffRunnerStatusCompleted:
+			updated.CompletedAt = &now
+			updated.ExitedAt = &now
+		case BrowserHandoffRunnerStatusExpired,
+			BrowserHandoffRunnerStatusFailed:
+			updated.ExitedAt = &now
+		case BrowserHandoffRunnerStatusCancelled:
+			updated.CancelledAt = &now
+			updated.ExitedAt = &now
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE browser_handoff_runners
+			SET status = ?, viewer_url = ?, runner_id = ?, process_id = ?, bind_addr = ?,
+				private_base_url = ?, public_base_url = ?, started_at = ?, exited_at = ?, completed_at = ?,
+				cancelled_at = ?, updated_at = ?, error_code = ?, error_message = ?
+			WHERE id = ?
+		`,
+			string(updated.Status),
+			nullStringPtr(updated.ViewerURL),
+			nullStringPtr(updated.RunnerID),
+			nullInt64Ptr(updated.ProcessID),
+			nullStringPtr(updated.BindAddr),
+			nullStringPtr(updated.PrivateBaseURL),
+			nullStringPtr(updated.PublicBaseURL),
+			nullTime(updated.StartedAt),
+			nullTime(updated.ExitedAt),
+			nullTime(updated.CompletedAt),
+			nullTime(updated.CancelledAt),
+			formatTime(now),
+			nullStringPtr(updated.ErrorCode),
+			nullStringPtr(updated.ErrorMessage),
+			updated.ID,
+		); err != nil {
+			return err
+		}
+		session, err := getBrowserSessionTx(ctx, tx, updated.SessionID)
+		if err != nil {
+			return err
+		}
+		eventType, ok := browserHandoffRunnerEventType(status)
+		if !ok {
+			return nil
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, eventType, browserHandoffRunnerLifecyclePayload(updated, current.Status, params.Actor, params.Reason), now)
+	})
+	return updated, err
+}
+
+func (store *Store) ExpireBrowserHandoffRunner(ctx context.Context, params ExpireBrowserHandoffRunnerParams) (BrowserHandoffRunner, error) {
+	return store.UpdateBrowserHandoffRunnerStatus(ctx, UpdateBrowserHandoffRunnerStatusParams{
+		ID:     params.ID,
+		Status: BrowserHandoffRunnerStatusExpired,
+		Actor:  params.Actor,
+		Reason: params.Reason,
+	})
+}
+
+func (store *Store) CancelBrowserHandoffRunner(ctx context.Context, params CancelBrowserHandoffRunnerParams) (BrowserHandoffRunner, error) {
+	return store.UpdateBrowserHandoffRunnerStatus(ctx, UpdateBrowserHandoffRunnerStatusParams{
+		ID:     params.ID,
+		Status: BrowserHandoffRunnerStatusCancelled,
+		Actor:  params.Actor,
+		Reason: params.Reason,
+	})
+}
+
 func appendBrowserSessionEventTx(ctx context.Context, tx *sql.Tx, session BrowserSession, eventType runtimeevents.Type, payload any, occurredAt time.Time) error {
 	return appendEventTx(ctx, tx, eventInsert{
 		StreamType: runtimeevents.StreamBrowserSession,
@@ -1193,6 +1466,11 @@ func getBrowserSessionLoginRequestTx(ctx context.Context, tx *sql.Tx, id int64) 
 	return scanBrowserSessionLoginRequest(row)
 }
 
+func getBrowserHandoffRunnerTx(ctx context.Context, tx *sql.Tx, id int64) (BrowserHandoffRunner, error) {
+	row := tx.QueryRowContext(ctx, browserHandoffRunnerSelectSQL()+` WHERE id = ?`, id)
+	return scanBrowserHandoffRunner(row)
+}
+
 func getBrowserEncryptedProfileArtifactTx(ctx context.Context, tx *sql.Tx, id int64) (BrowserEncryptedProfileArtifact, error) {
 	row := tx.QueryRowContext(ctx, browserEncryptedProfileArtifactSelectSQL()+` WHERE id = ?`, id)
 	return scanBrowserEncryptedProfileArtifact(row)
@@ -1210,6 +1488,15 @@ func browserSessionLoginRequestSelectSQL() string {
 	return `
 		SELECT id, session_id, status, handoff_id, handoff_url, expires_at, completed_at, created_at, updated_at
 		FROM browser_session_login_requests
+	`
+}
+
+func browserHandoffRunnerSelectSQL() string {
+	return `
+		SELECT id, session_id, login_request_id, handoff_id, status, viewer_url, runner_id, process_id,
+			bind_addr, private_base_url, public_base_url, expires_at, started_at, exited_at, completed_at, cancelled_at,
+			created_at, updated_at, error_code, error_message
+		FROM browser_handoff_runners
 	`
 }
 
@@ -1315,6 +1602,82 @@ func scanBrowserSessionLoginRequest(scanner browserSessionScanner) (BrowserSessi
 	return request, nil
 }
 
+func scanBrowserHandoffRunner(scanner browserSessionScanner) (BrowserHandoffRunner, error) {
+	var runner BrowserHandoffRunner
+	var viewerURL, runnerID, bindAddr, privateBaseURL, publicBaseURL sql.NullString
+	var processID sql.NullInt64
+	var expiresAt, createdAt, updatedAt string
+	var startedAt, exitedAt, completedAt, cancelledAt, errorCode, errorMessage sql.NullString
+	if err := scanner.Scan(
+		&runner.ID,
+		&runner.SessionID,
+		&runner.LoginRequestID,
+		&runner.HandoffID,
+		&runner.Status,
+		&viewerURL,
+		&runnerID,
+		&processID,
+		&bindAddr,
+		&privateBaseURL,
+		&publicBaseURL,
+		&expiresAt,
+		&startedAt,
+		&exitedAt,
+		&completedAt,
+		&cancelledAt,
+		&createdAt,
+		&updatedAt,
+		&errorCode,
+		&errorMessage,
+	); err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.Status = normalizeBrowserHandoffRunnerStatus(runner.Status)
+	if runner.Status == "" {
+		return BrowserHandoffRunner{}, fmt.Errorf("unsupported browser handoff runner status")
+	}
+	runner.ViewerURL = nullableStringPtr(viewerURL)
+	runner.RunnerID = nullableStringPtr(runnerID)
+	runner.ProcessID = nullableInt64Ptr(processID)
+	runner.BindAddr = nullableStringPtr(bindAddr)
+	runner.PrivateBaseURL = nullableStringPtr(privateBaseURL)
+	runner.PublicBaseURL = nullableStringPtr(publicBaseURL)
+	parsedExpiresAt, err := parseTime(expiresAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.ExpiresAt = parsedExpiresAt
+	runner.StartedAt, err = parseNullableTime(startedAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.ExitedAt, err = parseNullableTime(exitedAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.CompletedAt, err = parseNullableTime(completedAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.CancelledAt, err = parseNullableTime(cancelledAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	parsedCreatedAt, err := parseTime(createdAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.CreatedAt = parsedCreatedAt
+	parsedUpdatedAt, err := parseTime(updatedAt)
+	if err != nil {
+		return BrowserHandoffRunner{}, err
+	}
+	runner.UpdatedAt = parsedUpdatedAt
+	runner.ErrorCode = nullableStringPtr(errorCode)
+	runner.ErrorMessage = nullableStringPtr(errorMessage)
+	return runner, nil
+}
+
 func scanBrowserEncryptedProfileArtifact(scanner browserSessionScanner) (BrowserEncryptedProfileArtifact, error) {
 	var artifact BrowserEncryptedProfileArtifact
 	var createdAt, updatedAt string
@@ -1335,6 +1698,10 @@ func scanBrowserEncryptedProfileArtifact(scanner browserSessionScanner) (Browser
 		&errorMessage,
 	); err != nil {
 		return BrowserEncryptedProfileArtifact{}, err
+	}
+	artifact.Status = normalizeBrowserEncryptedProfileArtifactStatus(artifact.Status)
+	if artifact.Status == "" {
+		return BrowserEncryptedProfileArtifact{}, fmt.Errorf("unsupported browser encrypted profile artifact status")
 	}
 	parsedCreatedAt, err := parseTime(createdAt)
 	if err != nil {
@@ -1407,6 +1774,8 @@ func normalizeBrowserSessionStatus(status BrowserSessionStatus) BrowserSessionSt
 		return BrowserSessionStatusCreated
 	case BrowserSessionStatusLoginRequested:
 		return BrowserSessionStatusLoginRequested
+	case BrowserSessionStatusRequiresAttendedLogin:
+		return BrowserSessionStatusRequiresAttendedLogin
 	case BrowserSessionStatusVerified:
 		return BrowserSessionStatusVerified
 	case BrowserSessionStatusExpired:
@@ -1471,6 +1840,25 @@ func normalizeBrowserSessionLoginRequestStatus(status BrowserSessionLoginRequest
 	}
 }
 
+func normalizeBrowserHandoffRunnerStatus(status BrowserHandoffRunnerStatus) BrowserHandoffRunnerStatus {
+	switch BrowserHandoffRunnerStatus(strings.ToLower(strings.TrimSpace(string(status)))) {
+	case BrowserHandoffRunnerStatusRequested:
+		return BrowserHandoffRunnerStatusRequested
+	case BrowserHandoffRunnerStatusStarted:
+		return BrowserHandoffRunnerStatusStarted
+	case BrowserHandoffRunnerStatusCompleted:
+		return BrowserHandoffRunnerStatusCompleted
+	case BrowserHandoffRunnerStatusExpired:
+		return BrowserHandoffRunnerStatusExpired
+	case BrowserHandoffRunnerStatusCancelled:
+		return BrowserHandoffRunnerStatusCancelled
+	case BrowserHandoffRunnerStatusFailed:
+		return BrowserHandoffRunnerStatusFailed
+	default:
+		return ""
+	}
+}
+
 func normalizeBrowserEncryptedProfileArtifactStatus(status BrowserEncryptedProfileArtifactStatus) BrowserEncryptedProfileArtifactStatus {
 	switch BrowserEncryptedProfileArtifactStatus(strings.ToLower(strings.TrimSpace(string(status)))) {
 	case BrowserEncryptedProfileArtifactStatusEncrypted:
@@ -1484,6 +1872,109 @@ func normalizeBrowserEncryptedProfileArtifactStatus(status BrowserEncryptedProfi
 	default:
 		return ""
 	}
+}
+
+func canTransitionBrowserHandoffRunner(current BrowserHandoffRunnerStatus, next BrowserHandoffRunnerStatus) bool {
+	switch current {
+	case BrowserHandoffRunnerStatusRequested:
+		return next == BrowserHandoffRunnerStatusStarted ||
+			next == BrowserHandoffRunnerStatusExpired ||
+			next == BrowserHandoffRunnerStatusCancelled ||
+			next == BrowserHandoffRunnerStatusFailed
+	case BrowserHandoffRunnerStatusStarted:
+		return next == BrowserHandoffRunnerStatusCompleted ||
+			next == BrowserHandoffRunnerStatusExpired ||
+			next == BrowserHandoffRunnerStatusCancelled ||
+			next == BrowserHandoffRunnerStatusFailed
+	case BrowserHandoffRunnerStatusCompleted,
+		BrowserHandoffRunnerStatusExpired,
+		BrowserHandoffRunnerStatusCancelled,
+		BrowserHandoffRunnerStatusFailed:
+		return false
+	default:
+		return false
+	}
+}
+
+func browserHandoffRunnerEventType(status BrowserHandoffRunnerStatus) (runtimeevents.Type, bool) {
+	switch status {
+	case BrowserHandoffRunnerStatusStarted:
+		return runtimeevents.EventBrowserHandoffRunnerStarted, true
+	case BrowserHandoffRunnerStatusCompleted:
+		return runtimeevents.EventBrowserHandoffRunnerCompleted, true
+	case BrowserHandoffRunnerStatusExpired:
+		return runtimeevents.EventBrowserHandoffRunnerExpired, true
+	case BrowserHandoffRunnerStatusCancelled:
+		return runtimeevents.EventBrowserHandoffRunnerCancelled, true
+	case BrowserHandoffRunnerStatusFailed:
+		return runtimeevents.EventBrowserHandoffRunnerFailed, true
+	default:
+		return "", false
+	}
+}
+
+func browserHandoffRunnerLifecyclePayload(runner BrowserHandoffRunner, previousStatus BrowserHandoffRunnerStatus, actor string, reason string) runtimeevents.BrowserHandoffRunnerLifecyclePayload {
+	return runtimeevents.BrowserHandoffRunnerLifecyclePayload{
+		ID:             runner.ID,
+		SessionID:      runner.SessionID,
+		LoginRequestID: runner.LoginRequestID,
+		HandoffID:      runner.HandoffID,
+		RunnerID:       stringPtrValue(runner.RunnerID),
+		ProcessID:      int64PtrValue(runner.ProcessID),
+		PreviousStatus: string(previousStatus),
+		Status:         string(runner.Status),
+		ViewerURL:      stringPtrValue(runner.ViewerURL),
+		BindAddr:       stringPtrValue(runner.BindAddr),
+		PrivateBaseURL: stringPtrValue(runner.PrivateBaseURL),
+		PublicBaseURL:  stringPtrValue(runner.PublicBaseURL),
+		ExpiresAt:      formatTime(runner.ExpiresAt),
+		StartedAt:      formatOptionalTime(runner.StartedAt),
+		ExitedAt:       formatOptionalTime(runner.ExitedAt),
+		CompletedAt:    formatOptionalTime(runner.CompletedAt),
+		CancelledAt:    formatOptionalTime(runner.CancelledAt),
+		ErrorCode:      stringPtrValue(runner.ErrorCode),
+		ErrorMessage:   stringPtrValue(runner.ErrorMessage),
+		Actor:          defaultString(actor, "operator"),
+		Reason:         strings.TrimSpace(reason),
+	}
+}
+
+func browserEncryptedProfileArtifactPayload(artifact BrowserEncryptedProfileArtifact, previousStatus BrowserEncryptedProfileArtifactStatus, actor string, reason string) map[string]any {
+	return map[string]any{
+		"artifact_id":             artifact.ID,
+		"session_id":              artifact.SessionID,
+		"profile_path":            artifact.ProfilePath,
+		"encrypted_artifact_path": artifact.EncryptedArtifactPath,
+		"encryption_key_ref":      artifact.EncryptionKeyRef,
+		"previous_status":         string(previousStatus),
+		"status":                  string(artifact.Status),
+		"expires_at":              formatOptionalTime(artifact.ExpiresAt),
+		"revoked_at":              formatOptionalTime(artifact.RevokedAt),
+		"cleaned_at":              formatOptionalTime(artifact.CleanedAt),
+		"error_code":              stringPtrValue(artifact.ErrorCode),
+		"error_message":           stringPtrValue(artifact.ErrorMessage),
+		"actor":                   defaultString(actor, "operator"),
+		"reason":                  strings.TrimSpace(reason),
+	}
+}
+
+func browserProfileMaterializationPayload(artifact BrowserEncryptedProfileArtifact, materializationPath string, materializedFilePath string, removed bool, actor string, reason string) map[string]any {
+	payload := map[string]any{
+		"artifact_id":             artifact.ID,
+		"session_id":              artifact.SessionID,
+		"profile_path":            artifact.ProfilePath,
+		"encrypted_artifact_path": artifact.EncryptedArtifactPath,
+		"encryption_key_ref":      artifact.EncryptionKeyRef,
+		"status":                  string(artifact.Status),
+		"materialization_path":    strings.TrimSpace(materializationPath),
+		"removed":                 removed,
+		"actor":                   defaultString(actor, "operator"),
+		"reason":                  strings.TrimSpace(reason),
+	}
+	if strings.TrimSpace(materializedFilePath) != "" {
+		payload["materialized_file_path"] = strings.TrimSpace(materializedFilePath)
+	}
+	return payload
 }
 
 func normalizeBrowserSessionDomain(domain string) (string, error) {
@@ -1534,6 +2025,9 @@ func ValidateBrowserSessionProfilePath(profilePath string) (string, error) {
 
 func validateBrowserEncryptedArtifactPath(artifactPath string, profilePath string) (string, error) {
 	artifactPath = strings.TrimSpace(artifactPath)
+	if artifactPath == "" {
+		return "", fmt.Errorf("browser encrypted profile artifact path is required")
+	}
 	if filepath.IsAbs(artifactPath) {
 		return "", fmt.Errorf("browser encrypted profile artifact path must be relative to ODIN_ROOT")
 	}
@@ -1545,20 +2039,22 @@ func validateBrowserEncryptedArtifactPath(artifactPath string, profilePath strin
 		return "", fmt.Errorf("browser encrypted profile artifact path must stay under ODIN_ROOT")
 	}
 	slashed := filepath.ToSlash(clean)
-	const artifactRoot = "browser-sessions/encrypted-profiles/"
-	if !strings.HasPrefix(slashed, artifactRoot) || strings.TrimSpace(strings.TrimPrefix(slashed, artifactRoot)) == "" {
+	const encryptedProfileRoot = "browser-sessions/encrypted-profiles/"
+	profilePrefix := strings.TrimSuffix(profilePath, "/") + "/"
+	var relativeName string
+	switch {
+	case strings.HasPrefix(slashed, encryptedProfileRoot):
+		relativeName = strings.TrimPrefix(slashed, encryptedProfileRoot)
+	case strings.HasPrefix(slashed, profilePrefix):
+		relativeName = strings.TrimPrefix(slashed, profilePrefix)
+	default:
 		return "", fmt.Errorf("browser encrypted profile artifact path must stay under browser-sessions/encrypted-profiles")
 	}
-	name := strings.TrimPrefix(slashed, artifactRoot)
-	if strings.Contains(name, "/") || !strings.HasSuffix(name, ".enc") {
-		return "", fmt.Errorf("browser encrypted profile artifact path must be one .enc file")
+	if relativeName == "" || strings.Contains(relativeName, "/") {
+		return "", fmt.Errorf("browser encrypted profile artifact path must be one encrypted artifact file")
 	}
-	base := strings.TrimSuffix(name, ".enc")
-	if !isSafeBrowserSessionPathSegment(base) {
-		return "", fmt.Errorf("browser encrypted profile artifact path contains unsafe component %q", name)
-	}
-	if _, err := ValidateBrowserSessionProfilePath(profilePath); err != nil {
-		return "", err
+	if !strings.HasSuffix(relativeName, ".enc") {
+		return "", fmt.Errorf("browser encrypted profile artifact path must end with .enc")
 	}
 	return slashed, nil
 }
@@ -1613,40 +2109,6 @@ func isSafeBrowserSessionPathSegment(value string) bool {
 	return true
 }
 
-func browserEncryptedProfileArtifactPayload(artifact BrowserEncryptedProfileArtifact, previousStatus BrowserEncryptedProfileArtifactStatus, actor string, reason string) runtimeevents.BrowserProfileArtifactPayload {
-	return runtimeevents.BrowserProfileArtifactPayload{
-		ArtifactID:            artifact.ID,
-		SessionID:             artifact.SessionID,
-		ProfilePath:           artifact.ProfilePath,
-		EncryptedArtifactPath: artifact.EncryptedArtifactPath,
-		EncryptionKeyRef:      artifact.EncryptionKeyRef,
-		PreviousStatus:        string(previousStatus),
-		Status:                string(artifact.Status),
-		CreatedAt:             formatTime(artifact.CreatedAt),
-		UpdatedAt:             formatTime(artifact.UpdatedAt),
-		ExpiresAt:             formatOptionalTime(artifact.ExpiresAt),
-		RevokedAt:             formatOptionalTime(artifact.RevokedAt),
-		CleanedAt:             formatOptionalTime(artifact.CleanedAt),
-		ErrorCode:             stringPtrValue(artifact.ErrorCode),
-		ErrorMessage:          stringPtrValue(artifact.ErrorMessage),
-		Actor:                 strings.TrimSpace(actor),
-		Reason:                strings.TrimSpace(reason),
-	}
-}
-
-func browserProfileMaterializationPayload(artifact BrowserEncryptedProfileArtifact, materializationPath string, materializedFilePath string, removed bool, actor string, reason string) runtimeevents.BrowserProfileMaterializationPayload {
-	return runtimeevents.BrowserProfileMaterializationPayload{
-		ArtifactID:           artifact.ID,
-		SessionID:            artifact.SessionID,
-		ArtifactPath:         artifact.EncryptedArtifactPath,
-		MaterializationPath:  materializationPath,
-		MaterializedFilePath: materializedFilePath,
-		Removed:              removed,
-		Actor:                strings.TrimSpace(actor),
-		Reason:               strings.TrimSpace(reason),
-	}
-}
-
 func formatOptionalTime(value *time.Time) string {
 	if value == nil {
 		return ""
@@ -1672,6 +2134,13 @@ func nullStringPtr(value *string) any {
 	return *value
 }
 
+func nullInt64Ptr(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
 func nullableStringPtr(value sql.NullString) *string {
 	if !value.Valid || value.String == "" {
 		return nil
@@ -1684,6 +2153,13 @@ func nullableStringPtr(value sql.NullString) *string {
 func stringPtrValue(value *string) string {
 	if value == nil {
 		return ""
+	}
+	return *value
+}
+
+func int64PtrValue(value *int64) int64 {
+	if value == nil {
+		return 0
 	}
 	return *value
 }

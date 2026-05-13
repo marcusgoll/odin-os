@@ -8,8 +8,13 @@ date: 2026-04-30
 
 ## Current State
 
-Odin-OS has PR and review policy assets, but it does not yet have a live GitHub
-PR mutation adapter.
+Odin-OS has PR and review policy assets, plus a fixture-backed GitHub PR
+manager behind `review.PullRequestManager`. `review.HandoffOrchestrator`
+sequences PR upsert, read-only review selection, SQLite handoff persistence, and
+optional handoff comments. Live GitHub PR mutation remains deferred to fixture
+or explicitly configured manager paths. PR handoff metadata and read-only review
+outcomes persist in SQLite so later orchestration wiring can resume after
+restart.
 
 Existing assets to preserve:
 
@@ -37,7 +42,17 @@ Canonical helpers:
 
 - `review.BuildPullRequestBody`
 - `review.BuildReviewComment`
+- `review.HandoffOrchestrator`
 - `review.SelectReviewAgents`
+
+Fixture-backed adapter:
+
+- `review.GitHubPullRequestManager`
+
+Restart-safe persistence:
+
+- `pull_request_handoffs`
+- `pull_request_review_results`
 
 `PullRequestManager` intentionally has no merge, approval, or deployment method.
 Human approval remains required before merge or production deployment.
@@ -55,9 +70,10 @@ Security review is required for changes touching:
 - secrets or runtime config
 - deployment files or GitHub Actions automation
 
-Review agents selected by `internal/review` are read-only. A reviewer, QA, or
-security run may report findings and blockers, but must not approve, merge, or
-deploy.
+Review agents selected by `internal/review` are read-only. The handoff
+orchestrator persists selected reviewer, QA, and security review intents as
+read-only pending review results. A reviewer, QA, or security run may report
+findings and blockers, but must not approve, merge, or deploy.
 
 ## Duplicate Or Placeholder Paths
 
@@ -69,15 +85,12 @@ deploy.
 | `prompts/workers/qa.md` | Draft prompt | keep | Prompt text remains available for future QA worker. |
 | `prompts/workers/reviewer.md` | Draft prompt | keep | Prompt text remains available for future reviewer worker. |
 | `prompts/workers/security.md` | Draft prompt | keep | Prompt text remains available for future security worker. |
-| `internal/adapters/github` | Empty placeholder | remove later | Do not create a PR adapter here unless the GitHub adapter root decision changes. |
+| `internal/adapters/github` | Reserved empty placeholder | keep empty | Do not create issue or PR tracker behavior here unless a later ADR changes the GitHub tracker root. |
 | `internal/tracker/github` | Existing issue tracker adapter | keep | PR mutation should not be bolted into issue intake without a follow-up design. |
 
 ## Follow-Up Work
 
-1. Add a live GitHub PR adapter behind `review.PullRequestManager`.
-2. Wire review selection into the orchestration loop after PR handoff exists.
-3. Persist PR handoff and review results in SQLite.
-4. Add read-only reviewer, QA, and security run attempts behind the executor
+1. Add read-only reviewer, QA, and security run attempts behind the executor
    contract.
-5. Add a live GitHub proof ticket before enabling PR create/update outside
+2. Add a live GitHub proof ticket before enabling PR create/update outside
    fixture-backed tests.

@@ -212,7 +212,7 @@ func (service Service) RunAgent(ctx context.Context, input RunInput) (sqlite.Tas
 		return sqlite.Task{}, nil, RunResult{}, fmt.Errorf("agent key is required")
 	}
 
-	childSpecs, err := childSpecsForAgent(input.AgentKey, input.Inputs)
+	childSpecs, err := service.childSpecsForAgent(input.AgentKey, input.Inputs)
 	if err != nil {
 		return sqlite.Task{}, nil, RunResult{}, err
 	}

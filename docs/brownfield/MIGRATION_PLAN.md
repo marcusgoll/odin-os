@@ -116,16 +116,19 @@ Codex app-server should remain behind the executor interface and should not leak
    - Proof: router tests and `go test ./internal/executors/...`.
 
 4. **Collapse duplicate config roots**
-   - Remove `configs/` or move examples under `config/*.example.yaml`.
-   - Keep active config loading through `internal/app/config`.
-   - Proof: bootstrap tests and `ODIN_ROOT=<tmp> ./bin/odin doctor --json`.
+   - Canonical decision: keep `config/` as the only repo-authored configuration root.
+   - Keep active config loading through `internal/app/config`, `internal/app/bootstrap`, and explicit `config/*.yaml` paths; do not add a loader fallback for `configs/`.
+   - Treat `configs/` as duplicate agency examples. Preserve useful fields by moving them into `config/agency.example.yaml` or an operations doc, then remove `configs/` in a cleanup PR.
+   - Reference checks before removal: `rg -n "configs/" .` and `rg -n "config/agency.example.yaml|configs/(default|development|production.example).yaml" docs config configs`.
+   - Rollback: revert the cleanup commit or restore the removed example files from Git. No database rollback is required because `configs/` is not runtime-loaded.
+   - Proof: bootstrap/config/lifecycle tests and `ODIN_ROOT=<tmp> ./bin/odin doctor --json`.
 
 5. **Add top-level Odin usage output**
    - Implement `odin help` and `odin --help` through `internal/app/lifecycle`.
    - Proof: real commands print usage and exit cleanly.
 
-6. **Add one minimal delivery profile registry asset**
-   - Add a `registry/workflows/*` entry tagged `delivery_profile`.
+6. **Keep delivery profile registry assets visible**
+   - Add any new `registry/workflows/*` delivery profile with the `delivery_profile` tag.
    - Use existing registry loader/validator.
    - Proof: `ODIN_ROOT=<tmp> ./bin/odin work profiles` shows the profile.
 
@@ -134,9 +137,10 @@ Codex app-server should remain behind the executor interface and should not leak
    - No behavior changes.
    - Proof: `go test ./internal/store/sqlite`.
 
-8. **Choose GitHub intake package root**
-   - Decide between `internal/adapters/github`, `internal/core/intake/github`, or another single root.
-   - Remove duplicate placeholder root.
+8. **Preserve GitHub intake package root**
+   - Keep GitHub tracker behavior under `internal/tracker`.
+   - Keep `internal/adapters/github` empty unless a later ADR assigns it a
+     non-tracker GitHub responsibility.
    - Proof: package inventory has one GitHub intake seam.
 
 9. **Add service hardening plan for systemd**

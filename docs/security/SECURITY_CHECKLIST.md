@@ -37,6 +37,8 @@ deployment, or worker prompt flow.
       by a safe lane.
 - [ ] Browser, Google, and other live-session tokens are cached with `0600`
       permissions.
+- [ ] Local credential env files such as `~/.odin-env` are owner-owned,
+      non-symlink regular files with `0600` permissions and are parsed as data.
 - [ ] Error messages and command summaries are redacted before persistence.
 
 ## Process Execution
@@ -89,4 +91,3 @@ deployment, or worker prompt flow.
 - [ ] Healthcheck exists and is exercised.
 - [ ] Rollback path is documented and tested for live changes.
 - [ ] Live restart/deploy requires human approval.
-

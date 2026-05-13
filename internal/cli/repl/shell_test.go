@@ -1028,6 +1028,87 @@ func TestShellRunsShowIncludesRunArtifacts(t *testing.T) {
 	}
 }
 
+func TestShellRunsShowIncludesFailureAnalysis(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	project, err := env.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject(alpha) error = %v", err)
+	}
+	task, err := env.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "failure-task",
+		Title:       "Failure task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := env.Store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	const artifactJSON = `{"failure_analysis":{"category":"test_failure","suggested_fix":"Inspect failing test output and repair the regression.","next_step_target":"test","retry_recommended":true,"follow_up":{"recommended":true,"title":"Fix flaky test","reason":"needs a focused repair"}}}`
+	if _, err := env.Store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:          run.ID,
+		Status:         "failed",
+		Summary:        "test failed",
+		TerminalReason: "failed",
+		ArtifactsJSON:  artifactJSON,
+	}); err != nil {
+		t.Fatalf("FinishRun() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/project alpha", &output); err != nil {
+		t.Fatalf("HandleLine(/project alpha) error = %v", err)
+	}
+	output.Reset()
+	if err := shell.HandleLine(ctx, fmt.Sprintf("/runs show %d", run.ID), &output); err != nil {
+		t.Fatalf("HandleLine(/runs show) error = %v", err)
+	}
+
+	details := output.String()
+	for _, want := range []string{
+		"run=1",
+		"task=failure-task",
+		"status=failed",
+		"artifacts_json=" + artifactJSON,
+		"failure_analysis_category=test_failure",
+		"failure_analysis_suggested_fix=Inspect failing test output and repair the regression.",
+		"failure_analysis_next_step_target=test",
+		"failure_analysis_retry_recommended=true",
+		"failure_analysis_follow_up_recommended=true",
+		"failure_analysis_follow_up_title=Fix flaky test",
+		"failure_analysis_follow_up_reason=needs a focused repair",
+	} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details = %q, want substring %q", details, want)
+		}
+	}
+}
+
 func TestShellHelpIncludesTransitionCommands(t *testing.T) {
 	t.Parallel()
 
@@ -1289,6 +1370,44 @@ printf '{"status":"completed","tool_key":"browser_x_post_publish","summary":"Pub
 		if got := details.Fields[key]; got != want {
 			t.Fatalf("field %s = %q, want %q", key, got, want)
 		}
+	}
+}
+
+func TestShellToolRunBlocksDirectXPublish(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	driverPath := filepath.Join(t.TempDir(), "huginn-x-post-publish-driver.sh")
+	requestPath := filepath.Join(t.TempDir(), "request.json")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+cat >"$ODIN_DRIVER_REQUEST_PATH"
+printf '{"status":"completed","tool_key":"browser_x_post_publish","summary":"Published direct X post."}'
+`
+	if err := os.WriteFile(driverPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_HUGINN_X_PUBLISH_DRIVER", driverPath)
+	t.Setenv("ODIN_DRIVER_REQUEST_PATH", requestPath)
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(ctx, "/tool run browser_x_post_publish post_text=Approved_X_post_ready_to_publish_natively. wait_ms=0", &output); err != nil {
+		t.Fatalf("HandleLine(/tool run browser_x_post_publish) error = %v", err)
+	}
+	for _, want := range []string{
+		"requires an approved social_outcome",
+		"/memory publish <id> via=huginn_x",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output = %q, want %q", output.String(), want)
+		}
+	}
+	if _, err := os.Stat(requestPath); !os.IsNotExist(err) {
+		t.Fatalf("direct publish driver was invoked; Stat(requestPath) error = %v", err)
 	}
 }
 

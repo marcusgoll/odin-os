@@ -32,12 +32,13 @@ Classification values:
 | `internal/learning` | Proposal/evaluation/promotion/replay. | `internal/learning/*` | Keep | Proposal-driven self-improvement substrate. |
 | `internal/memory` | User and knowledge memory services. | `internal/memory/*` | Keep | Knowledge source work is meaningful but not fully surfaced by CLI. |
 | `internal/api/http` | Operational HTTP handler. | `internal/api/http/operational.go` | Keep | Readiness/metrics only today. |
-| `internal/adapters` | Placeholder external adapters. | `internal/adapters/doc.go`, `.gitkeep` dirs | Refactor | Decide concrete adapter roots before adding GitHub code. |
+| `internal/adapters` | Placeholder external adapters. | `internal/adapters/doc.go`, `.gitkeep` dirs | Refactor | Do not add GitHub tracker behavior here; `internal/adapters/github` is reserved empty unless a later ADR assigns a non-tracker responsibility. |
 | `internal/workers` | Worker roles; planner implemented. | `internal/workers/*` | Refactor | Keep planner; implement other roles only through runtime contracts. |
 | `internal/runner` | Uncommitted duplicate runner seam. | `internal/runner/*` | Remove/replace | Merge into `internal/executors` if useful. |
-| `internal/tracker` | Uncommitted GitHub tracker placeholder. | `internal/tracker/*` | Remove/replace | Use one GitHub intake seam. |
+| `internal/tracker` | Canonical GitHub issue/PR tracker seam. | `internal/tracker/*` | Keep/refactor | Owns tracker contract, GitHub REST adapter, and intake reconciliation; future GitHub tracker work belongs here. |
 | `internal/orchestrator` | Uncommitted agency orchestrator placeholder. | `internal/orchestrator/service.go` | Replace | Too generic; real orchestration should compose existing runtime services. |
-| `internal/config`, `internal/logging`, `internal/db`, `internal/dashboard`, `internal/security`, `internal/utils`, `internal/workspace`, `internal/prompts`, `internal/review`, `internal/agents` | Uncommitted scaffold packages. | directories under `internal/` | Remove/refactor | Promote only if they replace a specific missing package and do not duplicate existing seams. |
+| `internal/config`, `internal/logging`, `internal/db`, `internal/dashboard`, `internal/security`, `internal/utils`, `internal/prompts`, `internal/review`, `internal/agents` | Uncommitted scaffold packages. | directories under `internal/` | Remove/refactor | Promote only if they replace a specific missing package and do not duplicate existing seams. |
+| Historical `internal/workspace` | Removed duplicate workspace scaffold. | Removed `internal/workspace/manager.go` | Remove | Keep absent; use `internal/vcs/leases` and `internal/vcs/worktrees` for worktree lease behavior. |
 
 ## Registry Assets
 
@@ -127,11 +128,29 @@ Classification values:
 | `config/projects.yaml` | Keep | Canonical project manifest. |
 | `config/executors.yaml` | Keep | Active executor config. |
 | `config/models.yaml` | Keep | Model metadata. |
+| `config/media-stack.yaml` | Keep | Active media-stack operations config. |
 | `config/telemetry.yaml` | Keep/refactor | Health config exists but not all values are wired through current app config. |
 | `config/policies.yaml` | Refactor | Placeholder. |
-| `config/agency.example.yaml` | Remove/refactor | Uncommitted duplicate agency config. |
-| `configs/*.yaml` | Remove/refactor | Duplicate config root. |
+| `config/agency.example.yaml` | Refactor | Tracked agency example in the canonical `config/` root; overlaps `configs/*.yaml` runner/GitHub-token examples. |
+| `configs/default.yaml` | Remove/refactor | Duplicate agency example root; useful fields are `runtime.log_dir` and `runners.codex_exec.sandbox_mode`. |
+| `configs/development.yaml` | Remove/refactor | Duplicate agency example root; useful field is `logging.level=debug`. |
+| `configs/production.example.yaml` | Remove/refactor | Duplicate agency example root; useful production placeholders are `runtime.workspace_root`, `runtime.log_dir`, `runtime.kill_switch=true`, and runner sandbox mode. |
 | `deploy/systemd/odin.env.example` | Keep/refactor | No secrets committed; token is empty placeholder. |
+
+### Config root decision
+
+`config/` is the only canonical repo-authored configuration root. Runtime loaders and tests read `config/odin.yaml`, `config/projects.yaml`, `config/projects.local.yaml`, `config/executors.yaml`, and other config files below `config/`; no runtime loader should be taught to scan `configs/`.
+
+`configs/` is a tracked duplicate example root. Before removing it, preserve any useful agency example fields in `config/agency.example.yaml` or an operations doc, then remove `configs/` in a cleanup PR with reference checks.
+
+Cleanup reference checks:
+
+- `rg -n "configs/" .`
+- `rg -n "config/agency.example.yaml|configs/(default|development|production.example).yaml" docs config configs`
+- `go test ./internal/app/config ./internal/core/projects ./internal/app/bootstrap ./internal/app/lifecycle -count=1`
+- `ODIN_ROOT="$(mktemp -d)" ./bin/odin doctor --json`
+
+Rollback: restore the removed files from the cleanup commit or revert the cleanup commit; no database migration or runtime state rollback is needed because `configs/` is not loaded by the runtime.
 
 ## Deployment Inventory
 

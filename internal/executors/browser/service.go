@@ -13,22 +13,23 @@ import (
 )
 
 const (
-	EvidenceType                 = "browser_readonly"
-	EvidenceTypeApprovalRequired = "browser_approval_required"
-	EvidenceTypeFailed           = "browser_failed"
-	WorkArtifactType             = "huginn_browser_plugin_evidence"
-	MaxPagesLimit                = 20
-	MaxDurationSecondsLimit      = 300
-	defaultEvidenceCreatedBy     = "browser_executor"
-	RiskReadOnly                 = "read_only"
-	RiskExternalMutation         = "external_mutation"
+	EvidenceType             = "browser_readonly"
+	WorkEvidenceType         = "browser_evidence"
+	WorkEvidenceExecutor     = "huginn_browser"
+	MaxPagesLimit            = 20
+	MaxDurationSecondsLimit  = 300
+	defaultEvidenceCreatedBy = "browser_executor"
+)
+
+type RiskClass string
+
+const (
+	RiskClassReadOnly         RiskClass = "read_only"
+	RiskClassExternalMutation RiskClass = "external_mutation"
 )
 
 type ReadOnlyTask struct {
 	GoalID             int64                       `json:"goal_id"`
-	TaskID             int64                       `json:"task_id,omitempty"`
-	RunID              int64                       `json:"run_id,omitempty"`
-	BrowserSessionID   int64                       `json:"browser_session_id,omitempty"`
 	WorkerMode         string                      `json:"worker_mode,omitempty"`
 	Objective          string                      `json:"objective"`
 	AllowedDomains     []string                    `json:"allowed_domains"`
@@ -37,87 +38,112 @@ type ReadOnlyTask struct {
 	MaxDurationSeconds int                         `json:"max_duration_seconds"`
 	EvidenceRequired   bool                        `json:"evidence_required"`
 	SiteProfiles       []huginnbrowser.SiteProfile `json:"site_profiles,omitempty"`
+	BrowserSessionID   int64                       `json:"browser_session_id,omitempty"`
+	BrowserSession     *BrowserSessionReference    `json:"browser_session,omitempty"`
 	Actions            []string                    `json:"actions,omitempty"`
 }
 
 type PageResult = huginnbrowser.PageResult
+type BrowserSessionReference = huginnbrowser.BrowserSessionReference
 type ScreenshotMetadata = huginnbrowser.ScreenshotMetadata
 type SelectedLink = huginnbrowser.SelectedLink
-type DownloadedFile = huginnbrowser.DownloadedFile
-type FormStateSummary = huginnbrowser.FormStateSummary
+type DownloadedFileMetadata = huginnbrowser.DownloadedFileMetadata
 
-type Result struct {
-	Status                 string                             `json:"status"`
-	GoalID                 int64                              `json:"goal_id"`
-	TaskID                 int64                              `json:"task_id,omitempty"`
-	RunID                  int64                              `json:"run_id,omitempty"`
-	BrowserSessionID       int64                              `json:"browser_session_id,omitempty"`
-	BrowserSession         *huginnbrowser.SessionRef          `json:"browser_session,omitempty"`
-	EvidenceID             int64                              `json:"evidence_id"`
-	EvidenceType           string                             `json:"evidence_type"`
-	RiskClass              string                             `json:"risk_class,omitempty"`
-	ApprovalRequired       bool                               `json:"approval_required,omitempty"`
-	ApprovalID             int64                              `json:"approval_id,omitempty"`
-	AdapterStatus          string                             `json:"adapter_status,omitempty"`
-	AdapterKind            string                             `json:"adapter_kind,omitempty"`
-	StartURLs              []string                           `json:"start_urls"`
-	AllowedDomains         []string                           `json:"allowed_domains"`
-	MaxPages               int                                `json:"max_pages"`
-	MaxDurationSeconds     int                                `json:"max_duration_seconds"`
-	SiteProfiles           []huginnbrowser.SiteProfile        `json:"site_profiles,omitempty"`
-	VisitedURLs            []string                           `json:"visited_urls,omitempty"`
-	PageResults            []huginnbrowser.PageResult         `json:"page_results,omitempty"`
-	ExtractedTextSummary   string                             `json:"extracted_text_summary,omitempty"`
-	Screenshots            []string                           `json:"screenshots,omitempty"`
-	ScreenshotMetadata     []huginnbrowser.ScreenshotMetadata `json:"screenshot_metadata,omitempty"`
-	SelectedLinks          []huginnbrowser.SelectedLink       `json:"selected_links,omitempty"`
-	DownloadedFiles        []huginnbrowser.DownloadedFile     `json:"downloaded_files,omitempty"`
-	FormStateSummary       []huginnbrowser.FormStateSummary   `json:"form_state_summary,omitempty"`
-	BrowserNotes           []string                           `json:"browser_notes,omitempty"`
-	Confidence             string                             `json:"confidence,omitempty"`
-	Limitations            []string                           `json:"limitations,omitempty"`
-	ActionLog              []string                           `json:"action_log,omitempty"`
-	WorkArtifact           *EvidenceArtifact                  `json:"work_artifact,omitempty"`
-	RunArtifact            *sqlite.RunArtifact                `json:"run_artifact,omitempty"`
-	RecoveryRecommendation string                             `json:"recovery_recommendation,omitempty"`
-	ErrorCode              string                             `json:"error_code,omitempty"`
-	ErrorMessage           string                             `json:"error_message,omitempty"`
-	Evidence               sqlite.GoalEvidence                `json:"-"`
+type WorkEvidenceTask struct {
+	TaskID             int64                       `json:"task_id"`
+	WorkerMode         string                      `json:"worker_mode,omitempty"`
+	Objective          string                      `json:"objective"`
+	AllowedDomains     []string                    `json:"allowed_domains"`
+	StartURLs          []string                    `json:"start_urls"`
+	MaxPages           int                         `json:"max_pages"`
+	MaxDurationSeconds int                         `json:"max_duration_seconds"`
+	EvidenceRequired   bool                        `json:"evidence_required"`
+	SiteProfiles       []huginnbrowser.SiteProfile `json:"site_profiles,omitempty"`
+	BrowserSessionID   int64                       `json:"browser_session_id,omitempty"`
+	BrowserSession     *BrowserSessionReference    `json:"browser_session,omitempty"`
+	Actions            []string                    `json:"actions,omitempty"`
+}
+
+type PluginRequest struct {
+	RequestID          string                      `json:"request_id,omitempty"`
+	GoalID             int64                       `json:"goal_id,omitempty"`
+	TaskID             int64                       `json:"task_id,omitempty"`
+	WorkerMode         string                      `json:"worker_mode,omitempty"`
+	Objective          string                      `json:"objective"`
+	AllowedDomains     []string                    `json:"allowed_domains"`
+	StartURLs          []string                    `json:"start_urls"`
+	MaxPages           int                         `json:"max_pages"`
+	MaxDurationSeconds int                         `json:"max_duration_seconds"`
+	EvidenceRequired   bool                        `json:"evidence_required"`
+	SiteProfiles       []huginnbrowser.SiteProfile `json:"site_profiles,omitempty"`
+	BrowserSessionID   int64                       `json:"browser_session_id,omitempty"`
+	BrowserSession     *BrowserSessionReference    `json:"browser_session,omitempty"`
+	Actions            []string                    `json:"actions,omitempty"`
+	RequestedBy        string                      `json:"requested_by,omitempty"`
 }
 
 type EvidenceArtifact struct {
-	Type                   string                             `json:"type"`
-	EvidenceType           string                             `json:"evidence_type"`
-	Status                 string                             `json:"status"`
-	GoalID                 int64                              `json:"goal_id,omitempty"`
-	TaskID                 int64                              `json:"task_id,omitempty"`
-	RunID                  int64                              `json:"run_id,omitempty"`
-	EvidenceID             int64                              `json:"evidence_id,omitempty"`
-	RunArtifactID          int64                              `json:"run_artifact_id,omitempty"`
-	ApprovalID             int64                              `json:"approval_id,omitempty"`
-	ApprovalRequired       bool                               `json:"approval_required,omitempty"`
-	RiskClass              string                             `json:"risk_class,omitempty"`
-	AdapterStatus          string                             `json:"adapter_status,omitempty"`
-	AdapterKind            string                             `json:"adapter_kind,omitempty"`
-	Summary                string                             `json:"summary"`
-	URI                    string                             `json:"uri,omitempty"`
-	StartURLs              []string                           `json:"start_urls,omitempty"`
-	AllowedDomains         []string                           `json:"allowed_domains,omitempty"`
-	PageResults            []huginnbrowser.PageResult         `json:"page_results,omitempty"`
-	Screenshots            []string                           `json:"screenshots,omitempty"`
-	ScreenshotMetadata     []huginnbrowser.ScreenshotMetadata `json:"screenshot_metadata,omitempty"`
-	SelectedLinks          []huginnbrowser.SelectedLink       `json:"selected_links,omitempty"`
-	DownloadedFiles        []huginnbrowser.DownloadedFile     `json:"downloaded_files,omitempty"`
-	FormStateSummary       []huginnbrowser.FormStateSummary   `json:"form_state_summary,omitempty"`
-	ExtractedTextSummary   string                             `json:"extracted_text_summary,omitempty"`
-	BrowserNotes           []string                           `json:"browser_notes,omitempty"`
-	Confidence             string                             `json:"confidence,omitempty"`
-	Limitations            []string                           `json:"limitations,omitempty"`
-	RecoveryRecommendation string                             `json:"recovery_recommendation,omitempty"`
+	ID        int64  `json:"id"`
+	Type      string `json:"type"`
+	URI       string `json:"uri,omitempty"`
+	Summary   string `json:"summary"`
+	CreatedBy string `json:"created_by"`
+}
+
+type PluginResponse struct {
+	Status           string            `json:"status"`
+	RequestID        string            `json:"request_id,omitempty"`
+	RiskClass        RiskClass         `json:"risk_class"`
+	ApprovalRequired bool              `json:"approval_required"`
+	ApprovalID       int64             `json:"approval_id,omitempty"`
+	TaskID           int64             `json:"task_id,omitempty"`
+	Evidence         *EvidenceArtifact `json:"evidence,omitempty"`
+	Result           *Result           `json:"result,omitempty"`
+	MutatingActions  []string          `json:"mutating_actions,omitempty"`
+	ErrorCode        string            `json:"error_code,omitempty"`
+	ErrorMessage     string            `json:"error_message,omitempty"`
+	Approval         *sqlite.Approval  `json:"-"`
+}
+
+type Result struct {
+	Status                    string                      `json:"status"`
+	GoalID                    int64                       `json:"goal_id"`
+	TaskID                    int64                       `json:"task_id,omitempty"`
+	RunID                     int64                       `json:"run_id,omitempty"`
+	RunArtifactID             int64                       `json:"run_artifact_id,omitempty"`
+	EvidenceID                int64                       `json:"evidence_id"`
+	EvidenceType              string                      `json:"evidence_type"`
+	AdapterStatus             string                      `json:"adapter_status,omitempty"`
+	AdapterKind               string                      `json:"adapter_kind,omitempty"`
+	StartURLs                 []string                    `json:"start_urls"`
+	AllowedDomains            []string                    `json:"allowed_domains"`
+	MaxPages                  int                         `json:"max_pages"`
+	MaxDurationSeconds        int                         `json:"max_duration_seconds"`
+	SiteProfiles              []huginnbrowser.SiteProfile `json:"site_profiles,omitempty"`
+	BrowserSession            *BrowserSessionReference    `json:"browser_session,omitempty"`
+	VisitedURLs               []string                    `json:"visited_urls,omitempty"`
+	PageResults               []huginnbrowser.PageResult  `json:"page_results,omitempty"`
+	ExtractedTextSummary      string                      `json:"extracted_text_summary,omitempty"`
+	Screenshots               []string                    `json:"screenshots,omitempty"`
+	ScreenshotMetadata        []ScreenshotMetadata        `json:"screenshot_metadata,omitempty"`
+	SelectedLinks             []SelectedLink              `json:"selected_links,omitempty"`
+	DownloadedFiles           []DownloadedFileMetadata    `json:"downloaded_files,omitempty"`
+	FormStateSummary          string                      `json:"form_state_summary,omitempty"`
+	BrowserErrorRecoveryNotes []string                    `json:"browser_error_recovery_notes,omitempty"`
+	Confidence                string                      `json:"confidence,omitempty"`
+	Limitations               []string                    `json:"limitations,omitempty"`
+	ActionLog                 []string                    `json:"action_log,omitempty"`
+	ErrorCode                 string                      `json:"error_code,omitempty"`
+	ErrorMessage              string                      `json:"error_message,omitempty"`
+	Evidence                  sqlite.GoalEvidence         `json:"-"`
 }
 
 type ReadOnlyRunner interface {
 	Run(context.Context, ReadOnlyTask) (Result, error)
+}
+
+type PluginRunner interface {
+	RunPlugin(context.Context, PluginRequest) (PluginResponse, error)
 }
 
 type Service struct {
@@ -125,400 +151,450 @@ type Service struct {
 	Adapter huginnbrowser.Adapter
 }
 
+func (service Service) RunPlugin(ctx context.Context, request PluginRequest) (PluginResponse, error) {
+	riskClass := ClassifyRisk(request.Actions)
+	if riskClass == RiskClassReadOnly {
+		if request.TaskID > 0 && request.GoalID == 0 {
+			result, err := service.RunWorkEvidence(ctx, request.workEvidenceTask())
+			response := PluginResponse{
+				Status:           result.Status,
+				RequestID:        strings.TrimSpace(request.RequestID),
+				RiskClass:        riskClass,
+				ApprovalRequired: false,
+				TaskID:           result.TaskID,
+				Result:           &result,
+				ErrorCode:        result.ErrorCode,
+				ErrorMessage:     result.ErrorMessage,
+			}
+			if result.RunArtifactID > 0 {
+				response.Evidence = &EvidenceArtifact{
+					ID:        result.RunArtifactID,
+					Type:      WorkEvidenceType,
+					URI:       defaultResultURI(result),
+					Summary:   result.ExtractedTextSummary,
+					CreatedBy: defaultEvidenceCreatedBy,
+				}
+			}
+			return response, err
+		}
+		result, err := service.Run(ctx, request.readOnlyTask())
+		response := PluginResponse{
+			Status:           result.Status,
+			RequestID:        strings.TrimSpace(request.RequestID),
+			RiskClass:        riskClass,
+			ApprovalRequired: false,
+			Result:           &result,
+			ErrorCode:        result.ErrorCode,
+			ErrorMessage:     result.ErrorMessage,
+		}
+		if result.EvidenceID > 0 {
+			response.Evidence = &EvidenceArtifact{
+				ID:        result.EvidenceID,
+				Type:      result.EvidenceType,
+				URI:       result.Evidence.URI,
+				Summary:   result.Evidence.Summary,
+				CreatedBy: result.Evidence.CreatedBy,
+			}
+		}
+		return response, err
+	}
+
+	if service.Store == nil {
+		return PluginResponse{}, fmt.Errorf("browser executor requires store")
+	}
+	if err := validateMutationPluginRequest(request); err != nil {
+		return PluginResponse{
+			Status:          "failed",
+			RequestID:       strings.TrimSpace(request.RequestID),
+			RiskClass:       riskClass,
+			MutatingActions: mutatingActions(request.Actions),
+			ErrorCode:       "invalid_request",
+			ErrorMessage:    err.Error(),
+		}, err
+	}
+	blockedTask, approval, err := service.Store.BlockTaskAndRequestApproval(ctx, sqlite.BlockTaskAndRequestApprovalParams{
+		TaskID:      request.TaskID,
+		RequestedBy: defaultString(strings.TrimSpace(request.RequestedBy), defaultEvidenceCreatedBy),
+	})
+	if err != nil {
+		return PluginResponse{
+			Status:          "failed",
+			RequestID:       strings.TrimSpace(request.RequestID),
+			RiskClass:       riskClass,
+			MutatingActions: mutatingActions(request.Actions),
+			ErrorCode:       "approval_request_failed",
+			ErrorMessage:    err.Error(),
+		}, err
+	}
+	return PluginResponse{
+		Status:           "approval_required",
+		RequestID:        strings.TrimSpace(request.RequestID),
+		RiskClass:        riskClass,
+		ApprovalRequired: true,
+		ApprovalID:       approval.ID,
+		TaskID:           blockedTask.ID,
+		MutatingActions:  mutatingActions(request.Actions),
+		ErrorCode:        "approval_required",
+		ErrorMessage:     "external browser mutation requires Odin approval before execution",
+		Approval:         &approval,
+	}, nil
+}
+
 func (service Service) Run(ctx context.Context, task ReadOnlyTask) (Result, error) {
 	if service.Store == nil {
 		return Result{}, fmt.Errorf("browser executor requires store")
 	}
-	riskClass := ClassifyRisk(task.Actions)
-	if riskClass != RiskReadOnly {
-		if task.TaskID <= 0 {
-			return Result{}, ValidateReadOnlyTask(task)
-		}
-		if err := ValidateBrowserTaskEnvelope(task); err != nil {
-			return Result{}, err
-		}
-		return service.requestApproval(ctx, task, riskClass)
-	}
 	if err := ValidateReadOnlyTask(task); err != nil {
+		return Result{}, err
+	}
+	resolvedTask := task
+	sessionRef, err := service.resolveBrowserSession(ctx, task)
+	if err != nil {
+		return Result{}, err
+	}
+	resolvedTask.BrowserSession = sessionRef
+	adapter := service.Adapter
+	if adapter == nil {
+		adapter = huginnbrowser.SelectAdapterFromEnv()
+	}
+	adapterResponse, err := adapter.Run(ctx, huginnbrowser.Request{
+		GoalID:             resolvedTask.GoalID,
+		Mode:               resolvedTask.WorkerMode,
+		Objective:          resolvedTask.Objective,
+		StartURLs:          append([]string{}, resolvedTask.StartURLs...),
+		AllowedDomains:     append([]string{}, resolvedTask.AllowedDomains...),
+		MaxPages:           resolvedTask.MaxPages,
+		MaxDurationSeconds: resolvedTask.MaxDurationSeconds,
+		EvidenceRequired:   resolvedTask.EvidenceRequired,
+		SiteProfiles:       append([]huginnbrowser.SiteProfile{}, resolvedTask.SiteProfiles...),
+		BrowserSession:     cloneBrowserSessionReference(resolvedTask.BrowserSession),
+	})
+	if err != nil {
+		return Result{
+			Status:       "failed",
+			GoalID:       resolvedTask.GoalID,
+			ErrorCode:    "adapter_failed",
+			ErrorMessage: err.Error(),
+		}, fmt.Errorf("browser adapter failed: %w", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"executor": "browser_readonly",
+		"status":   "adapter_response_recorded",
+		"task":     resolvedTask,
+		"adapter":  adapterResponse,
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	evidence, err := service.Store.AddGoalEvidence(ctx, sqlite.AddGoalEvidenceParams{
+		GoalID:       resolvedTask.GoalID,
+		EvidenceType: EvidenceType,
+		Summary:      defaultEvidenceSummary(adapterResponse),
+		URI:          defaultEvidenceURI(resolvedTask, adapterResponse),
+		PayloadJSON:  string(payload),
+		CreatedBy:    defaultEvidenceCreatedBy,
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{
+		Status:                    "recorded",
+		GoalID:                    resolvedTask.GoalID,
+		EvidenceID:                evidence.ID,
+		EvidenceType:              evidence.EvidenceType,
+		AdapterStatus:             adapterResponse.Status,
+		AdapterKind:               adapterResponse.AdapterKind,
+		StartURLs:                 append([]string{}, resolvedTask.StartURLs...),
+		AllowedDomains:            append([]string{}, resolvedTask.AllowedDomains...),
+		MaxPages:                  resolvedTask.MaxPages,
+		MaxDurationSeconds:        resolvedTask.MaxDurationSeconds,
+		SiteProfiles:              append([]huginnbrowser.SiteProfile{}, resolvedTask.SiteProfiles...),
+		BrowserSession:            cloneBrowserSessionReference(resolvedTask.BrowserSession),
+		VisitedURLs:               append([]string{}, adapterResponse.VisitedURLs...),
+		PageResults:               append([]huginnbrowser.PageResult{}, adapterResponse.PageResults...),
+		ExtractedTextSummary:      adapterResponse.ExtractedTextSummary,
+		Screenshots:               append([]string{}, adapterResponse.Screenshots...),
+		ScreenshotMetadata:        append([]ScreenshotMetadata{}, adapterResponse.ScreenshotMetadata...),
+		SelectedLinks:             append([]SelectedLink{}, adapterResponse.SelectedLinks...),
+		DownloadedFiles:           append([]DownloadedFileMetadata{}, adapterResponse.DownloadedFiles...),
+		FormStateSummary:          adapterResponse.FormStateSummary,
+		BrowserErrorRecoveryNotes: append([]string{}, adapterResponse.BrowserErrorRecoveryNotes...),
+		Confidence:                adapterResponse.Confidence,
+		Limitations:               append([]string{}, adapterResponse.Limitations...),
+		ActionLog:                 append([]string{}, adapterResponse.ActionLog...),
+		Evidence:                  evidence,
+	}, nil
+}
+
+func (service Service) RunWorkEvidence(ctx context.Context, task WorkEvidenceTask) (Result, error) {
+	if service.Store == nil {
+		return Result{}, fmt.Errorf("browser executor requires store")
+	}
+	if err := ValidateWorkEvidenceTask(task); err != nil {
+		return Result{}, err
+	}
+	storedTask, err := service.Store.GetTask(ctx, task.TaskID)
+	if err != nil {
+		return Result{}, err
+	}
+	resolvedTask := task
+	if strings.TrimSpace(resolvedTask.Objective) == "" {
+		resolvedTask.Objective = storedTask.Title
+	}
+	readOnlyTask := resolvedTask.readOnlyTask()
+	sessionRef, err := service.resolveBrowserSession(ctx, readOnlyTask)
+	if err != nil {
+		return Result{}, err
+	}
+	resolvedTask.BrowserSession = sessionRef
+	readOnlyTask.BrowserSession = sessionRef
+	attempt, err := service.nextWorkEvidenceAttempt(ctx, task.TaskID)
+	if err != nil {
+		return Result{}, err
+	}
+	run, err := service.Store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.TaskID,
+		Executor: WorkEvidenceExecutor,
+		Attempt:  attempt,
+		Status:   "running",
+	})
+	if err != nil {
 		return Result{}, err
 	}
 	adapter := service.Adapter
 	if adapter == nil {
 		adapter = huginnbrowser.SelectAdapterFromEnv()
 	}
-	browserSession, err := service.attachBrowserSession(ctx, task)
+	adapterResponse, adapterErr := adapter.Run(ctx, huginnbrowser.Request{
+		Mode:               resolvedTask.WorkerMode,
+		Objective:          resolvedTask.Objective,
+		StartURLs:          append([]string{}, resolvedTask.StartURLs...),
+		AllowedDomains:     append([]string{}, resolvedTask.AllowedDomains...),
+		MaxPages:           resolvedTask.MaxPages,
+		MaxDurationSeconds: resolvedTask.MaxDurationSeconds,
+		EvidenceRequired:   resolvedTask.EvidenceRequired,
+		SiteProfiles:       append([]huginnbrowser.SiteProfile{}, resolvedTask.SiteProfiles...),
+		BrowserSession:     cloneBrowserSessionReference(resolvedTask.BrowserSession),
+	})
+	if adapterErr != nil {
+		adapterResponse = huginnbrowser.Response{
+			Status:                    "failed",
+			AdapterKind:               "unknown",
+			VisitedURLs:               append([]string{}, resolvedTask.StartURLs...),
+			ExtractedTextSummary:      "Browser adapter failed before evidence capture completed.",
+			ErrorCode:                 "adapter_failed",
+			ErrorMessage:              adapterErr.Error(),
+			BrowserErrorRecoveryNotes: []string{"Inspect browser adapter configuration and retry the capture."},
+			Confidence:                "failed_capture",
+			Limitations:               []string{"Adapter returned an execution error."},
+		}
+	}
+	detailsJSON, err := browserWorkEvidenceDetailsJSON(resolvedTask, adapterResponse)
 	if err != nil {
 		return Result{}, err
 	}
-	adapterResponse, err := adapter.Run(ctx, huginnbrowser.Request{
-		GoalID:             task.GoalID,
-		Mode:               task.WorkerMode,
-		Objective:          task.Objective,
-		StartURLs:          append([]string{}, task.StartURLs...),
-		AllowedDomains:     append([]string{}, task.AllowedDomains...),
-		MaxPages:           task.MaxPages,
-		MaxDurationSeconds: task.MaxDurationSeconds,
-		EvidenceRequired:   task.EvidenceRequired,
-		SiteProfiles:       append([]huginnbrowser.SiteProfile{}, task.SiteProfiles...),
-		BrowserSession:     browserSession,
+	artifact, err := service.Store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        run.ID,
+		ArtifactType: WorkEvidenceType,
+		Summary:      defaultEvidenceSummary(adapterResponse),
+		DetailsJSON:  detailsJSON,
 	})
 	if err != nil {
-		result := Result{
-			Status:           "failed",
-			GoalID:           task.GoalID,
-			TaskID:           task.TaskID,
-			BrowserSessionID: task.BrowserSessionID,
-			BrowserSession:   browserSession,
-			RiskClass:        riskClass,
-			ErrorCode:        "adapter_failed",
-			ErrorMessage:     err.Error(),
-		}
-		if evidence, evidenceErr := service.recordFailedEvidence(ctx, task, result); evidenceErr == nil {
-			result.EvidenceID = evidence.ID
-			result.EvidenceType = evidence.EvidenceType
-			result.Evidence = evidence
-		}
-		return result, fmt.Errorf("browser adapter failed: %w", err)
+		return Result{}, err
 	}
 	result := Result{
-		Status:               "recorded",
-		GoalID:               task.GoalID,
-		TaskID:               task.TaskID,
-		RunID:                task.RunID,
-		BrowserSessionID:     task.BrowserSessionID,
-		BrowserSession:       browserSession,
-		EvidenceType:         EvidenceType,
-		RiskClass:            riskClass,
-		AdapterStatus:        adapterResponse.Status,
-		AdapterKind:          adapterResponse.AdapterKind,
-		StartURLs:            append([]string{}, task.StartURLs...),
-		AllowedDomains:       append([]string{}, task.AllowedDomains...),
-		MaxPages:             task.MaxPages,
-		MaxDurationSeconds:   task.MaxDurationSeconds,
-		SiteProfiles:         append([]huginnbrowser.SiteProfile{}, task.SiteProfiles...),
-		VisitedURLs:          append([]string{}, adapterResponse.VisitedURLs...),
-		PageResults:          append([]huginnbrowser.PageResult{}, adapterResponse.PageResults...),
-		ExtractedTextSummary: adapterResponse.ExtractedTextSummary,
-		Screenshots:          append([]string{}, adapterResponse.Screenshots...),
-		ScreenshotMetadata:   append([]huginnbrowser.ScreenshotMetadata{}, adapterResponse.ScreenshotMetadata...),
-		SelectedLinks:        append([]huginnbrowser.SelectedLink{}, adapterResponse.SelectedLinks...),
-		DownloadedFiles:      append([]huginnbrowser.DownloadedFile{}, adapterResponse.DownloadedFiles...),
-		FormStateSummary:     append([]huginnbrowser.FormStateSummary{}, adapterResponse.FormStateSummary...),
-		BrowserNotes:         append([]string{}, adapterResponse.BrowserNotes...),
-		Confidence:           adapterResponse.Confidence,
-		Limitations:          append([]string{}, adapterResponse.Limitations...),
-		ActionLog:            append([]string{}, adapterResponse.ActionLog...),
-		ErrorCode:            adapterResponse.ErrorCode,
-		ErrorMessage:         adapterResponse.ErrorMessage,
+		Status:                    "recorded",
+		TaskID:                    resolvedTask.TaskID,
+		RunID:                     run.ID,
+		RunArtifactID:             artifact.ID,
+		EvidenceType:              WorkEvidenceType,
+		AdapterStatus:             adapterResponse.Status,
+		AdapterKind:               adapterResponse.AdapterKind,
+		StartURLs:                 append([]string{}, resolvedTask.StartURLs...),
+		AllowedDomains:            append([]string{}, resolvedTask.AllowedDomains...),
+		MaxPages:                  resolvedTask.MaxPages,
+		MaxDurationSeconds:        resolvedTask.MaxDurationSeconds,
+		SiteProfiles:              append([]huginnbrowser.SiteProfile{}, resolvedTask.SiteProfiles...),
+		BrowserSession:            cloneBrowserSessionReference(resolvedTask.BrowserSession),
+		VisitedURLs:               append([]string{}, adapterResponse.VisitedURLs...),
+		PageResults:               append([]huginnbrowser.PageResult{}, adapterResponse.PageResults...),
+		ExtractedTextSummary:      adapterResponse.ExtractedTextSummary,
+		Screenshots:               append([]string{}, adapterResponse.Screenshots...),
+		ScreenshotMetadata:        append([]ScreenshotMetadata{}, adapterResponse.ScreenshotMetadata...),
+		SelectedLinks:             append([]SelectedLink{}, adapterResponse.SelectedLinks...),
+		DownloadedFiles:           append([]DownloadedFileMetadata{}, adapterResponse.DownloadedFiles...),
+		FormStateSummary:          adapterResponse.FormStateSummary,
+		BrowserErrorRecoveryNotes: append([]string{}, adapterResponse.BrowserErrorRecoveryNotes...),
+		Confidence:                adapterResponse.Confidence,
+		Limitations:               append([]string{}, adapterResponse.Limitations...),
+		ActionLog:                 append([]string{}, adapterResponse.ActionLog...),
+		ErrorCode:                 adapterResponse.ErrorCode,
+		ErrorMessage:              adapterResponse.ErrorMessage,
 	}
-	if err := service.recordEvidenceArtifacts(ctx, task, adapterResponse, &result); err != nil {
+	finishArtifacts := fmt.Sprintf(`[{"type":%q,"run_artifact_id":%d,"summary":%q}]`, WorkEvidenceType, artifact.ID, artifact.Summary)
+	if browserEvidenceFailed(adapterResponse) {
+		result.Status = "failed"
+		if result.ErrorCode == "" {
+			result.ErrorCode = "browser_capture_failed"
+		}
+		if result.ErrorMessage == "" {
+			result.ErrorMessage = "browser evidence capture failed"
+		}
+		finishedTask, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+			RunID:          run.ID,
+			RunStatus:      "failed",
+			TaskStatus:     "failed",
+			Summary:        defaultEvidenceSummary(adapterResponse),
+			TerminalReason: "browser_evidence_capture_failed",
+			ArtifactsJSON:  finishArtifacts,
+		})
+		if err != nil {
+			return Result{}, err
+		}
+		_ = service.Store.RecordTaskRecoveryRecommendation(ctx, sqlite.RecordTaskRecoveryRecommendationParams{
+			Task:                   finishedTask,
+			Decision:               "retry_browser_capture",
+			RetryEligible:          true,
+			RecoveryRecommendation: browserRecoveryRecommendation(adapterResponse),
+			Source:                 "browser_evidence",
+		})
+		return result, nil
+	}
+	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:          run.ID,
+		Status:         "completed",
+		Summary:        defaultEvidenceSummary(adapterResponse),
+		TerminalReason: "browser_evidence_recorded",
+		ArtifactsJSON:  finishArtifacts,
+	}); err != nil {
 		return Result{}, err
 	}
 	return result, nil
 }
 
-func (service Service) attachBrowserSession(ctx context.Context, task ReadOnlyTask) (*huginnbrowser.SessionRef, error) {
-	if task.BrowserSessionID <= 0 {
-		return nil, nil
+func (request PluginRequest) readOnlyTask() ReadOnlyTask {
+	return ReadOnlyTask{
+		GoalID:             request.GoalID,
+		WorkerMode:         request.WorkerMode,
+		Objective:          request.Objective,
+		AllowedDomains:     append([]string{}, request.AllowedDomains...),
+		StartURLs:          append([]string{}, request.StartURLs...),
+		MaxPages:           request.MaxPages,
+		MaxDurationSeconds: request.MaxDurationSeconds,
+		EvidenceRequired:   request.EvidenceRequired,
+		SiteProfiles:       append([]huginnbrowser.SiteProfile{}, request.SiteProfiles...),
+		BrowserSessionID:   request.BrowserSessionID,
+		BrowserSession:     cloneBrowserSessionReference(request.BrowserSession),
+		Actions:            append([]string{}, request.Actions...),
+	}
+}
+
+func (request PluginRequest) workEvidenceTask() WorkEvidenceTask {
+	return WorkEvidenceTask{
+		TaskID:             request.TaskID,
+		WorkerMode:         request.WorkerMode,
+		Objective:          request.Objective,
+		AllowedDomains:     append([]string{}, request.AllowedDomains...),
+		StartURLs:          append([]string{}, request.StartURLs...),
+		MaxPages:           request.MaxPages,
+		MaxDurationSeconds: request.MaxDurationSeconds,
+		EvidenceRequired:   request.EvidenceRequired,
+		SiteProfiles:       append([]huginnbrowser.SiteProfile{}, request.SiteProfiles...),
+		BrowserSessionID:   request.BrowserSessionID,
+		BrowserSession:     cloneBrowserSessionReference(request.BrowserSession),
+		Actions:            append([]string{}, request.Actions...),
+	}
+}
+
+func (task WorkEvidenceTask) readOnlyTask() ReadOnlyTask {
+	return ReadOnlyTask{
+		WorkerMode:         task.WorkerMode,
+		Objective:          task.Objective,
+		AllowedDomains:     append([]string{}, task.AllowedDomains...),
+		StartURLs:          append([]string{}, task.StartURLs...),
+		MaxPages:           task.MaxPages,
+		MaxDurationSeconds: task.MaxDurationSeconds,
+		EvidenceRequired:   task.EvidenceRequired,
+		SiteProfiles:       append([]huginnbrowser.SiteProfile{}, task.SiteProfiles...),
+		BrowserSessionID:   task.BrowserSessionID,
+		BrowserSession:     cloneBrowserSessionReference(task.BrowserSession),
+		Actions:            append([]string{}, task.Actions...),
+	}
+}
+
+func validateMutationPluginRequest(request PluginRequest) error {
+	if request.TaskID <= 0 {
+		return fmt.Errorf("task_id is required for mutation-class browser requests")
+	}
+	task := request.readOnlyTask()
+	task.GoalID = 1
+	task.Actions = nil
+	return ValidateReadOnlyTask(task)
+}
+
+func (service Service) resolveBrowserSession(ctx context.Context, task ReadOnlyTask) (*BrowserSessionReference, error) {
+	if task.BrowserSessionID == 0 {
+		return cloneBrowserSessionReference(task.BrowserSession), nil
 	}
 	session, err := service.Store.GetBrowserSession(ctx, task.BrowserSessionID)
 	if err != nil {
 		return nil, err
 	}
 	if session.Status != sqlite.BrowserSessionStatusVerified {
-		return nil, fmt.Errorf("browser session %d must be verified before attachment", session.ID)
+		return nil, fmt.Errorf("browser session %d must be verified before read-only browser use; status=%s", session.ID, session.Status)
 	}
-	allowedDomains, err := normalizeAllowedDomains(task.AllowedDomains)
-	if err != nil {
+	if err := ensureBrowserSessionDomainMatchesTask(session, task); err != nil {
 		return nil, err
 	}
-	if !domainAllowed(session.Domain, allowedDomains) {
-		return nil, fmt.Errorf("browser session domain %q is not allowed for this request", session.Domain)
+	ref := browserSessionReference(session)
+	return &ref, nil
+}
+
+func ensureBrowserSessionDomainMatchesTask(session sqlite.BrowserSession, task ReadOnlyTask) error {
+	allowedDomains, err := normalizeAllowedDomains(task.AllowedDomains)
+	if err != nil {
+		return err
+	}
+	sessionDomain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(session.Domain)), ".")
+	if sessionDomain == "" {
+		return fmt.Errorf("browser session domain is required")
+	}
+	if !domainAllowed(sessionDomain, allowedDomains) {
+		return fmt.Errorf("browser session domain %q is not in allowed_domains", sessionDomain)
 	}
 	for _, rawURL := range task.StartURLs {
 		host, err := readOnlyURLHost(rawURL)
 		if err != nil {
-			return nil, err
-		}
-		if !domainAllowed(host, []string{session.Domain}) {
-			return nil, fmt.Errorf("browser session domain %q does not match start url %q", session.Domain, rawURL)
-		}
-	}
-	if err := service.Store.RecordBrowserProfileAttached(ctx, sqlite.RecordBrowserProfileAttachedParams{
-		SessionID: session.ID,
-		GoalID:    task.GoalID,
-		TaskID:    task.TaskID,
-		Actor:     defaultEvidenceCreatedBy,
-		Reason:    "read_only_browser_request",
-	}); err != nil {
-		return nil, err
-	}
-	return &huginnbrowser.SessionRef{
-		ID:                   session.ID,
-		Domain:               session.Domain,
-		PermissionTier:       string(session.PermissionTier),
-		Status:               string(session.Status),
-		ProfileStoragePolicy: string(session.ProfileStoragePolicy),
-		ProfilePath:          session.ProfilePath,
-	}, nil
-}
-
-func (service Service) recordEvidenceArtifacts(ctx context.Context, task ReadOnlyTask, response huginnbrowser.Response, result *Result) error {
-	artifact := evidenceArtifactFromResponse(task, response)
-	payload, err := json.Marshal(map[string]any{
-		"executor": "browser_readonly",
-		"status":   "adapter_response_recorded",
-		"task":     task,
-		"adapter":  response,
-		"artifact": artifact,
-	})
-	if err != nil {
-		return err
-	}
-	if task.GoalID > 0 {
-		evidence, err := service.Store.AddGoalEvidence(ctx, sqlite.AddGoalEvidenceParams{
-			GoalID:       task.GoalID,
-			EvidenceType: EvidenceType,
-			Summary:      artifact.Summary,
-			URI:          artifact.URI,
-			PayloadJSON:  string(payload),
-			CreatedBy:    defaultEvidenceCreatedBy,
-		})
-		if err != nil {
 			return err
 		}
-		result.EvidenceID = evidence.ID
-		result.EvidenceType = evidence.EvidenceType
-		result.Evidence = evidence
-		artifact.EvidenceID = evidence.ID
-	}
-	if task.RunID > 0 {
-		details, err := json.Marshal(artifact)
-		if err != nil {
-			return err
+		if !domainAllowed(host, []string{sessionDomain}) {
+			return fmt.Errorf("browser session domain %q cannot be used for start url host %q", sessionDomain, host)
 		}
-		runArtifact, err := service.Store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
-			RunID:        task.RunID,
-			ArtifactType: WorkArtifactType,
-			Summary:      artifact.Summary,
-			DetailsJSON:  string(details),
-		})
-		if err != nil {
-			return err
-		}
-		result.RunArtifact = &runArtifact
-		artifact.RunArtifactID = runArtifact.ID
-	}
-	if task.TaskID > 0 {
-		if err := service.appendTaskEvidenceArtifact(ctx, task.TaskID, artifact); err != nil {
-			return err
-		}
-		result.WorkArtifact = &artifact
 	}
 	return nil
 }
 
-func evidenceArtifactFromResponse(task ReadOnlyTask, response huginnbrowser.Response) EvidenceArtifact {
-	return EvidenceArtifact{
-		Type:                 WorkArtifactType,
-		EvidenceType:         EvidenceType,
-		Status:               "review_required",
-		GoalID:               task.GoalID,
-		TaskID:               task.TaskID,
-		RunID:                task.RunID,
-		AdapterStatus:        response.Status,
-		AdapterKind:          response.AdapterKind,
-		Summary:              defaultEvidenceSummary(response),
-		URI:                  defaultEvidenceURI(task, response),
-		StartURLs:            append([]string{}, task.StartURLs...),
-		AllowedDomains:       append([]string{}, task.AllowedDomains...),
-		PageResults:          append([]huginnbrowser.PageResult{}, response.PageResults...),
-		Screenshots:          append([]string{}, response.Screenshots...),
-		ScreenshotMetadata:   append([]huginnbrowser.ScreenshotMetadata{}, response.ScreenshotMetadata...),
-		SelectedLinks:        append([]huginnbrowser.SelectedLink{}, response.SelectedLinks...),
-		DownloadedFiles:      append([]huginnbrowser.DownloadedFile{}, response.DownloadedFiles...),
-		FormStateSummary:     append([]huginnbrowser.FormStateSummary{}, response.FormStateSummary...),
-		ExtractedTextSummary: response.ExtractedTextSummary,
-		BrowserNotes:         append([]string{}, response.BrowserNotes...),
-		Confidence:           response.Confidence,
-		Limitations:          append([]string{}, response.Limitations...),
+func browserSessionReference(session sqlite.BrowserSession) BrowserSessionReference {
+	ref := BrowserSessionReference{
+		ID:                   session.ID,
+		Domain:               session.Domain,
+		Status:               string(session.Status),
+		PermissionTier:       string(session.PermissionTier),
+		ProfileStoragePolicy: string(session.ProfileStoragePolicy),
+		ProfilePath:          session.ProfilePath,
 	}
+	if session.LastVerifiedAt != nil {
+		ref.LastVerifiedAt = session.LastVerifiedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
+	}
+	return ref
 }
 
-func (service Service) appendTaskEvidenceArtifact(ctx context.Context, taskID int64, artifact EvidenceArtifact) error {
-	task, err := service.Store.GetTask(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	artifacts := ParseTaskEvidenceArtifacts(task.ArtifactsJSON)
-	artifacts = append(artifacts, artifact)
-	raw, err := json.Marshal(artifacts)
-	if err != nil {
-		return err
-	}
-	_, err = service.Store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
-		TaskID:         task.ID,
-		Status:         task.Status,
-		Summary:        task.Summary,
-		TerminalReason: task.TerminalReason,
-		ArtifactsJSON:  string(raw),
-	})
-	return err
-}
-
-func ParseTaskEvidenceArtifacts(raw string) []EvidenceArtifact {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "null" {
+func cloneBrowserSessionReference(ref *BrowserSessionReference) *BrowserSessionReference {
+	if ref == nil {
 		return nil
 	}
-	var artifacts []EvidenceArtifact
-	if err := json.Unmarshal([]byte(raw), &artifacts); err == nil {
-		return filterEvidenceArtifacts(artifacts)
-	}
-	var generic []map[string]any
-	if err := json.Unmarshal([]byte(raw), &generic); err != nil {
-		return nil
-	}
-	artifacts = make([]EvidenceArtifact, 0, len(generic))
-	for _, item := range generic {
-		if fmt.Sprint(item["type"]) != WorkArtifactType {
-			continue
-		}
-		encoded, err := json.Marshal(item)
-		if err != nil {
-			continue
-		}
-		var artifact EvidenceArtifact
-		if err := json.Unmarshal(encoded, &artifact); err == nil {
-			artifacts = append(artifacts, artifact)
-		}
-	}
-	return artifacts
-}
-
-func filterEvidenceArtifacts(artifacts []EvidenceArtifact) []EvidenceArtifact {
-	filtered := make([]EvidenceArtifact, 0, len(artifacts))
-	for _, artifact := range artifacts {
-		if artifact.Type == WorkArtifactType || artifact.EvidenceType == EvidenceType || artifact.EvidenceType == EvidenceTypeApprovalRequired {
-			filtered = append(filtered, artifact)
-		}
-	}
-	return filtered
-}
-
-func (service Service) requestApproval(ctx context.Context, task ReadOnlyTask, riskClass string) (Result, error) {
-	if task.TaskID <= 0 {
-		return Result{}, fmt.Errorf("task_id must be positive for approval-required browser requests")
-	}
-	if _, err := service.Store.BlockTask(ctx, sqlite.BlockTaskParams{TaskID: task.TaskID, Reason: "approval_required"}); err != nil {
-		return Result{}, err
-	}
-	var runID *int64
-	if task.RunID > 0 {
-		runID = &task.RunID
-	}
-	approval, err := service.Store.RequestApproval(ctx, sqlite.RequestApprovalParams{
-		TaskID:      task.TaskID,
-		RunID:       runID,
-		Status:      "pending",
-		RequestedBy: defaultEvidenceCreatedBy,
-	})
-	if err != nil {
-		return Result{}, err
-	}
-	artifact := EvidenceArtifact{
-		Type:             WorkArtifactType,
-		EvidenceType:     EvidenceTypeApprovalRequired,
-		Status:           "approval_required",
-		GoalID:           task.GoalID,
-		TaskID:           task.TaskID,
-		RunID:            task.RunID,
-		ApprovalID:       approval.ID,
-		ApprovalRequired: true,
-		RiskClass:        riskClass,
-		Summary:          "browser request requires approval before external mutation",
-		URI:              defaultEvidenceURI(task, huginnbrowser.Response{}),
-		StartURLs:        append([]string{}, task.StartURLs...),
-		AllowedDomains:   append([]string{}, task.AllowedDomains...),
-		BrowserNotes:     []string{"adapter was not executed because the request includes an external mutation action"},
-		Confidence:       "high",
-		Limitations:      []string{"no browsing evidence collected before approval"},
-	}
-	payload, err := json.Marshal(map[string]any{
-		"executor":          "huginn_browser_plugin",
-		"status":            "approval_required",
-		"task":              task,
-		"risk_class":        riskClass,
-		"approval_required": true,
-		"approval_id":       approval.ID,
-		"executed":          false,
-		"artifact":          artifact,
-	})
-	if err != nil {
-		return Result{}, err
-	}
-	var evidence sqlite.GoalEvidence
-	if task.GoalID > 0 {
-		evidence, err = service.Store.AddGoalEvidence(ctx, sqlite.AddGoalEvidenceParams{
-			GoalID:       task.GoalID,
-			EvidenceType: EvidenceTypeApprovalRequired,
-			Summary:      artifact.Summary,
-			URI:          artifact.URI,
-			PayloadJSON:  string(payload),
-			CreatedBy:    defaultEvidenceCreatedBy,
-		})
-		if err != nil {
-			return Result{}, err
-		}
-		artifact.EvidenceID = evidence.ID
-	}
-	if err := service.appendTaskEvidenceArtifact(ctx, task.TaskID, artifact); err != nil {
-		return Result{}, err
-	}
-	return Result{
-		Status:             "approval_required",
-		GoalID:             task.GoalID,
-		TaskID:             task.TaskID,
-		RunID:              task.RunID,
-		EvidenceID:         evidence.ID,
-		EvidenceType:       EvidenceTypeApprovalRequired,
-		RiskClass:          riskClass,
-		ApprovalRequired:   true,
-		ApprovalID:         approval.ID,
-		WorkArtifact:       &artifact,
-		StartURLs:          append([]string{}, task.StartURLs...),
-		AllowedDomains:     append([]string{}, task.AllowedDomains...),
-		MaxPages:           task.MaxPages,
-		MaxDurationSeconds: task.MaxDurationSeconds,
-		SiteProfiles:       append([]huginnbrowser.SiteProfile{}, task.SiteProfiles...),
-		ActionLog:          []string{"approval_required", "adapter_not_executed"},
-		BrowserNotes:       append([]string{}, artifact.BrowserNotes...),
-		Confidence:         artifact.Confidence,
-		Limitations:        append([]string{}, artifact.Limitations...),
-		Evidence:           evidence,
-	}, nil
-}
-
-func (service Service) recordFailedEvidence(ctx context.Context, task ReadOnlyTask, result Result) (sqlite.GoalEvidence, error) {
-	payload, err := json.Marshal(map[string]any{
-		"executor":   "huginn_browser_plugin",
-		"status":     "failed",
-		"task":       task,
-		"risk_class": result.RiskClass,
-		"error_code": result.ErrorCode,
-		"error":      result.ErrorMessage,
-	})
-	if err != nil {
-		return sqlite.GoalEvidence{}, err
-	}
-	return service.Store.AddGoalEvidence(ctx, sqlite.AddGoalEvidenceParams{
-		GoalID:       task.GoalID,
-		EvidenceType: EvidenceTypeFailed,
-		Summary:      "browser request failed before evidence collection completed",
-		URI:          defaultEvidenceURI(task, huginnbrowser.Response{}),
-		PayloadJSON:  string(payload),
-		CreatedBy:    defaultEvidenceCreatedBy,
-	})
+	clone := *ref
+	return &clone
 }
 
 func defaultEvidenceSummary(response huginnbrowser.Response) string {
@@ -537,21 +613,36 @@ func defaultEvidenceURI(task ReadOnlyTask, response huginnbrowser.Response) stri
 	return task.StartURLs[0]
 }
 
-func ValidateReadOnlyTask(task ReadOnlyTask) error {
-	if err := ValidateBrowserTaskEnvelope(task); err != nil {
-		return err
-	}
-	for _, action := range task.Actions {
-		if !isReadOnlyAction(action) {
-			return fmt.Errorf("mutation action %q is not allowed for read-only browser tasks", action)
+func defaultResultURI(result Result) string {
+	for _, uri := range result.VisitedURLs {
+		if strings.TrimSpace(uri) != "" {
+			return strings.TrimSpace(uri)
 		}
 	}
-	return nil
+	for _, uri := range result.StartURLs {
+		if strings.TrimSpace(uri) != "" {
+			return strings.TrimSpace(uri)
+		}
+	}
+	return ""
 }
 
-func ValidateBrowserTaskEnvelope(task ReadOnlyTask) error {
-	if task.GoalID <= 0 && task.TaskID <= 0 {
-		return fmt.Errorf("goal_id or task_id must be positive")
+func ValidateReadOnlyTask(task ReadOnlyTask) error {
+	return validateReadOnlyTask(task, true)
+}
+
+func ValidateWorkEvidenceTask(task WorkEvidenceTask) error {
+	if task.TaskID <= 0 {
+		return fmt.Errorf("task_id must be positive")
+	}
+	return validateReadOnlyTask(task.readOnlyTask(), false)
+}
+
+func validateReadOnlyTask(task ReadOnlyTask, requireGoal bool) error {
+	if task.GoalID <= 0 {
+		if requireGoal {
+			return fmt.Errorf("goal_id must be positive")
+		}
 	}
 	if strings.TrimSpace(task.Objective) == "" {
 		return fmt.Errorf("objective is required")
@@ -568,9 +659,20 @@ func ValidateBrowserTaskEnvelope(task ReadOnlyTask) error {
 	if task.MaxDurationSeconds <= 0 || task.MaxDurationSeconds > MaxDurationSecondsLimit {
 		return fmt.Errorf("max_duration_seconds must be between 1 and %d", MaxDurationSecondsLimit)
 	}
+	if task.BrowserSessionID < 0 {
+		return fmt.Errorf("browser_session_id must not be negative")
+	}
+	if task.BrowserSession != nil && task.BrowserSession.ID <= 0 {
+		return fmt.Errorf("browser session id must be positive")
+	}
 	allowedDomains, err := normalizeAllowedDomains(task.AllowedDomains)
 	if err != nil {
 		return err
+	}
+	for _, action := range task.Actions {
+		if !isReadOnlyAction(action) {
+			return fmt.Errorf("mutation action %q is not allowed for read-only browser tasks", action)
+		}
 	}
 	for _, profile := range task.SiteProfiles {
 		if strings.TrimSpace(profile.Domain) == "" {
@@ -603,13 +705,85 @@ func ValidateBrowserTaskEnvelope(task ReadOnlyTask) error {
 	return nil
 }
 
-func ClassifyRisk(actions []string) string {
-	for _, action := range actions {
-		if !isReadOnlyAction(action) {
-			return RiskExternalMutation
+func (service Service) nextWorkEvidenceAttempt(ctx context.Context, taskID int64) (int, error) {
+	var attempt int
+	if err := service.Store.DB().QueryRowContext(ctx, `SELECT COALESCE(MAX(attempt), 0) + 1 FROM runs WHERE task_id = ?`, taskID).Scan(&attempt); err != nil {
+		return 0, err
+	}
+	return attempt, nil
+}
+
+func browserWorkEvidenceDetailsJSON(task WorkEvidenceTask, response huginnbrowser.Response) (string, error) {
+	payload, err := json.Marshal(map[string]any{
+		"executor":                     WorkEvidenceExecutor,
+		"artifact_type":                WorkEvidenceType,
+		"status":                       response.Status,
+		"task_id":                      task.TaskID,
+		"start_urls":                   task.StartURLs,
+		"allowed_domains":              task.AllowedDomains,
+		"adapter_kind":                 response.AdapterKind,
+		"visited_urls":                 response.VisitedURLs,
+		"page_results":                 response.PageResults,
+		"page_title":                   firstPageTitle(response.PageResults),
+		"url":                          firstVisitedURL(task, response),
+		"extracted_text_summary":       response.ExtractedTextSummary,
+		"screenshots":                  response.Screenshots,
+		"screenshot_metadata":          response.ScreenshotMetadata,
+		"selected_links":               response.SelectedLinks,
+		"downloaded_files":             response.DownloadedFiles,
+		"form_state_summary":           response.FormStateSummary,
+		"browser_error_recovery_notes": response.BrowserErrorRecoveryNotes,
+		"confidence":                   response.Confidence,
+		"limitations":                  response.Limitations,
+		"action_log":                   response.ActionLog,
+		"error_code":                   response.ErrorCode,
+		"error_message":                response.ErrorMessage,
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func browserEvidenceFailed(response huginnbrowser.Response) bool {
+	switch strings.ToLower(strings.TrimSpace(response.Status)) {
+	case "", "completed", "recorded", "ok", "success":
+		return false
+	default:
+		return true
+	}
+}
+
+func browserRecoveryRecommendation(response huginnbrowser.Response) string {
+	for _, note := range response.BrowserErrorRecoveryNotes {
+		if strings.TrimSpace(note) != "" {
+			return strings.TrimSpace(note)
 		}
 	}
-	return RiskReadOnly
+	return "Retry browser evidence capture with a narrower URL set or inspect the browser adapter error before retrying."
+}
+
+func firstPageTitle(results []huginnbrowser.PageResult) string {
+	for _, result := range results {
+		if strings.TrimSpace(result.Title) != "" {
+			return strings.TrimSpace(result.Title)
+		}
+	}
+	return ""
+}
+
+func firstVisitedURL(task WorkEvidenceTask, response huginnbrowser.Response) string {
+	for _, uri := range response.VisitedURLs {
+		if strings.TrimSpace(uri) != "" {
+			return strings.TrimSpace(uri)
+		}
+	}
+	for _, uri := range task.StartURLs {
+		if strings.TrimSpace(uri) != "" {
+			return strings.TrimSpace(uri)
+		}
+	}
+	return ""
 }
 
 func normalizeAllowedDomains(domains []string) ([]string, error) {
@@ -665,4 +839,32 @@ func isReadOnlyAction(action string) bool {
 	default:
 		return false
 	}
+}
+
+func ClassifyRisk(actions []string) RiskClass {
+	for _, action := range actions {
+		if !isReadOnlyAction(action) {
+			return RiskClassExternalMutation
+		}
+	}
+	return RiskClassReadOnly
+}
+
+func mutatingActions(actions []string) []string {
+	mutating := make([]string, 0, len(actions))
+	for _, action := range actions {
+		normalized := strings.ToLower(strings.TrimSpace(action))
+		if normalized == "" || isReadOnlyAction(normalized) {
+			continue
+		}
+		mutating = append(mutating, normalized)
+	}
+	return mutating
+}
+
+func defaultString(value string, fallback string) string {
+	if strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return fallback
 }

@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -34,6 +36,7 @@ func TestExternalIssueUpsertIsIdempotentByProviderRepoAndNumber(t *testing.T) {
 		State:      "open",
 		LabelsJSON: `["odin:ready"]`,
 		SyncStatus: "eligible",
+		SyncCursor: "github:issue:acme/alpha:42:v1",
 	})
 	if err != nil {
 		t.Fatalf("UpsertExternalIssue(first) error = %v", err)
@@ -50,6 +53,7 @@ func TestExternalIssueUpsertIsIdempotentByProviderRepoAndNumber(t *testing.T) {
 		State:      "open",
 		LabelsJSON: `["odin:ready","backend"]`,
 		SyncStatus: "eligible",
+		SyncCursor: "github:issue:acme/alpha:42:v2",
 	})
 	if err != nil {
 		t.Fatalf("UpsertExternalIssue(second) error = %v", err)
@@ -60,6 +64,12 @@ func TestExternalIssueUpsertIsIdempotentByProviderRepoAndNumber(t *testing.T) {
 	}
 	if second.Title != "Updated title" || second.BodyHash != "sha256:updated" || second.LabelsJSON != `["odin:ready","backend"]` {
 		t.Fatalf("updated issue = %+v, want latest fields", second)
+	}
+	if second.SyncCursor != "github:issue:acme/alpha:42:v2" {
+		t.Fatalf("updated cursor = %q, want latest cursor", second.SyncCursor)
+	}
+	if len(second.AcceptanceCriteria) != 0 {
+		t.Fatalf("updated criteria = %#v, want none before criteria are provided", second.AcceptanceCriteria)
 	}
 
 	issues, err := store.ListExternalIssues(ctx, ListExternalIssuesParams{
@@ -74,5 +84,101 @@ func TestExternalIssueUpsertIsIdempotentByProviderRepoAndNumber(t *testing.T) {
 	}
 	if issues[0].ID != first.ID || issues[0].Number != 42 || issues[0].Title != "Updated title" {
 		t.Fatalf("listed issue = %+v, want updated issue", issues[0])
+	}
+	if issues[0].SyncCursor != "github:issue:acme/alpha:42:v2" {
+		t.Fatalf("listed cursor = %q, want persisted cursor", issues[0].SyncCursor)
+	}
+
+	withCriteria, err := store.UpsertExternalIssue(ctx, UpsertExternalIssueParams{
+		ProjectID:  project.ID,
+		Provider:   "github",
+		Repo:       "acme/alpha",
+		Number:     42,
+		Title:      "Updated title",
+		BodyHash:   "sha256:criteria",
+		URL:        "https://github.example/acme/alpha/issues/42",
+		State:      "open",
+		LabelsJSON: `["odin:ready","backend"]`,
+		SyncStatus: "eligible",
+		SyncCursor: "github:issue:acme/alpha:42:v3",
+		AcceptanceCriteria: []string{
+			"criteria persist through intake sync",
+			"criteria render into worker prompts",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpsertExternalIssue(criteria) error = %v", err)
+	}
+	wantCriteria := []string{"criteria persist through intake sync", "criteria render into worker prompts"}
+	if !reflect.DeepEqual(withCriteria.AcceptanceCriteria, wantCriteria) {
+		t.Fatalf("withCriteria.AcceptanceCriteria = %#v, want %#v", withCriteria.AcceptanceCriteria, wantCriteria)
+	}
+}
+
+func TestExternalIssueListSurvivesStoreRestart(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "external-issues-restart.db")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		_ = store.Close()
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	project, err := store.CreateProject(ctx, CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	if _, err := store.UpsertExternalIssue(ctx, UpsertExternalIssueParams{
+		ProjectID:  project.ID,
+		Provider:   "github",
+		Repo:       "acme/alpha",
+		Number:     43,
+		Title:      "Restart readable intake",
+		BodyHash:   "sha256:restart",
+		URL:        "https://github.example/acme/alpha/issues/43",
+		State:      "open",
+		LabelsJSON: `["odin:ready"]`,
+		SyncStatus: "eligible",
+		SyncCursor: "github:issue:acme/alpha:43",
+	}); err != nil {
+		_ = store.Close()
+		t.Fatalf("UpsertExternalIssue() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open(restart) error = %v", err)
+	}
+	defer reopened.Close()
+	if err := reopened.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate(restart) error = %v", err)
+	}
+	issues, err := reopened.ListExternalIssues(ctx, ListExternalIssuesParams{
+		Repo:       "acme/alpha",
+		SyncStatus: "eligible",
+	})
+	if err != nil {
+		t.Fatalf("ListExternalIssues(restart) error = %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("ListExternalIssues(restart) len = %d, want 1: %+v", len(issues), issues)
+	}
+	if issues[0].Number != 43 || issues[0].SyncCursor != "github:issue:acme/alpha:43" {
+		t.Fatalf("restarted issue = %+v, want durable external intake cursor", issues[0])
 	}
 }

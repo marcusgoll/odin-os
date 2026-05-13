@@ -13,7 +13,7 @@ date: 2026-04-30
 | Go daemon | `cmd/odin`, `internal/app/lifecycle`, `deploy/systemd/odin.service` | Partial target met. `serve` runs loops and HTTP endpoints. | Long-running agency daemon with scheduler/intake/dispatch/review loops. | Preserve and deepen. |
 | Binary entrypoint | `cmd/odin`; duplicate `cmd/odin-os` | `cmd/odin` established; `cmd/odin-os` duplicate. | One documented operator binary plus optional alias if justified. | Refactor decision. |
 | Runtime composition | `internal/app/bootstrap`, `internal/app/lifecycle` | Strong existing composition root. | All agency modules wired through lifecycle/bootstrap. | Preserve. |
-| GitHub Issues adapter | `internal/tracker/github`, `internal/adapters/github`, `config/projects.yaml` | Missing real adapter; duplicate roots. | One read-only-first typed adapter for eligible issues. | Replace/refactor. |
+| GitHub Issues adapter | `internal/tracker`, `internal/tracker/github`, `internal/tracker/intake`, `config/projects.yaml`; reserved empty `internal/adapters/github` | Canonical tracker seam selected and implemented for read-only intake plus gated projection operations; `internal/adapters/github` is not an active root. | One typed tracker seam for eligible issues, comments, labels, and follow-up issue creation behind approval gates. | Preserve `internal/tracker`; keep `internal/adapters/github` empty unless an ADR assigns a non-tracker role. |
 | GitHub token policy | `config/agency.example.yaml`, `configs/*.yaml`, docs security rules | Scaffold only. | Token env names and scopes documented; no production secrets to workers. | Add contract before code. |
 | SQLite runtime state | `internal/store/sqlite`, migrations | Strong existing runtime authority. | Work Items, Run Attempts, external issues, PR handoffs, approvals all persisted. | Preserve and extend. |
 | Work Items | `tasks` table, `jobs.Service`, `odin work start/status` | Present under task terminology. | Canonical Work Item projection over existing tasks or renamed vocabulary. | Refactor vocabulary, preserve table initially. |
@@ -21,11 +21,11 @@ date: 2026-04-30
 | Event audit | `events` table, runtime events contract | Present. | All important agency mutations append events. | Preserve and require for new modules. |
 | Approvals | `approvals` table, action-bound approvals, REPL `/approvals` | Present but incomplete operator surface. | Human approval before merge/deploy and sensitive actions. | Preserve and extend. |
 | Git worktree workspace manager | `internal/vcs/leases`, `internal/vcs/worktrees`, `internal/vcs/git` | Present and useful. | Every mutating worker gets one worktree and task branch. | Preserve. |
-| Duplicate workspace seam | `internal/workspace/manager.go` | Scaffold duplicate. | No separate workspace manager outside `internal/vcs`. | Replace/remove. |
+| Duplicate workspace seam | Historical `internal/workspace/manager.go` | Removed scaffold duplicate. | No separate workspace manager outside `internal/vcs`. | Keep removed; use `internal/vcs/leases` and `internal/vcs/worktrees`. |
 | Executor seam | `internal/executors/contract`, `internal/executors/router` | Strong existing seam. | All runner adapters implement this interface. | Preserve. |
 | Codex exec runner | `internal/executors/codex`, `internal/runner/codexexec` | Deterministic alpha adapter plus placeholder duplicate. | Real `codex exec` adapter with security checks. | Refactor under `internal/executors`. |
 | Future app-server runner | `internal/runner/appserver` | Placeholder duplicate. | Optional phase-two adapter behind executor seam. | Defer/replace later. |
-| Prompt renderer | `prompts/`, `internal/prompts/renderer.go`, `src/prompts` | Draft prompts and placeholder renderer. | Go renderer loads validated prompt templates. | Refactor after prompt contract. |
+| Prompt renderer | `prompts/`, `internal/prompts/renderer.go`; removed `src/prompts` preserved only in inventory notes | Draft prompts and Go renderer exist; the TypeScript prompt scaffold is absent. | Go renderer loads validated prompt templates. | Refactor after prompt contract; do not recreate TypeScript prompt scaffolds. |
 | Agent registry | `registry/agents`, `internal/registry` | Active triage agent only. | Agents for intake, builder, QA, reviewer, security. | Preserve and extend. |
 | Skill registry | `registry/skills`, `state/migration/drafts/skills` | Active triage skill; migration drafts review-only. | Small Odin-native active skill set. | Preserve active, review drafts selectively. |
 | Registry validation | `internal/registry/parser`, `validator`, `compiler` | Present and tested. | Same loader validates new agent/skill/workflow assets. | Preserve. |
@@ -83,15 +83,17 @@ These modules contain useful intent but need locality and seam cleanup:
 These modules should not become separate active seams:
 
 - `internal/runner`
-- `internal/workspace`
-- `internal/tracker` unless chosen as the canonical GitHub intake root
+- historical `internal/workspace`
+- `internal/adapters/github` for tracker behavior; the canonical GitHub tracker
+  root is `internal/tracker`
 - `internal/orchestrator`
 - `src/*`
 - `configs/*`
 
 ## Missing Target Modules
 
-- Real GitHub Issues adapter.
+- Live mutation wiring behind approval gates for the existing GitHub tracker
+  adapter.
 - PR manager.
 - Real Codex exec adapter.
 - Prompt renderer implementation.

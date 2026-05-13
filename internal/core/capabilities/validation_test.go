@@ -175,6 +175,7 @@ func TestValidateInvocationAcceptsDeclaredInputTypes(t *testing.T) {
 				RequestID:         "req-1",
 				CapabilityID:      descriptor.Key,
 				CapabilityVersion: descriptor.Version,
+				Caller:            CallerRef{Kind: "api", ID: "validation-test"},
 				Input:             testCase.input,
 			})
 			if err != nil {
@@ -237,6 +238,7 @@ func TestValidateInvocationAcceptsInputSchemaRefWithoutType(t *testing.T) {
 		RequestID:         "req-1",
 		CapabilityID:      descriptor.Key,
 		CapabilityVersion: descriptor.Version,
+		Caller:            CallerRef{Kind: "api", ID: "validation-test"},
 		Input:             json.RawMessage(`"string"`),
 	})
 	if err != nil {

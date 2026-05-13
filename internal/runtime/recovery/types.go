@@ -13,6 +13,35 @@ const (
 	FaultSourceFreshnessStale FaultKey = "source_freshness_stale"
 	FaultQueuePressureHigh    FaultKey = "queue_pressure_high"
 	FaultRunFailureRepeated   FaultKey = "run_failure_repeated"
+	FaultWakePacketInvalid    FaultKey = "wake_packet_invalid"
+)
+
+type DecisionMode string
+
+const (
+	DecisionModeIgnore           DecisionMode = "ignore"
+	DecisionModeIncidentOnly     DecisionMode = "incident_only"
+	DecisionModePlaybook         DecisionMode = "playbook"
+	DecisionModeApprovalRequired DecisionMode = "approval_required"
+	DecisionModeEscalate         DecisionMode = "escalate"
+)
+
+type OutcomeStatus string
+
+const (
+	OutcomeStatusIncidentOnly OutcomeStatus = "incident_only"
+	OutcomeStatusCompleted    OutcomeStatus = "completed"
+	OutcomeStatusFailed       OutcomeStatus = "failed"
+	OutcomeStatusSuppressed   OutcomeStatus = "suppressed"
+	OutcomeStatusEscalated    OutcomeStatus = "escalated"
+)
+
+type ActionResultStatus string
+
+const (
+	ActionResultStatusCompleted ActionResultStatus = "completed"
+	ActionResultStatusFailed    ActionResultStatus = "failed"
+	ActionResultStatusEscalated ActionResultStatus = "escalated"
 )
 
 type Observation struct {
@@ -28,7 +57,10 @@ type Observation struct {
 
 type Decision struct {
 	Observation Observation
+	Mode        DecisionMode
 	Playbook    string
+	Reason      string
+	NextAction  string
 }
 
 type Config struct {

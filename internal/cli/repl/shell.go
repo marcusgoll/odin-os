@@ -456,6 +456,10 @@ func (shell *Shell) handleTool(ctx context.Context, args []string, output io.Wri
 			_, err := fmt.Fprintf(output, "tool %s is not available in %s scope\n", args[1], shell.catalogScope())
 			return err
 		}
+		if toolRequiresApprovedSocialOutcome(expansion.Card.CanonicalKey) {
+			_, err := fmt.Fprintf(output, "tool %s requires an approved social_outcome; use /memory publish <id> via=huginn_x\n", expansion.Card.CanonicalKey)
+			return err
+		}
 
 		result, err := toolBroker.InvokeTool(args[1], input)
 		if err != nil {
@@ -469,6 +473,15 @@ func (shell *Shell) handleTool(ctx context.Context, args []string, output io.Wri
 	default:
 		_, err := fmt.Fprintf(output, "usage: %s\n", toolUsage)
 		return err
+	}
+}
+
+func toolRequiresApprovedSocialOutcome(canonicalKey string) bool {
+	switch strings.TrimSpace(canonicalKey) {
+	case "browser_x_post_publish":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1425,70 +1438,10 @@ func (shell *Shell) handleRunShow(ctx context.Context, args []string, output io.
 		return writeErr
 	}
 
-	if _, err := fmt.Fprintf(output, "run=%d task=%s status=%s executor=%s\n", detail.RunID, detail.TaskKey, detail.Status, detail.Executor); err != nil {
+	if _, err := fmt.Fprint(output, render.RenderRunDetail(detail)); err != nil {
 		return err
 	}
-	if strings.TrimSpace(detail.Summary) != "" {
-		if _, err := fmt.Fprintf(output, "summary=%s\n", detail.Summary); err != nil {
-			return err
-		}
-	}
-	for _, artifact := range detail.Artifacts {
-		if _, err := fmt.Fprintf(output, "artifact=%s summary=%s\n", artifact.ArtifactType, artifact.Summary); err != nil {
-			return err
-		}
-		if details := strings.TrimSpace(artifact.DetailsJSON); details != "" && details != "{}" {
-			if _, err := fmt.Fprintf(output, "details=%s\n", details); err != nil {
-				return err
-			}
-			if err := renderRunEvidenceFields(output, details); err != nil {
-				return err
-			}
-		}
-	}
 	return nil
-}
-
-func renderRunEvidenceFields(output io.Writer, raw string) error {
-	fields := runEvidenceFields(raw)
-	for _, key := range []string{
-		"executor_lane",
-		"driver_kind",
-		"operation",
-		"external_id",
-		"repo_root",
-		"worktree_path",
-		"branch_name",
-		"driver_cwd",
-		"branch_observed",
-		"marker_path",
-		"marker_written",
-		"artifact_path",
-	} {
-		if value := strings.TrimSpace(fields[key]); value != "" {
-			if _, err := fmt.Fprintf(output, "%s=%s\n", key, value); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func runEvidenceFields(raw string) map[string]string {
-	if strings.TrimSpace(raw) == "" {
-		return nil
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
-		return nil
-	}
-	fields := make(map[string]string)
-	for key, value := range decoded {
-		if stringValue, ok := value.(string); ok {
-			fields[key] = stringValue
-		}
-	}
-	return fields
 }
 
 func (shell *Shell) handleWorkspace(ctx context.Context, output io.Writer) error {
@@ -1799,7 +1752,7 @@ func (shell *Shell) publishApprovedXOutcomeWithHuginn(ctx context.Context, summa
 	}
 	details = normalizeMemoryDetailsPayload(summary, details)
 
-	result, err := invocation.Service{}.HuginnXPostPublish(ctx, webdriver.XPublishRequest{
+	result, err := invocation.Service{ApprovedExternalMutation: true}.HuginnXPostPublish(ctx, webdriver.XPublishRequest{
 		ToolKey: "browser_x_post_publish",
 		Input: webdriver.XPublishInput{
 			PostText: approvedOutcomePublishText(summary.Summary),

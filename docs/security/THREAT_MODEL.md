@@ -76,6 +76,9 @@ orchestrator risk surface, not on a greenfield target.
 - `internal/tracker/github/client.go` uses GitHub tokens only for API requests,
   supports dry-run no-write behavior, and redacts token-like strings in adapter
   errors.
+- `internal/telemetry/logs.Logger` redacts sensitive structured log keys and
+  token-like values before JSON persistence while preserving non-secret
+  diagnostic fields.
 - `internal/prompts/renderer.go` rejects path traversal in template names and
   blocks implementation prompts that lack brownfield guardrails.
 - `deploy/systemd/odin-os.service` is a user unit with hardening options.
@@ -89,16 +92,15 @@ orchestrator risk surface, not on a greenfield target.
 The following issues must be fixed before Odin OS can safely run real
 unattended Codex implementation workers:
 
-1. `scripts/drivers/codex-headless.sh` still supports
-   `danger-full-access` through `--dangerously-bypass-approvals-and-sandbox`.
-2. `scripts/drivers/codex-headless.sh` can extract command text from a prompt
-   and execute it through `bash -c`.
+1. Codex `danger-full-access` is now blocked in the live driver and Go runner;
+   keep any parallel worker launch path from reintroducing sandbox bypass flags.
+2. Prompt-command extraction is now blocked in the live Codex driver; keep any
+   parallel runner from treating issue or prompt text as shell.
 3. Canonical Codex execution inherits the full daemon environment when launching
    the driver.
-4. Structured logging writes sensitive field values verbatim.
-5. HTTP capability invocation is not authenticated at the route level and can
+4. HTTP capability invocation is not authenticated at the route level and can
    pass with empty caller identity for unpermissioned capabilities.
-6. GitHub issue text and persisted intake metadata can enter prompts without a
+5. GitHub issue text and persisted intake metadata can enter prompts without a
    strict untrusted-data envelope.
 
 ## Non-Goals
@@ -108,4 +110,3 @@ unattended Codex implementation workers:
 - This review does not implement a new runner, tracker, dashboard, or
   orchestrator loop.
 - This review does not remove legacy scripts or compatibility paths.
-

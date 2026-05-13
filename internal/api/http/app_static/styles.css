@@ -1,0 +1,164 @@
+:root {
+  color-scheme: light dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f4f2ec;
+  color: #172026;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+.shell {
+  width: min(760px, 100%);
+  margin: 0 auto;
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.panel {
+  background: #ffffff;
+  border: 1px solid #d6d0c4;
+  border-radius: 8px;
+  padding: 14px;
+  box-shadow: 0 10px 30px rgba(16, 24, 32, 0.08);
+}
+
+.compact {
+  padding-bottom: 8px;
+}
+
+.topline,
+.media-row,
+.field-grid {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 1.4rem;
+}
+
+h2 {
+  font-size: 1rem;
+}
+
+p,
+#media-state,
+#failed-uploads {
+  color: #59656f;
+  font-size: 0.9rem;
+}
+
+.kind-grid {
+  border: 0;
+  padding: 0;
+  margin: 14px 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.kind-grid label,
+button,
+.file-button {
+  min-height: 42px;
+  border: 1px solid #b9c1c8;
+  border-radius: 8px;
+  padding: 10px;
+  background: #f8fafb;
+  color: #172026;
+  font: inherit;
+}
+
+.kind-grid label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+input,
+textarea {
+  width: 100%;
+  border: 1px solid #b9c1c8;
+  border-radius: 8px;
+  padding: 12px;
+  font: inherit;
+  background: #fff;
+  color: #172026;
+}
+
+textarea {
+  resize: vertical;
+}
+
+.field-grid {
+  margin: 12px 0;
+}
+
+.file-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.file-button input {
+  display: none;
+}
+
+.primary {
+  width: 100%;
+  background: #175a7a;
+  border-color: #175a7a;
+  color: #fff;
+  font-weight: 700;
+}
+
+#failed-uploads {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+  display: grid;
+  gap: 8px;
+}
+
+#failed-uploads li {
+  border: 1px solid #d8b98e;
+  border-radius: 8px;
+  padding: 9px;
+  background: #fff8eb;
+}
+
+@media (max-width: 560px) {
+  .kind-grid,
+  .field-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .topline,
+  .media-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

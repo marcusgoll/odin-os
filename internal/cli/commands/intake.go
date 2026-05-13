@@ -10,7 +10,7 @@ import (
 	"unicode"
 )
 
-const IntakeUsage = "usage: odin intake enqueue --source <source> --project <key> --title <title> --type <type> [--action-key <key>] [--dedup-key <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw create --text <text> [--json] | odin intake raw create --source <source> --title <title> --type <type> [--dedup-key <key>] [--project <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw list [--project <key>] [--status <status>] [--json] | odin intake raw show <id|key> [--json] | odin intake process --id <id|key> [--json] | odin intake review list [--json] | odin intake review show|accept|reject|clarify|archive <id|key> [--json] | odin intake approval list [--json] | odin intake approval show|approve|deny <id|key> [--json]"
+const IntakeUsage = "usage: odin intake enqueue --source <source> --project <key> --title <title> --type <type> [--action-key <key>] [--dedup-key <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw create --text|--body <text> [--source <source>] [--json] | odin intake raw create --source <source> --title <title> --type <type> --dedup-key <key> [--project <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw list [--project <key>] [--status <status>] [--json] | odin intake raw show <id|key> [--json] | odin intake process --id <id|key> [--json] | odin intake review list [--json] | odin intake review show|accept|reject|clarify|archive <id|key> [--json] | odin intake approval list [--json] | odin intake approval show|approve|deny <id|key> [--json]"
 
 type IntakeCommand struct {
 	Name           string
@@ -26,6 +26,7 @@ type IntakeCommand struct {
 	DedupKey       string
 	RequestedBy    string
 	PayloadFile    string
+	RawText        string
 	JSON           bool
 }
 
@@ -206,9 +207,21 @@ func ParseIntake(args []string) (IntakeCommand, error) {
 	return command, nil
 }
 
+func hasHelpArg(args []string) bool {
+	for _, arg := range args {
+		if arg == "help" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
 func parseIntakeReview(args []string) (IntakeCommand, error) {
 	if len(args) == 0 {
 		return IntakeCommand{}, fmt.Errorf(IntakeUsage)
+	}
+	if hasHelpArg(args[1:]) {
+		return IntakeCommand{Name: "help"}, nil
 	}
 	command := IntakeCommand{Name: "review", ReviewAction: strings.ToLower(args[0])}
 	switch command.ReviewAction {
@@ -321,6 +334,9 @@ func parseRawIntake(args []string) (IntakeCommand, error) {
 	if len(args) == 0 {
 		return IntakeCommand{}, fmt.Errorf(IntakeUsage)
 	}
+	if hasHelpArg(args[1:]) {
+		return IntakeCommand{Name: "help"}, nil
+	}
 	command := IntakeCommand{Name: "raw", RawAction: strings.ToLower(args[0])}
 	switch command.RawAction {
 	case "create":
@@ -392,16 +408,17 @@ func parseRawIntakeCreate(command IntakeCommand, args []string) (IntakeCommand, 
 			seen.title = true
 			command.Title = value
 			index = nextIndex
-		case "--text":
+		case "--text", "--body":
 			if seen.text || seen.title {
 				return IntakeCommand{}, fmt.Errorf("duplicate raw intake text/title flag")
 			}
-			value, nextIndex, err := requiredValue(args, index, "--text")
+			value, nextIndex, err := requiredValue(args, index, args[index])
 			if err != nil {
 				return IntakeCommand{}, err
 			}
 			seen.text = true
 			command.Title = value
+			command.RawText = value
 			index = nextIndex
 		case "--action-key":
 			if seen.actionKey {
@@ -462,9 +479,6 @@ func parseRawIntakeCreate(command IntakeCommand, args []string) (IntakeCommand, 
 		}
 		if command.Type == "" {
 			command.Type = "request"
-		}
-		if command.RequestedBy == "" {
-			command.RequestedBy = "operator"
 		}
 		if command.DedupKey == "" {
 			command.DedupKey = textDedupKey(command.Title)

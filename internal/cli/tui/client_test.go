@@ -113,12 +113,20 @@ func TestClientQueryOverviewUsesPrometheusInstantQueries(t *testing.T) {
 	if model.ActiveRuns != 3 {
 		t.Fatalf("model.ActiveRuns = %d, want 3", model.ActiveRuns)
 	}
+	if model.BlockedItems != 2 || model.ApprovalsWaiting != 4 || model.ReviewQueueItems != 6 || model.FailedWorkItems != 1 || model.RecoveryRecommendations != 1 {
+		t.Fatalf("model action-required counts = %+v, want blocked=2 approvals=4 review=6 failed=1 recovery=1", model)
+	}
 	for _, want := range []string{
 		"odin_os_health_score",
 		"odin_os_telemetry_stale",
 		"odin_os_status",
 		"odin_os_lifecycle_phase",
 		"odin_active_runs",
+		"odin_blocked_items",
+		"odin_approvals_waiting",
+		"odin_review_queue_items",
+		"odin_failed_work_items",
+		"odin_recovery_recommendations",
 	} {
 		if !seen[want] {
 			t.Fatalf("prometheus query %q was not issued; seen=%v", want, seen)
@@ -144,7 +152,7 @@ func TestClientQueryOverviewUsesExportedStatusMetric(t *testing.T) {
 			}
 		case "odin_os_lifecycle_phase":
 			result = []any{prometheusSampleFixture(map[string]string{"phase": "run"}, "1")}
-		case "odin_active_runs":
+		case "odin_active_runs", "odin_blocked_items", "odin_approvals_waiting", "odin_review_queue_items", "odin_failed_work_items", "odin_recovery_recommendations":
 			result = []any{prometheusSampleFixture(nil, "0")}
 		default:
 			t.Fatalf("unexpected query %q", query)
@@ -274,6 +282,16 @@ func writePrometheusQueryResponse(t *testing.T, w http.ResponseWriter, query str
 		}
 	case "odin_active_runs":
 		result = []any{prometheusSampleFixture(nil, "3")}
+	case "odin_blocked_items":
+		result = []any{prometheusSampleFixture(nil, "2")}
+	case "odin_approvals_waiting":
+		result = []any{prometheusSampleFixture(nil, "4")}
+	case "odin_review_queue_items":
+		result = []any{prometheusSampleFixture(nil, "6")}
+	case "odin_failed_work_items":
+		result = []any{prometheusSampleFixture(nil, "1")}
+	case "odin_recovery_recommendations":
+		result = []any{prometheusSampleFixture(nil, "1")}
 	default:
 		t.Fatalf("unexpected query %q", query)
 	}

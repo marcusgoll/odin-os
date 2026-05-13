@@ -54,8 +54,8 @@ Current duplicate/scaffold modules:
 
 ```text
 internal/runner        duplicates internal/executors
-internal/workspace     duplicates internal/vcs
-internal/tracker       placeholder GitHub intake seam
+historical internal/workspace duplicate has been removed; use internal/vcs
+internal/tracker       canonical GitHub intake seam
 internal/orchestrator  placeholder agency coordinator
 internal/prompts       placeholder renderer interface
 internal/review        placeholder reviewer interface
@@ -71,7 +71,7 @@ systemd or Docker
   -> odin daemon (cmd/odin serve, or documented service alias)
     -> lifecycle composition
       -> scheduler / agency loop
-        -> GitHub Issues intake adapter
+        -> GitHub Issues tracker adapter
         -> SQLite runtime state
         -> agent/skill/prompt registry
         -> worktree workspace manager
@@ -105,12 +105,12 @@ eligible GitHub Issue
 | Target module | Current evidence | Gap | Recommendation | Risk |
 | --- | --- | --- | --- | --- |
 | Go daemon | `cmd/odin`, `internal/app/lifecycle.Run`, `runServe`, systemd unit. `cmd/odin-os` exists as duplicate worktree-only entrypoint. | Daemon exists but agency loop is not complete; binary naming is unresolved. | Preserve `cmd/odin` and lifecycle. Decide whether `cmd/odin-os` is a supported alias. | Medium |
-| GitHub Issues adapter | `internal/tracker/github/client.go` placeholder; `internal/adapters/github/.gitkeep`; `config/projects.yaml` supports GitHub repo metadata. | No real GitHub issue query, labels, comments, or token policy. Duplicate adapter root unresolved. | Pick one GitHub intake seam and start read-only. | High |
+| GitHub Issues adapter | `internal/tracker`, `internal/tracker/github`, `internal/tracker/intake`, `config/projects.yaml`; reserved empty `internal/adapters/github`. | Canonical package root is selected. Remaining gaps are approval-gated live mutation, PR manager ownership, rate-limit classification, and token-scope checks. | Preserve `internal/tracker` as the only GitHub tracker seam; keep `internal/adapters/github` empty unless a later ADR assigns non-tracker responsibility. | High |
 | SQLite runtime state | `internal/store/sqlite`, embedded migrations, task/run/approval/event/action/lease/recovery/knowledge tables. | Strong existing authority; store is large and mixes many domains. | Preserve. Split by domain files only after characterization tests. | Medium |
-| Git worktree workspace manager | `internal/vcs/leases`, `internal/vcs/worktrees`, `internal/vcs/git`, `docs/contracts/git-worktrees.md`. | Real worktree lease path exists; `internal/workspace` duplicates it. Cleanup/recovery exists but agency-facing workspace commands are partial. | Use `internal/vcs` as canonical. Remove/merge `internal/workspace`. | High |
+| Git worktree workspace manager | `internal/vcs/leases`, `internal/vcs/worktrees`, `internal/vcs/git`, `docs/contracts/git-worktrees.md`. | Real worktree lease path exists; the historical `internal/workspace` duplicate is removed. Cleanup/recovery exists but agency-facing workspace commands are partial. | Use `internal/vcs` as canonical; do not recreate `internal/workspace`. | High |
 | Codex exec runner | `internal/executors/contract`, router, `codex_headless` deterministic adapter; `internal/runner/codexexec` placeholder. | No real `codex exec` subprocess. Security policy not enforced in canonical executor path. | Implement `codex_exec` as an `internal/executors` adapter after security contract. | High |
 | Optional app-server runner | `internal/runner/appserver` placeholder. | Not behind canonical executor seam; app-server is experimental. | Defer. Add only as an `internal/executors` adapter after Codex exec works. | Medium |
-| Prompt renderer | Prompt files in `prompts/`; `internal/prompts/renderer.go` placeholder; TypeScript prompt renderer in `src/prompts`. | No prompt frontmatter contract or Go renderer implementation wired into executor tasks. Duplicate builder prompts. | Define prompt contract, choose one prompt layout, wire through Go renderer. | Medium |
+| Prompt renderer | Prompt files in `prompts/`; `internal/prompts/renderer.go`; historical TypeScript prompt renderer inventory for removed `src/prompts`. | Current Go file renderer loads from canonical `prompts/workers/<template>.md`; fuller prompt frontmatter contract is still needed before expanding prompt kinds; deprecated builder template remains for provenance. | Define fuller prompt contract and remove duplicate builder prompt only after cleanup approval. Do not recreate the removed TypeScript renderer. | Medium |
 | Agent/skill registry | `registry/`, `internal/registry`, `docs/contracts/registry-format.md`, active triage agent/skill. | Strong existing registry. Builder/QA/reviewer/security agents missing. Registry watcher is noop. | Preserve registry. Add missing agents only after role vocabulary is settled. | Medium |
 | PR manager | PR template validator and GitHub Actions CI exist; no runtime PR creation/update module. | No draft PR creation, branch push, review handoff, or merge-blocking PR manager. | Add after GitHub intake and worktree execution are proven. Human approval remains required. | High |
 | Reviewer/QA/security automation | Executor task kinds include review/QA/research; prompt drafts; `internal/workers` placeholders; `internal/review` and `internal/security` scaffold. | Planner exists; reviewer/QA/security execution is not implemented. Security policy is detached from executor launch. | Implement one role at a time through runtime jobs and executor contract. | High |
@@ -164,8 +164,8 @@ The largest gaps are:
 - `cmd/odin-os`: decide supported alias vs remove.
 - `internal/executors/codex`: evolve from deterministic alpha to real Codex CLI adapter, or add sibling adapter under `internal/executors`.
 - `internal/workers`: keep planner, implement other roles through existing runtime/executor seams.
-- `prompts/`: choose one layout and add a prompt contract.
-- `internal/prompts`: wire only if it becomes the canonical Go prompt renderer.
+- `prompts/`: keep `prompts/workers/<template>.md` as the canonical rendered worker prompt layout and add a fuller prompt contract.
+- `internal/prompts`: keep as the canonical Go file renderer while worker prompts remain repo-authored Markdown.
 - `internal/security`: move checks into executor launch policy.
 - `internal/api/http`: extend with dashboard/read-model endpoints over existing projections.
 - `scripts/dev/install-systemd-service.sh`: harden deployment behavior after service mode decision.
@@ -173,8 +173,9 @@ The largest gaps are:
 ## Existing Modules To Replace
 
 - `internal/runner/*`: replace with `internal/executors` adapters.
-- `internal/workspace/manager.go`: replace with `internal/vcs` lease/worktree manager.
-- `internal/tracker/*`: replace or move into the single chosen GitHub intake adapter seam.
+- Historical `internal/workspace/manager.go`: removed; keep using `internal/vcs` lease/worktree manager.
+- `internal/tracker/*`: preserve as the single chosen GitHub intake adapter
+  seam.
 - `internal/orchestrator/service.go`: replace with lifecycle-composed runtime modules rather than a shallow standalone coordinator.
 - `internal/db`, `internal/config`, `internal/logging`, `internal/dashboard`, `internal/review`, `internal/utils`: replace only if their useful concepts are promoted into existing deeper modules.
 
@@ -205,7 +206,7 @@ Remove only after explicit cleanup approval and after preserving useful knowledg
 
 ### Phase 2: GitHub Intake Read-Only
 
-- Choose GitHub intake seam.
+- Preserve `internal/tracker` as the GitHub intake seam.
 - Read eligible issues into normalized intake records or Work Items.
 - Store external issue identity in SQLite.
 - Add dry-run output and structured logs.
@@ -268,8 +269,9 @@ Remove only after explicit cleanup approval and after preserving useful knowledg
 2. Remove/quarantine accidental TypeScript scaffold after preserving useful prompt text.
 3. Collapse duplicate config roots into `config/`.
 4. Collapse `internal/runner` into `internal/executors`.
-5. Collapse `internal/workspace` into `internal/vcs`.
-6. Choose GitHub intake adapter seam and document token policy.
+5. Keep the removed `internal/workspace` scaffold collapsed into `internal/vcs`.
+6. Preserve `internal/tracker` as the GitHub intake adapter seam and document
+   token policy.
 7. Add `odin work readiness` with dry-run and kill-switch visibility.
 8. Add read-only GitHub Issues intake with fixture-backed tests.
 9. Persist external issue identity in SQLite without making GitHub runtime authority.
@@ -277,7 +279,7 @@ Remove only after explicit cleanup approval and after preserving useful knowledg
 11. Add worktree dispatch proof using `codex_headless`.
 12. Write Codex exec security contract.
 13. Implement `codex_exec` adapter behind `internal/executors/contract`.
-14. Add prompt frontmatter contract and Go prompt renderer.
+14. Tighten prompt frontmatter contract around the existing Go file renderer.
 15. Reconcile role vocabulary across registry, workers, prompts, and executor task kinds.
 16. Add builder role registry/prompt using existing executor path.
 17. Add QA role as separate Run Attempt.

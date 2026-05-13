@@ -82,10 +82,11 @@ type TaskHandle struct {
 }
 
 type ExecutionResult struct {
-	Handle   TaskHandle        `json:"handle"`
-	Status   string            `json:"status"`
-	Output   string            `json:"output"`
-	Metadata map[string]string `json:"metadata"`
+	Handle      TaskHandle        `json:"handle"`
+	Status      string            `json:"status"`
+	Output      string            `json:"output"`
+	FailureCode string            `json:"failure_code,omitempty"`
+	Metadata    map[string]string `json:"metadata"`
 }
 
 type HealthReport struct {

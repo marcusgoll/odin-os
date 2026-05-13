@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"time"
 
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
 
 var (
-	ErrUnknownPlaybook         = errors.New("unknown recovery playbook")
-	ErrPlaybookScopeNotAllowed = errors.New("playbook is not allowed in the current scope")
+	ErrUnknownPlaybook           = errors.New("unknown recovery playbook")
+	ErrPlaybookScopeNotAllowed   = errors.New("playbook is not allowed in the current scope")
+	ErrInvalidActionResultStatus = errors.New("invalid recovery action result status")
 )
 
 type Outcome struct {
@@ -35,6 +37,33 @@ func (executor Executor) Execute(ctx context.Context, decision Decision) (Outcom
 	if executor.Store == nil {
 		return Outcome{}, fmt.Errorf("recovery executor store is not configured")
 	}
+	decision = normalizeDecision(decision)
+
+	switch decision.Mode {
+	case DecisionModeIgnore:
+		return Outcome{}, nil
+	case DecisionModeIncidentOnly, DecisionModeApprovalRequired:
+		incident, err := executor.findOrCreateIncident(ctx, decision.Observation, decision)
+		if err != nil {
+			return Outcome{}, err
+		}
+		return Outcome{Status: string(OutcomeStatusIncidentOnly), Incident: incident}, nil
+	case DecisionModeEscalate:
+		incident, err := executor.findOrCreateIncident(ctx, decision.Observation, decision)
+		if err != nil {
+			return Outcome{}, err
+		}
+		incident, err = executor.Store.UpdateIncidentStatus(ctx, sqlite.UpdateIncidentStatusParams{
+			IncidentID:  incident.ID,
+			Status:      string(OutcomeStatusEscalated),
+			Reason:      decision.reasonOrSummary(),
+			DetailsJSON: incidentDetailsJSON(decision.Observation, decision, string(OutcomeStatusEscalated), decision.reasonOrSummary()),
+		})
+		if err != nil {
+			return Outcome{}, err
+		}
+		return Outcome{Status: string(OutcomeStatusEscalated), Escalated: true, Incident: incident}, nil
+	}
 
 	playbook, ok := executor.Playbooks[decision.Playbook]
 	if !ok {
@@ -50,12 +79,12 @@ func (executor Executor) Execute(ctx context.Context, decision Decision) (Outcom
 		now = executor.Now().UTC()
 	}
 
-	incident, err := executor.findOrCreateIncident(ctx, decision.Observation)
+	incident, err := executor.findOrCreateIncident(ctx, decision.Observation, decision)
 	if err != nil {
 		return Outcome{}, err
 	}
 	if incident.Status == "escalated" {
-		return Outcome{Status: "escalated", Escalated: true, Incident: incident}, nil
+		return Outcome{Status: string(OutcomeStatusEscalated), Escalated: true, Incident: incident}, nil
 	}
 
 	recoveries, err := executor.listRecoveriesByIncident(ctx, incident.ID)
@@ -66,7 +95,7 @@ func (executor Executor) Execute(ctx context.Context, decision Decision) (Outcom
 		latest := recoveries[len(recoveries)-1]
 		if playbook.Cooldown > 0 && latest.StartedAt.After(now.Add(-playbook.Cooldown)) {
 			return Outcome{
-				Status:     "suppressed",
+				Status:     string(OutcomeStatusSuppressed),
 				Suppressed: true,
 				Attempt:    len(recoveries),
 				Incident:   incident,
@@ -77,11 +106,13 @@ func (executor Executor) Execute(ctx context.Context, decision Decision) (Outcom
 
 	attempt := len(recoveries) + 1
 	recoveryDetails, err := marshalJSON(map[string]any{
-		"fault_key":   decision.Observation.FaultKey,
-		"subject_key": decision.Observation.SubjectKey,
-		"playbook":    playbook.Name,
-		"action_name": playbook.ActionName,
-		"attempt":     attempt,
+		"fault_key":     decision.Observation.FaultKey,
+		"subject_key":   decision.Observation.SubjectKey,
+		"decision_mode": decision.Mode,
+		"playbook":      playbook.Name,
+		"action_name":   playbook.ActionName,
+		"attempt":       attempt,
+		"next_action":   decision.nextActionOrDefault("monitor recovery result"),
 	})
 	if err != nil {
 		return Outcome{}, err
@@ -115,7 +146,59 @@ func (executor Executor) Execute(ctx context.Context, decision Decision) (Outcom
 		actionResult.Description = actionErr.Error()
 	}
 	if actionResult.Status == "" {
-		actionResult.Status = "completed"
+		actionResult.Status = string(ActionResultStatusCompleted)
+	}
+
+	if !isValidActionResultStatus(actionResult.Status) {
+		rawStatus := actionResult.Status
+		contractViolation := &runtimeevents.RecoveryActionContractViolation{
+			Key:       runtimeevents.RecoveryActionContractViolationInvalidActionResultStatus,
+			RawStatus: rawStatus,
+		}
+		description := actionResult.Description
+		if description == "" {
+			description = fmt.Sprintf("invalid recovery action result status: %s", rawStatus)
+		}
+		invalidDetails := actionResult.DetailsJSON
+		if invalidDetails == "" {
+			invalidDetails = invalidActionResultDetailsJSON(rawStatus, description)
+		}
+		if err := executor.Store.RecordRecoveryAction(ctx, sqlite.RecordRecoveryActionParams{
+			RecoveryID:        recoveryRecord.ID,
+			Playbook:          playbook.Name,
+			FaultKey:          string(decision.Observation.FaultKey),
+			ActionName:        playbook.ActionName,
+			Attempt:           attempt,
+			Result:            string(ActionResultStatusFailed),
+			Description:       description,
+			ContractViolation: contractViolation,
+		}); err != nil {
+			return Outcome{}, err
+		}
+		recoveryRecord, err = executor.Store.CompleteRecovery(ctx, sqlite.CompleteRecoveryParams{
+			RecoveryID:  recoveryRecord.ID,
+			Status:      string(OutcomeStatusFailed),
+			DetailsJSON: invalidDetails,
+		})
+		if err != nil {
+			return Outcome{}, err
+		}
+		incident, err = executor.Store.UpdateIncidentStatus(ctx, sqlite.UpdateIncidentStatusParams{
+			IncidentID:  incident.ID,
+			Status:      string(OutcomeStatusEscalated),
+			Reason:      description,
+			DetailsJSON: incidentDetailsJSON(decision.Observation, decision, string(OutcomeStatusEscalated), description),
+		})
+		if err != nil {
+			return Outcome{}, err
+		}
+		return Outcome{
+			Status:    string(OutcomeStatusEscalated),
+			Escalated: true,
+			Attempt:   attempt,
+			Incident:  incident,
+			Recovery:  recoveryRecord,
+		}, fmt.Errorf("%w: %s", ErrInvalidActionResultStatus, rawStatus)
 	}
 
 	if err := executor.Store.RecordRecoveryAction(ctx, sqlite.RecordRecoveryActionParams{
@@ -131,10 +214,10 @@ func (executor Executor) Execute(ctx context.Context, decision Decision) (Outcom
 	}
 
 	switch actionResult.Status {
-	case "completed":
+	case string(ActionResultStatusCompleted):
 		recoveryRecord, err = executor.Store.CompleteRecovery(ctx, sqlite.CompleteRecoveryParams{
 			RecoveryID:  recoveryRecord.ID,
-			Status:      "completed",
+			Status:      string(OutcomeStatusCompleted),
 			DetailsJSON: actionResult.DetailsJSON,
 		})
 		if err != nil {
@@ -144,33 +227,33 @@ func (executor Executor) Execute(ctx context.Context, decision Decision) (Outcom
 			IncidentID:  incident.ID,
 			Status:      "resolved",
 			Reason:      actionResult.Description,
-			DetailsJSON: incidentDetailsJSON(decision.Observation, "resolved", actionResult.Description),
+			DetailsJSON: incidentDetailsJSON(decision.Observation, decision, "resolved", actionResult.Description),
 		})
 		if err != nil {
 			return Outcome{}, err
 		}
 		return Outcome{
-			Status:   "completed",
+			Status:   string(OutcomeStatusCompleted),
 			Attempt:  attempt,
 			Incident: incident,
 			Recovery: recoveryRecord,
 		}, nil
-	case "escalated":
-		return executor.finishEscalatedRecovery(ctx, decision.Observation, incident, recoveryRecord, attempt, actionResult.Description, actionResult.DetailsJSON)
+	case string(ActionResultStatusEscalated):
+		return executor.finishEscalatedRecovery(ctx, decision, incident, recoveryRecord, attempt, actionResult.Description, actionResult.DetailsJSON)
 	default:
 		if attempt >= playbook.MaxRetries {
-			return executor.finishEscalatedRecovery(ctx, decision.Observation, incident, recoveryRecord, attempt, actionResult.Description, actionResult.DetailsJSON)
+			return executor.finishEscalatedRecovery(ctx, decision, incident, recoveryRecord, attempt, actionResult.Description, actionResult.DetailsJSON)
 		}
 		recoveryRecord, err = executor.Store.CompleteRecovery(ctx, sqlite.CompleteRecoveryParams{
 			RecoveryID:  recoveryRecord.ID,
-			Status:      "failed",
+			Status:      string(OutcomeStatusFailed),
 			DetailsJSON: actionResult.DetailsJSON,
 		})
 		if err != nil {
 			return Outcome{}, err
 		}
 		return Outcome{
-			Status:   "failed",
+			Status:   string(OutcomeStatusFailed),
 			Attempt:  attempt,
 			Incident: incident,
 			Recovery: recoveryRecord,
@@ -178,11 +261,11 @@ func (executor Executor) Execute(ctx context.Context, decision Decision) (Outcom
 	}
 }
 
-func (executor Executor) finishEscalatedRecovery(ctx context.Context, observation Observation, incident sqlite.Incident, recoveryRecord sqlite.Recovery, attempt int, description string, detailsJSON string) (Outcome, error) {
+func (executor Executor) finishEscalatedRecovery(ctx context.Context, decision Decision, incident sqlite.Incident, recoveryRecord sqlite.Recovery, attempt int, description string, detailsJSON string) (Outcome, error) {
 	var err error
 	recoveryRecord, err = executor.Store.CompleteRecovery(ctx, sqlite.CompleteRecoveryParams{
 		RecoveryID:  recoveryRecord.ID,
-		Status:      "escalated",
+		Status:      string(OutcomeStatusEscalated),
 		DetailsJSON: detailsJSON,
 	})
 	if err != nil {
@@ -190,15 +273,15 @@ func (executor Executor) finishEscalatedRecovery(ctx context.Context, observatio
 	}
 	incident, err = executor.Store.UpdateIncidentStatus(ctx, sqlite.UpdateIncidentStatusParams{
 		IncidentID:  incident.ID,
-		Status:      "escalated",
+		Status:      string(OutcomeStatusEscalated),
 		Reason:      description,
-		DetailsJSON: incidentDetailsJSON(observation, "escalated", description),
+		DetailsJSON: incidentDetailsJSON(decision.Observation, decision, string(OutcomeStatusEscalated), description),
 	})
 	if err != nil {
 		return Outcome{}, err
 	}
 	return Outcome{
-		Status:    "escalated",
+		Status:    string(OutcomeStatusEscalated),
 		Escalated: true,
 		Attempt:   attempt,
 		Incident:  incident,
@@ -206,7 +289,7 @@ func (executor Executor) finishEscalatedRecovery(ctx context.Context, observatio
 	}, nil
 }
 
-func (executor Executor) findOrCreateIncident(ctx context.Context, observation Observation) (sqlite.Incident, error) {
+func (executor Executor) findOrCreateIncident(ctx context.Context, observation Observation, decision Decision) (sqlite.Incident, error) {
 	incident, err := executor.findActiveIncident(ctx, observation)
 	switch {
 	case err == nil:
@@ -220,7 +303,7 @@ func (executor Executor) findOrCreateIncident(ctx context.Context, observation O
 		Severity:    observation.SeverityOrDefault(),
 		Status:      "open",
 		Summary:     observation.Summary,
-		DetailsJSON: incidentDetailsJSON(observation, "open", observation.Summary),
+		DetailsJSON: incidentDetailsJSON(observation, decision, "open", decision.reasonOrSummary()),
 	})
 }
 
@@ -295,17 +378,70 @@ func decodeIncidentDetails(detailsJSON string) (faultKey string, subjectKey stri
 	return payload.FaultKey, payload.SubjectKey
 }
 
-func incidentDetailsJSON(observation Observation, status string, reason string) string {
+func incidentDetailsJSON(observation Observation, decision Decision, status string, reason string) string {
 	payload, err := marshalJSON(map[string]any{
-		"fault_key":   observation.FaultKey,
-		"subject_key": observation.SubjectKey,
-		"status":      status,
-		"reason":      reason,
+		"fault_key":     observation.FaultKey,
+		"subject_key":   observation.SubjectKey,
+		"decision_mode": decision.Mode,
+		"status":        status,
+		"reason":        reason,
+		"next_action":   decision.NextAction,
 	})
 	if err != nil {
 		return "{}"
 	}
 	return payload
+}
+
+func invalidActionResultDetailsJSON(rawStatus string, description string) string {
+	payload, err := marshalJSON(map[string]any{
+		"contract_violation": map[string]any{
+			"key":        runtimeevents.RecoveryActionContractViolationInvalidActionResultStatus,
+			"raw_status": rawStatus,
+		},
+		"description": description,
+	})
+	if err != nil {
+		return "{}"
+	}
+	return payload
+}
+
+func normalizeDecision(decision Decision) Decision {
+	if decision.Mode == "" {
+		if decision.Playbook != "" {
+			decision.Mode = DecisionModePlaybook
+		} else {
+			decision.Mode = DecisionModeIgnore
+		}
+	}
+	return decision
+}
+
+func isValidActionResultStatus(status string) bool {
+	switch status {
+	case string(ActionResultStatusCompleted), string(ActionResultStatusFailed), string(ActionResultStatusEscalated):
+		return true
+	default:
+		return false
+	}
+}
+
+func (decision Decision) reasonOrSummary() string {
+	if decision.Reason != "" {
+		return decision.Reason
+	}
+	if decision.Observation.Summary != "" {
+		return decision.Observation.Summary
+	}
+	return string(decision.Observation.FaultKey)
+}
+
+func (decision Decision) nextActionOrDefault(fallback string) string {
+	if decision.NextAction != "" {
+		return decision.NextAction
+	}
+	return fallback
 }
 
 func marshalJSON(value any) (string, error) {

@@ -31,14 +31,15 @@ func RenderOverview(view overview.View) string {
 	lines = append(lines, "")
 	lines = append(lines, "Attention")
 	lines = append(lines, fmt.Sprintf(
-		"  approvals=%d incidents=%d blocked_work=%d recoveries=%d blocked_swarms=%d",
+		"  approvals=%d incidents=%d blocked_work=%d failed_work=%d recoveries=%d blocked_swarms=%d",
 		len(view.Approvals),
 		len(view.Observability.Incidents),
 		len(view.Observability.BlockedWork),
+		len(view.Observability.RecoveryGuidance),
 		len(view.Observability.Recoveries),
 		countBlockedSwarms(view.CompanionSwarms),
 	))
-	if len(view.Approvals) == 0 && len(view.Observability.Incidents) == 0 && len(view.Observability.BlockedWork) == 0 && len(view.Observability.Recoveries) == 0 && countBlockedSwarms(view.CompanionSwarms) == 0 {
+	if len(view.Approvals) == 0 && len(view.Observability.Incidents) == 0 && len(view.Observability.BlockedWork) == 0 && len(view.Observability.RecoveryGuidance) == 0 && len(view.Observability.Recoveries) == 0 && countBlockedSwarms(view.CompanionSwarms) == 0 {
 		lines = append(lines, "  none")
 	} else {
 		for _, approval := range view.Approvals {
@@ -75,6 +76,17 @@ func RenderOverview(view overview.View) string {
 				valueOrNone(blocked.Reason),
 			))
 		}
+		for _, failed := range view.Observability.RecoveryGuidance {
+			lines = append(lines, fmt.Sprintf(
+				"  failed_work=%s project=%s companion=%s decision=%s retry_eligible=%t recommendation=%s",
+				valueOrNone(failed.WorkItemKey),
+				valueOrNone(failed.ProjectKey),
+				valueOrNone(ptrValue(failed.CompanionKey)),
+				valueOrNone(failed.Decision),
+				failed.RetryEligible,
+				valueOrNone(failed.RecoveryRecommendation),
+			))
+		}
 		for _, recovery := range view.Observability.Recoveries {
 			lines = append(lines, fmt.Sprintf(
 				"  recovery run=%d status=%s strategy=%s started_at=%s",
@@ -98,6 +110,19 @@ func RenderOverview(view overview.View) string {
 			))
 		}
 	}
+
+	lines = append(lines, "")
+	lines = append(lines, "Review Queue")
+	lines = append(lines, fmt.Sprintf(
+		"  wiring=%s total=%d intake=%d approvals=%d knowledge=%d skills=%d failed=%d",
+		valueOrNone(string(view.ReviewQueue.Wiring)),
+		view.ReviewQueue.TotalCount,
+		view.ReviewQueue.IntakeCount,
+		view.ReviewQueue.ApprovalCount,
+		view.ReviewQueue.KnowledgeCount,
+		view.ReviewQueue.SkillArtifactCount,
+		view.ReviewQueue.FailedWorkCount,
+	))
 
 	lines = append(lines, "")
 	lines = append(lines, "Active Execution")
@@ -230,6 +255,41 @@ func RenderOverview(view overview.View) string {
 	))
 
 	lines = append(lines, "")
+	lines = append(lines, "Capability Truth")
+	lines = append(lines, fmt.Sprintf(
+		"  wiring=%s authored_assets=%d runtime_proven=%d partial=%d advisory=%d unknown=%d high_risk=%d",
+		valueOrNone(string(view.CapabilityTruth.Wiring)),
+		view.CapabilityTruth.AuthoredAssetCount,
+		view.CapabilityTruth.RuntimeProvenCount,
+		view.CapabilityTruth.PartialCount,
+		view.CapabilityTruth.AdvisoryCount,
+		view.CapabilityTruth.UnknownCount,
+		view.CapabilityTruth.HighRiskFamilyCount,
+	))
+	for _, note := range view.CapabilityTruth.Notes {
+		lines = append(lines, fmt.Sprintf("  note=%s", valueOrNone(note)))
+	}
+	if len(view.CapabilityTruth.Items) == 0 {
+		lines = append(lines, "  truth=none")
+	} else {
+		renderedTruthItems := capabilityTruthItemsForText(view.CapabilityTruth.Items)
+		for _, item := range renderedTruthItems {
+			lines = append(lines, fmt.Sprintf(
+				"  truth kind=%s key=%s level=%s implemented=%t risk=%s proof=%s",
+				valueOrNone(item.Kind),
+				valueOrNone(item.Key),
+				valueOrNone(item.TruthLevel),
+				item.CountsAsImplemented,
+				valueOrNone(item.RiskLabel),
+				valueOrNone(strings.Join(item.Proof, ",")),
+			))
+		}
+		if remaining := len(view.CapabilityTruth.Items) - len(renderedTruthItems); remaining > 0 {
+			lines = append(lines, fmt.Sprintf("  truth remaining=%d use_json=true", remaining))
+		}
+	}
+
+	lines = append(lines, "")
 	lines = append(lines, "Skill Activity")
 	lines = append(lines, fmt.Sprintf(
 		"  wiring=%s invoke_success=%d invoke_failure=%d stub_results=%d command_output_only=%d",
@@ -292,14 +352,33 @@ func RenderOverview(view overview.View) string {
 	lines = append(lines, "")
 	lines = append(lines, "Observability")
 	lines = append(lines, fmt.Sprintf(
-		"  wiring=%s active_runs=%d blocked_work=%d incidents=%d recoveries=%d freshness=%d",
+		"  wiring=%s activity_log=%d active_runs=%d blocked_work=%d failed_work=%d incidents=%d recoveries=%d freshness=%d",
 		valueOrNone(string(view.Observability.Wiring)),
+		len(view.Observability.ActivityLog),
 		len(view.Observability.ActiveRuns),
 		len(view.Observability.BlockedWork),
+		len(view.Observability.RecoveryGuidance),
 		len(view.Observability.Incidents),
 		len(view.Observability.Recoveries),
 		len(view.Observability.Freshness),
 	))
+	lines = append(lines, "  Activity Log")
+	if len(view.Observability.ActivityLog) == 0 {
+		lines = append(lines, "    none")
+	}
+	for _, event := range view.Observability.ActivityLog {
+		lines = append(lines, fmt.Sprintf(
+			"    event=%d type=%s scope=%s project=%s work_item=%s run=%s approval=%s summary=%s",
+			event.EventID,
+			valueOrNone(event.EventType),
+			valueOrNone(event.Scope),
+			valueOrNone(event.ProjectKey),
+			valueOrNone(event.WorkItemKey),
+			nullableInt64(event.RunID),
+			nullableInt64(event.ApprovalID),
+			valueOrNone(event.Summary),
+		))
+	}
 	lines = append(lines, "  Run Attempts")
 	if len(view.Observability.ActiveRuns) == 0 {
 		lines = append(lines, "    none")
@@ -331,19 +410,43 @@ func RenderOverview(view overview.View) string {
 			valueOrNone(blocked.Reason),
 		))
 	}
+	lines = append(lines, "  Failed Work")
+	if len(view.Observability.RecoveryGuidance) == 0 {
+		lines = append(lines, "    none")
+	}
+	for _, failed := range view.Observability.RecoveryGuidance {
+		lines = append(lines, fmt.Sprintf(
+			"    failed_work=%s project=%s companion=%s status=%s decision=%s retry_eligible=%t retries=%d/%d source=%s last_error=%s recommendation=%s",
+			valueOrNone(failed.WorkItemKey),
+			valueOrNone(failed.ProjectKey),
+			valueOrNone(ptrValue(failed.CompanionKey)),
+			valueOrNone(failed.Status),
+			valueOrNone(failed.Decision),
+			failed.RetryEligible,
+			failed.RetryCount,
+			failed.MaxAttempts,
+			valueOrNone(failed.Source),
+			valueOrNone(failed.LastError),
+			valueOrNone(failed.RecoveryRecommendation),
+		))
+	}
 	lines = append(lines, "  Incidents")
 	if len(view.Observability.Incidents) == 0 {
 		lines = append(lines, "    none")
 	}
 	for _, incident := range view.Observability.Incidents {
 		lines = append(lines, fmt.Sprintf(
-			"    incident=%d work_item=%s project=%s companion=%s severity=%s status=%s summary=%s",
+			"    incident=%d work_item=%s project=%s companion=%s severity=%s status=%s fault_key=%s subject_key=%s decision_mode=%s next_action=%s summary=%s",
 			incident.IncidentID,
 			valueOrNone(incident.WorkItemKey),
 			valueOrNone(incident.ProjectKey),
 			valueOrNone(ptrValue(incident.CompanionKey)),
 			valueOrNone(incident.Severity),
 			valueOrNone(incident.Status),
+			valueOrNone(incident.FaultKey),
+			valueOrNone(incident.SubjectKey),
+			valueOrNone(incident.DecisionMode),
+			valueOrNone(incident.NextAction),
 			valueOrNone(incident.Summary),
 		))
 	}
@@ -353,11 +456,16 @@ func RenderOverview(view overview.View) string {
 	}
 	for _, recovery := range view.Observability.Recoveries {
 		lines = append(lines, fmt.Sprintf(
-			"    recovery=%d run=%d status=%s strategy=%s started_at=%s",
+			"    recovery=%d run=%d status=%s strategy=%s fault_key=%s subject_key=%s decision_mode=%s action=%s next_action=%s started_at=%s",
 			recovery.RecoveryID,
 			recovery.RunID,
 			valueOrNone(recovery.Status),
 			valueOrNone(recovery.Strategy),
+			valueOrNone(recovery.FaultKey),
+			valueOrNone(recovery.SubjectKey),
+			valueOrNone(recovery.DecisionMode),
+			valueOrNone(recovery.ActionName),
+			valueOrNone(recovery.NextAction),
 			valueOrNone(recovery.StartedAt),
 		))
 	}
@@ -455,6 +563,39 @@ func countBlockedSwarms(swarms []overview.CompanionSwarmSummary) int {
 		}
 	}
 	return count
+}
+
+func capabilityTruthItemsForText(items []overview.CapabilityTruthSummary) []overview.CapabilityTruthSummary {
+	const limit = 20
+	if len(items) <= limit {
+		return items
+	}
+
+	selected := make([]overview.CapabilityTruthSummary, 0, limit)
+	seen := make(map[string]struct{}, limit)
+	appendIf := func(item overview.CapabilityTruthSummary, include bool) {
+		if !include || len(selected) >= limit {
+			return
+		}
+		key := item.Kind + "\x00" + item.Key
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		selected = append(selected, item)
+	}
+
+	for _, item := range items {
+		appendIf(item, item.CountsAsImplemented)
+	}
+	for _, item := range items {
+		appendIf(item, item.HighRisk)
+	}
+	for _, item := range items {
+		appendIf(item, true)
+	}
+
+	return selected
 }
 
 func ptrValue(value *string) string {

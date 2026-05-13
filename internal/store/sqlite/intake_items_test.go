@@ -26,7 +26,7 @@ func TestCreateIntakeItemPreservesDuplicateRawArrivalsBeforeWork(t *testing.T) {
 		Subject:             "pbs build failed",
 		DedupeKey:           "default:n8n:ci-failure:pbs",
 		DedupeRecipeVersion: "intake-v1",
-		SourceFactsJSON:     `{"source_family":"n8n","external_object_id":"evt-1","event_kind":"ci_failure","project":"pbs"}`,
+		SourceFactsJSON:     `{"source_family":"n8n","external_object_id":"evt-1","event_kind":"ci_failure","project":"pbs","requested_by":"n8n","payload_policy":"stored_in_source_facts_json"}`,
 		Status:              "received",
 		Scope:               "project",
 		ScopeKey:            "pbs",
@@ -44,7 +44,7 @@ func TestCreateIntakeItemPreservesDuplicateRawArrivalsBeforeWork(t *testing.T) {
 		Subject:             "pbs build failed",
 		DedupeKey:           "default:n8n:ci-failure:pbs",
 		DedupeRecipeVersion: "intake-v1",
-		SourceFactsJSON:     `{"source_family":"n8n","external_object_id":"evt-2","event_kind":"ci_failure","project":"pbs"}`,
+		SourceFactsJSON:     `{"source_family":"n8n","external_object_id":"evt-2","event_kind":"ci_failure","project":"pbs","requested_by":"n8n","payload_policy":"stored_in_source_facts_json"}`,
 		Status:              "received",
 		Scope:               "project",
 		ScopeKey:            "pbs",
@@ -88,6 +88,13 @@ func TestCreateIntakeItemPreservesDuplicateRawArrivalsBeforeWork(t *testing.T) {
 		switch event.Type {
 		case runtimeevents.EventIntakeItemCreated:
 			intakeCreated++
+			var payload map[string]any
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("intake created payload unmarshal: %v\n%s", err, string(event.Payload))
+			}
+			if payload["requested_by"] == "" || payload["payload_policy"] != "stored_in_source_facts_json" {
+				t.Fatalf("intake created payload = %+v, want requested_by and payload policy provenance", payload)
+			}
 		case runtimeevents.EventTaskCreated:
 			t.Fatalf("raw intake created governed work event: %+v", event)
 		}
@@ -97,62 +104,52 @@ func TestCreateIntakeItemPreservesDuplicateRawArrivalsBeforeWork(t *testing.T) {
 	}
 }
 
-func TestProcessIntakeItemPersistsCanonicalDuplicateLink(t *testing.T) {
+func TestIntakeAttachmentsPersistMetadataAndBytes(t *testing.T) {
 	ctx := context.Background()
-	store := openMigratedTaskIntakeStore(t, "intake-duplicate-link.db")
+	store := openMigratedTaskIntakeStore(t, "intake-attachments.db")
 	defer store.Close()
 
-	first, err := store.CreateIntakeItem(ctx, CreateIntakeItemParams{
+	item, err := store.CreateIntakeItem(ctx, CreateIntakeItemParams{
 		WorkspaceID:         "default",
-		SourceFamily:        "n8n",
-		ExternalObjectID:    "evt-1",
-		EventKind:           "ci_failure",
-		Subject:             "pbs build failed",
-		DedupeKey:           "default:n8n:ci-failure:pbs",
-		DedupeRecipeVersion: "intake-v1",
-		SourceFactsJSON:     `{"source_family":"n8n","external_object_id":"evt-1","event_kind":"ci_failure","project":"pbs"}`,
-		Status:              "review_required",
-		Scope:               "project",
-		ScopeKey:            "pbs",
-		Summary:             "PBS CI failed",
-	})
-	if err != nil {
-		t.Fatalf("CreateIntakeItem(first) error = %v", err)
-	}
-
-	second, err := store.CreateIntakeItem(ctx, CreateIntakeItemParams{
-		WorkspaceID:         "default",
-		SourceFamily:        "n8n",
-		ExternalObjectID:    "evt-2",
-		EventKind:           "ci_failure",
-		Subject:             "pbs build failed",
-		DedupeKey:           "default:n8n:ci-failure:pbs",
-		DedupeRecipeVersion: "intake-v1",
-		SourceFactsJSON:     `{"source_family":"n8n","external_object_id":"evt-2","event_kind":"ci_failure","project":"pbs"}`,
+		SourceFamily:        "mobile_api",
+		ExternalObjectID:    "mobile-photo-1",
+		EventKind:           "photo",
+		Subject:             "Panel photo",
+		DedupeKey:           "mobile:photo:1",
+		DedupeRecipeVersion: "mobile-api-v1",
+		SourceFactsJSON:     `{"source":"mobile_api","payload_policy":"stored_in_source_facts_json"}`,
 		Status:              "received",
-		Scope:               "project",
-		ScopeKey:            "pbs",
-		Summary:             "PBS CI failed again",
+		Summary:             "Panel photo",
 	})
 	if err != nil {
-		t.Fatalf("CreateIntakeItem(second) error = %v", err)
+		t.Fatalf("CreateIntakeItem() error = %v", err)
 	}
 
-	processed, err := store.ProcessIntakeItem(ctx, ProcessIntakeItemParams{
-		ID:                    second.ID,
-		Status:                "duplicate_linked_or_suppressed",
-		Summary:               "Duplicate raw intake linked to canonical",
-		CanonicalIntakeItemID: &first.ID,
-		SuppressionReason:     "duplicate_dedupe_key",
+	attachment, err := store.CreateIntakeAttachment(ctx, CreateIntakeAttachmentParams{
+		IntakeItemID: item.ID,
+		Kind:         "photo",
+		Filename:     "panel.jpg",
+		ContentType:  "image/jpeg",
+		SizeBytes:    10,
+		SHA256:       "abc123",
+		Status:       "stored",
+		Bytes:        []byte("image-data"),
 	})
 	if err != nil {
-		t.Fatalf("ProcessIntakeItem(second) error = %v", err)
+		t.Fatalf("CreateIntakeAttachment() error = %v", err)
+	}
+	if attachment.ID == 0 || attachment.IntakeItemID != item.ID || attachment.Status != "stored" {
+		t.Fatalf("attachment = %+v, want stored attachment linked to intake %d", attachment, item.ID)
 	}
 
-	if processed.CanonicalIntakeItemID == nil || *processed.CanonicalIntakeItemID != first.ID {
-		t.Fatalf("CanonicalIntakeItemID = %+v, want %d", processed.CanonicalIntakeItemID, first.ID)
+	attachments, err := store.ListIntakeAttachments(ctx, ListIntakeAttachmentsParams{IntakeItemID: item.ID})
+	if err != nil {
+		t.Fatalf("ListIntakeAttachments() error = %v", err)
 	}
-	if processed.SuppressionReason == "" {
-		t.Fatal("SuppressionReason is empty, want duplicate reason")
+	if len(attachments) != 1 {
+		t.Fatalf("attachments len = %d, want 1", len(attachments))
+	}
+	if attachments[0].Filename != "panel.jpg" || string(attachments[0].Bytes) != "image-data" {
+		t.Fatalf("attachment = %+v, want metadata and bytes preserved", attachments[0])
 	}
 }

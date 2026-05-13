@@ -294,6 +294,81 @@ func TestRunsDetailIncludesRunArtifacts(t *testing.T) {
 	}
 }
 
+func TestShowDecodesFailureAnalysisArtifact(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openRunStore(t)
+	defer store.Close()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha",
+		Name:          "Alpha",
+		Scope:         "project",
+		GitRoot:       "/tmp/alpha",
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/alpha",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "alpha-task",
+		Title:       "Alpha task",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	const artifactJSON = `{"failure_analysis":{"category":"test_failure","suggested_fix":"Inspect failing test output and repair the regression.","next_step_target":"test","retry_recommended":true,"follow_up":{"recommended":true,"title":"Fix flaky test","reason":"needs a focused repair"}}}`
+	if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+		RunID:          run.ID,
+		Status:         "failed",
+		Summary:        "test failed",
+		TerminalReason: "failed",
+		ArtifactsJSON:  artifactJSON,
+	}); err != nil {
+		t.Fatalf("FinishRun() error = %v", err)
+	}
+
+	service := Service{DB: store.DB(), Store: store}
+	detail, err := service.Show(ctx, scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: "alpha",
+	}, run.ID)
+	if err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	if detail.ArtifactsJSON != artifactJSON {
+		t.Fatalf("Show().ArtifactsJSON = %q, want raw failure analysis artifact", detail.ArtifactsJSON)
+	}
+	if detail.FailureAnalysis == nil {
+		t.Fatalf("Show().FailureAnalysis = nil, want decoded failure analysis")
+	}
+	if detail.FailureAnalysis.Category != "test_failure" ||
+		detail.FailureAnalysis.SuggestedFix != "Inspect failing test output and repair the regression." ||
+		detail.FailureAnalysis.NextStepTarget != "test" ||
+		!detail.FailureAnalysis.RetryRecommended ||
+		!detail.FailureAnalysis.FollowUpRecommended ||
+		detail.FailureAnalysis.FollowUpTitle != "Fix flaky test" ||
+		detail.FailureAnalysis.FollowUpReason != "needs a focused repair" {
+		t.Fatalf("Show().FailureAnalysis = %+v, want decoded operator fields", detail.FailureAnalysis)
+	}
+}
+
 func TestGetRunEnvelopeReturnsEmptyArtifactsByDefault(t *testing.T) {
 	t.Parallel()
 

@@ -26,6 +26,7 @@ type JobView struct {
 	TaskID                int64  `json:"task_id,omitempty"`
 	TaskKey               string `json:"task_key"`
 	Status                string `json:"status"`
+	WorkKind              string `json:"work_kind,omitempty"`
 	ExecutionIntent       string `json:"execution_intent,omitempty"`
 	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
 	BlockedReason         string `json:"blocked_reason,omitempty"`
@@ -57,11 +58,17 @@ type RunsView struct {
 }
 
 type ApprovalView struct {
-	ApprovalID      int64  `json:"approval_id"`
-	TaskKey         string `json:"task_key"`
-	RunID           *int64 `json:"run_id,omitempty"`
-	Status          string `json:"status"`
-	ResolverSupport string `json:"resolver_support"`
+	ApprovalID      int64    `json:"approval_id"`
+	TaskKey         string   `json:"task_key"`
+	RunID           *int64   `json:"run_id,omitempty"`
+	Status          string   `json:"status"`
+	ResolverSupport string   `json:"resolver_support"`
+	Source          string   `json:"source,omitempty"`
+	Risk            string   `json:"risk,omitempty"`
+	Reason          string   `json:"reason,omitempty"`
+	AllowedActions  []string `json:"allowed_actions,omitempty"`
+	NextSteps       string   `json:"next_steps,omitempty"`
+	OnApprove       string   `json:"on_approve,omitempty"`
 }
 
 type ApprovalsView struct {

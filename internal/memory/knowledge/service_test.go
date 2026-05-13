@@ -2,7 +2,9 @@ package knowledge
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"odin-os/internal/store/sqlite"
@@ -47,6 +49,115 @@ func TestServiceMergesProjectAndGlobalKnowledge(t *testing.T) {
 	}
 	if projectEntries[1].ID != globalEntry.ID {
 		t.Fatalf("project entries[1] = %+v, want global knowledge fallback second", projectEntries[1])
+	}
+}
+
+func TestRecordFromContextPackProposalRequiresAcceptedStatus(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	project := createProject(t, ctx, store, "alpha")
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "goal-1",
+		Title:       "Prepare memory proposal",
+		ActionKey:   "memory.propose",
+		Status:      "queued",
+		Scope:       project.Scope,
+		RequestedBy: "test",
+		WorkKind:    "knowledge",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	packet, err := store.CreateContextPacket(ctx, sqlite.CreateContextPacketParams{
+		TaskID:      &task.ID,
+		PacketKind:  "context_pack",
+		PacketScope: "operator_context_pack",
+		Trigger:     "knowledge_context_pack_proposed",
+		Status:      "review_required",
+		Summary:     "Context pack for task goal-1",
+		PayloadJSON: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("CreateContextPacket() error = %v", err)
+	}
+	service := Service{Store: store}
+
+	_, err = service.RecordFromContextPackProposal(ctx, ContextPackProposalMemoryParams{
+		ProposalID: packet.ID,
+		Status:     "review_required",
+		ProjectID:  &project.ID,
+		TaskID:     &task.ID,
+		Scope:      Scope{ProjectID: &project.ID, Value: project.Scope, Key: project.Key},
+		MemoryType: "context_pack",
+		Summary:    "Context pack for task goal-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires accepted proposal") {
+		t.Fatalf("RecordFromContextPackProposal(review_required) error = %v, want accepted proposal guard", err)
+	}
+	if _, err := store.ReviewContextPacket(ctx, sqlite.ReviewContextPacketParams{
+		PacketID:   packet.ID,
+		Status:     "active",
+		Decision:   "accept",
+		ReviewedBy: "operator",
+	}); err != nil {
+		t.Fatalf("ReviewContextPacket(accept) error = %v", err)
+	}
+
+	recorded, err := service.RecordFromContextPackProposal(ctx, ContextPackProposalMemoryParams{
+		ProposalID: packet.ID,
+		Status:     "active",
+		ProjectID:  &project.ID,
+		TaskID:     &task.ID,
+		Scope:      Scope{ProjectID: &project.ID, Value: project.Scope, Key: project.Key},
+		MemoryType: "context_pack",
+		Summary:    "Context pack for task goal-1",
+		DetailsJSON: `{
+			"source": "test"
+		}`,
+	})
+	if err != nil {
+		t.Fatalf("RecordFromContextPackProposal(active) error = %v", err)
+	}
+	var details map[string]any
+	if err := json.Unmarshal([]byte(recorded.DetailsJSON), &details); err != nil {
+		t.Fatalf("json.Unmarshal(details) error = %v\n%s", err, recorded.DetailsJSON)
+	}
+	if got := int64(details["source_context_pack_id"].(float64)); got != packet.ID {
+		t.Fatalf("source_context_pack_id = %d, want %d", got, packet.ID)
+	}
+
+	_, err = service.RecordFromContextPackProposal(ctx, ContextPackProposalMemoryParams{
+		ProposalID: packet.ID,
+		Status:     "active",
+		ProjectID:  &project.ID,
+		TaskID:     &task.ID,
+		Scope:      Scope{ProjectID: &project.ID, Value: project.Scope, Key: project.Key},
+		MemoryType: "alternate_context_pack",
+		Summary:    "Alternate context pack for task goal-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "type must be context_pack") {
+		t.Fatalf("RecordFromContextPackProposal(alternate type) error = %v, want canonical type guard", err)
+	}
+
+	repeated, err := service.RecordFromContextPackProposal(ctx, ContextPackProposalMemoryParams{
+		ProposalID: packet.ID,
+		Status:     "active",
+		ProjectID:  &project.ID,
+		TaskID:     &task.ID,
+		Scope:      Scope{ProjectID: &project.ID, Value: project.Scope, Key: project.Key},
+		MemoryType: "context_pack",
+		Summary:    "Context pack for task goal-1",
+	})
+	if err != nil {
+		t.Fatalf("RecordFromContextPackProposal(repeat) error = %v", err)
+	}
+	if repeated.ID != recorded.ID {
+		t.Fatalf("repeat ID = %d, want existing %d", repeated.ID, recorded.ID)
 	}
 }
 

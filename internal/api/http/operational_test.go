@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,9 +18,13 @@ import (
 	"time"
 
 	httpapi "odin-os/internal/api/http"
+	clioverview "odin-os/internal/cli/overview"
+	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/initiatives"
 	coremedia "odin-os/internal/core/media"
+	coreworkspace "odin-os/internal/core/workspace"
 	"odin-os/internal/core/workspaces"
+	"odin-os/internal/registry"
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/projections"
@@ -212,6 +217,32 @@ func TestOperationalHandlerExposesDashboardStatusWithoutSecretsOrTmuxDependency(
 	seedHealthyObservability(t, ctx, store)
 	seedRuntimeState(t, ctx, store, "ready")
 	seedOperatorReadModels(t, ctx, store)
+	project, err := store.GetProjectByKey(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetProjectByKey(alpha) error = %v", err)
+	}
+	if _, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:             project.ID,
+		Key:                   "explicit-intent-task",
+		Title:                 "Explicit intent task",
+		Status:                "queued",
+		Scope:                 "project",
+		RequestedBy:           "test",
+		ExecutionIntent:       "deliver_with_evidence",
+		ExecutionIntentSource: "test",
+	}); err != nil {
+		t.Fatalf("CreateTask(explicit intent) error = %v", err)
+	}
+	if _, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "failed-task",
+		Title:       "Failed task",
+		Status:      "failed",
+		Scope:       "project",
+		RequestedBy: "test",
+	}); err != nil {
+		t.Fatalf("CreateTask(failed) error = %v", err)
+	}
 
 	const adminToken = "ghp_dashboard_secret_token"
 	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
@@ -222,6 +253,11 @@ func TestOperationalHandlerExposesDashboardStatusWithoutSecretsOrTmuxDependency(
 		ReadModels:      store.DB(),
 		RegistryHealthy: true,
 		AdminToken:      adminToken,
+		RegistrySnapshot: registry.Snapshot{Items: []registry.Item{{
+			Kind: registry.KindWorkflow,
+			Key:  "delivery-profile-fixture",
+			Tags: []string{"delivery_profile"},
+		}}},
 	}))
 	defer server.Close()
 
@@ -247,10 +283,26 @@ func TestOperationalHandlerExposesDashboardStatusWithoutSecretsOrTmuxDependency(
 		Runtime      struct {
 			Status string `json:"status"`
 		} `json:"runtime"`
+		WorkerDispatch struct {
+			Mode     string `json:"mode"`
+			Enabled  bool   `json:"enabled"`
+			DryRun   bool   `json:"dry_run"`
+			ReadOnly bool   `json:"read_only"`
+			Source   string `json:"source"`
+			Reason   string `json:"reason"`
+		} `json:"worker_dispatch"`
 		Counts struct {
-			WorkItems         int `json:"work_items"`
-			ActiveRunAttempts int `json:"active_run_attempts"`
-			PendingApprovals  int `json:"pending_approvals"`
+			WorkItems               int `json:"work_items"`
+			ActiveRunAttempts       int `json:"active_run_attempts"`
+			PendingApprovals        int `json:"pending_approvals"`
+			ReviewQueueItems        int `json:"review_queue_items"`
+			BlockedWorkItems        int `json:"blocked_work_items"`
+			FailedWorkItems         int `json:"failed_work_items"`
+			RecoveryRecommendations int `json:"recovery_recommendations"`
+			DeliveryProfiles        int `json:"delivery_profiles"`
+			ExplicitIntentWorkItems int `json:"explicit_intent_work_items"`
+			FallbackIntentWorkItems int `json:"fallback_intent_work_items"`
+			ActionRequiredItems     int `json:"action_required_items"`
 		} `json:"counts"`
 		Tmux struct {
 			Available bool   `json:"available"`
@@ -263,12 +315,237 @@ func TestOperationalHandlerExposesDashboardStatusWithoutSecretsOrTmuxDependency(
 	if status.HealthStatus != "healthy" || !status.Ready || status.Runtime.Status != "ready" {
 		t.Fatalf("/status = %+v, want healthy ready runtime", status)
 	}
+	if status.WorkerDispatch.Mode != "live" || !status.WorkerDispatch.Enabled || status.WorkerDispatch.DryRun || status.WorkerDispatch.ReadOnly || status.WorkerDispatch.Source != "runtime_readiness" || status.WorkerDispatch.Reason != "" {
+		t.Fatalf("/status worker_dispatch = %+v, want live non-dry-run non-read-only runtime readiness status", status.WorkerDispatch)
+	}
 	if status.Counts.WorkItems == 0 || status.Counts.ActiveRunAttempts == 0 || status.Counts.PendingApprovals == 0 {
 		t.Fatalf("/status counts = %+v, want runtime-state-backed counts", status.Counts)
+	}
+	if status.Counts.ReviewQueueItems < 2 || status.Counts.BlockedWorkItems != 1 || status.Counts.FailedWorkItems != 1 || status.Counts.RecoveryRecommendations != 1 {
+		t.Fatalf("/status counts = %+v, want action-required counts", status.Counts)
+	}
+	if status.Counts.DeliveryProfiles != 1 || status.Counts.ExplicitIntentWorkItems != 1 || status.Counts.FallbackIntentWorkItems == 0 || status.Counts.ActionRequiredItems < status.Counts.ReviewQueueItems {
+		t.Fatalf("/status counts = %+v, want delivery/intent/action rollups", status.Counts)
 	}
 	if status.Tmux.Available || status.Tmux.Source != "not_configured" {
 		t.Fatalf("/status tmux = %+v, want absence reported without daemon failure", status.Tmux)
 	}
+}
+
+func TestOperationalHandlerIncludesTmuxProviderStatus(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+		Tmux: fakeTmuxStatusProvider{status: httpapi.TmuxStatus{
+			Available:        true,
+			Source:           "workspace_sessions",
+			LiveSessions:     1,
+			AttachedSessions: 1,
+			Sessions: []httpapi.TmuxWorkspaceSession{
+				{
+					ProjectKey:    "alpha",
+					SessionName:   "odin-workspace-alpha",
+					State:         "live",
+					FactsSource:   "live",
+					AttachedCount: 1,
+				},
+			},
+		}},
+	}))
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/status")
+	if err != nil {
+		t.Fatalf("GET /status error = %v", err)
+	}
+	defer response.Body.Close()
+
+	var status struct {
+		Tmux struct {
+			Available        bool   `json:"available"`
+			Source           string `json:"source"`
+			LiveSessions     int    `json:"live_sessions"`
+			AttachedSessions int    `json:"attached_sessions"`
+			Sessions         []struct {
+				ProjectKey    string `json:"project_key"`
+				SessionName   string `json:"session_name"`
+				State         string `json:"state"`
+				FactsSource   string `json:"facts_source"`
+				AttachedCount int    `json:"attached_count"`
+			} `json:"sessions"`
+		} `json:"tmux"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatalf("decode /status: %v", err)
+	}
+	if !status.Tmux.Available || status.Tmux.Source != "workspace_sessions" || status.Tmux.LiveSessions != 1 || status.Tmux.AttachedSessions != 1 {
+		t.Fatalf("/status tmux = %+v, want provider summary", status.Tmux)
+	}
+	if len(status.Tmux.Sessions) != 1 || status.Tmux.Sessions[0].SessionName != "odin-workspace-alpha" {
+		t.Fatalf("/status tmux sessions = %+v, want workspace session", status.Tmux.Sessions)
+	}
+}
+
+func TestOperationalHandlerReportsTmuxProviderErrorWithoutFailingStatus(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+		Tmux:            fakeTmuxStatusProvider{err: errors.New("tmux unavailable")},
+	}))
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/status")
+	if err != nil {
+		t.Fatalf("GET /status error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("/status status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+
+	var status struct {
+		Tmux struct {
+			Available bool   `json:"available"`
+			Source    string `json:"source"`
+			Error     string `json:"error"`
+		} `json:"tmux"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatalf("decode /status: %v", err)
+	}
+	if status.Tmux.Available || status.Tmux.Source != "tmux" || status.Tmux.Error != "tmux unavailable" {
+		t.Fatalf("/status tmux = %+v, want non-fatal provider error", status.Tmux)
+	}
+}
+
+func TestOperationalHandlerReportsWorkspaceTmuxAbsentWithoutFailingStatus(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+		Tmux: httpapi.WorkspaceTmuxStatusProvider{
+			Workspaces: fakeWorkspaceStatusLister{err: errors.New(`exec: "tmux": executable file not found in $PATH`)},
+		},
+	}))
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/status")
+	if err != nil {
+		t.Fatalf("GET /status error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("/status status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+
+	var status struct {
+		Tmux struct {
+			Available bool   `json:"available"`
+			Source    string `json:"source"`
+			Error     string `json:"error"`
+		} `json:"tmux"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatalf("decode /status: %v", err)
+	}
+	if status.Tmux.Available || status.Tmux.Source != "tmux" || !strings.Contains(status.Tmux.Error, "executable file not found") {
+		t.Fatalf("/status tmux = %+v, want non-fatal tmux absence", status.Tmux)
+	}
+}
+
+func TestWorkspaceTmuxStatusProviderSummarizesWorkspaceSessions(t *testing.T) {
+	t.Parallel()
+
+	provider := httpapi.WorkspaceTmuxStatusProvider{
+		Workspaces: fakeWorkspaceStatusLister{statuses: []coreworkspace.Status{
+			{
+				ProjectKey:    "alpha",
+				SessionName:   "odin-workspace-alpha",
+				State:         coreworkspace.StateLive,
+				FactsSource:   coreworkspace.FactsSourceLive,
+				AttachedCount: 2,
+			},
+			{
+				ProjectKey:  "beta",
+				SessionName: "odin-workspace-beta",
+				State:       coreworkspace.StateStopped,
+				FactsSource: coreworkspace.FactsSourceLastKnown,
+			},
+		}},
+	}
+
+	status, err := provider.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if !status.Available || status.Source != "workspace_sessions" || status.LiveSessions != 1 || status.AttachedSessions != 1 {
+		t.Fatalf("Status() = %+v, want one live attached workspace session", status)
+	}
+	if len(status.Sessions) != 1 || status.Sessions[0].ProjectKey != "alpha" || status.Sessions[0].AttachedCount != 2 {
+		t.Fatalf("Status().Sessions = %+v, want alpha live session", status.Sessions)
+	}
+}
+
+type fakeTmuxStatusProvider struct {
+	status httpapi.TmuxStatus
+	err    error
+}
+
+func (provider fakeTmuxStatusProvider) Status(context.Context) (httpapi.TmuxStatus, error) {
+	if provider.err != nil {
+		return httpapi.TmuxStatus{}, provider.err
+	}
+	return provider.status, nil
+}
+
+type fakeWorkspaceStatusLister struct {
+	statuses []coreworkspace.Status
+	err      error
+}
+
+func (lister fakeWorkspaceStatusLister) List(context.Context) ([]coreworkspace.Status, error) {
+	if lister.err != nil {
+		return nil, lister.err
+	}
+	return lister.statuses, nil
 }
 
 func TestOperationalHandlerExposesIssuesAndRunsFromRuntimeState(t *testing.T) {
@@ -325,6 +602,169 @@ func TestOperationalHandlerExposesIssuesAndRunsFromRuntimeState(t *testing.T) {
 	}
 }
 
+func TestOperationalHandlerPaginatesAndFiltersDashboardIssues(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedOperatorReadModels(t, ctx, store)
+	for number := 1; number <= 105; number++ {
+		repo := "owner/alpha"
+		if number%2 == 0 {
+			repo = "owner/beta"
+		}
+		syncStatus := "eligible"
+		if number%3 == 0 {
+			syncStatus = "paused"
+		}
+		seedDashboardIssue(t, ctx, store, repo, number, "github", "open", syncStatus)
+	}
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{DB: store.DB()},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	var defaultIssues []struct {
+		Number int `json:"number"`
+	}
+	decodeURLJSON(t, server.URL+"/issues", &defaultIssues)
+	if len(defaultIssues) != 100 {
+		t.Fatalf("default /issues count = %d, want bounded 100", len(defaultIssues))
+	}
+
+	var filtered []struct {
+		Repo       string `json:"repo"`
+		Number     int    `json:"number"`
+		SyncStatus string `json:"sync_status"`
+	}
+	decodeURLJSON(t, server.URL+"/issues?repo=owner%2Falpha&sync_status=eligible&limit=2&offset=1", &filtered)
+	if len(filtered) != 2 {
+		t.Fatalf("filtered /issues count = %d, want 2: %+v", len(filtered), filtered)
+	}
+	if filtered[0].Number != 5 || filtered[1].Number != 7 {
+		t.Fatalf("filtered /issues = %+v, want owner/alpha eligible numbers 5 and 7", filtered)
+	}
+	for _, issue := range filtered {
+		if issue.Repo != "owner/alpha" || issue.SyncStatus != "eligible" {
+			t.Fatalf("filtered /issues includes wrong row: %+v", issue)
+		}
+	}
+}
+
+func TestOperationalHandlerRejectsInvalidDashboardIssuePagination(t *testing.T) {
+	t.Parallel()
+
+	store := openStore(t)
+	defer store.Close()
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{DB: store.DB()},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	assertGETStatus(t, server.URL+"/issues?limit=0", http.StatusBadRequest)
+	assertGETStatus(t, server.URL+"/issues?offset=-1", http.StatusBadRequest)
+	assertGETStatus(t, server.URL+"/issues?limit=501", http.StatusBadRequest)
+}
+
+func TestOperationalHandlerPaginatesAndFiltersDashboardRuns(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedOperatorReadModels(t, ctx, store)
+	project := mustProject(t, ctx, store, "alpha")
+	for number := 1; number <= 105; number++ {
+		task := seedDashboardTask(t, ctx, store, project.ID, fmt.Sprintf("run-filter-task-%03d", number))
+		executor := "codex"
+		if number%2 == 0 {
+			executor = "gemini"
+		}
+		run, err := store.StartRun(ctx, sqlite.StartRunParams{
+			TaskID:   task.ID,
+			Executor: executor,
+			Attempt:  1,
+			Status:   "running",
+		})
+		if err != nil {
+			t.Fatalf("StartRun(%d) error = %v", number, err)
+		}
+		if number%2 == 0 {
+			if _, err := store.FinishRun(ctx, sqlite.FinishRunParams{
+				RunID:          run.ID,
+				Status:         "completed",
+				Summary:        "done",
+				TerminalReason: "completed",
+			}); err != nil {
+				t.Fatalf("FinishRun(%d) error = %v", number, err)
+			}
+		}
+	}
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{DB: store.DB()},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	var defaultRuns []projections.RunSummaryView
+	decodeURLJSON(t, server.URL+"/runs", &defaultRuns)
+	if len(defaultRuns) != 100 {
+		t.Fatalf("default /runs count = %d, want bounded 100", len(defaultRuns))
+	}
+
+	var filtered []projections.RunSummaryView
+	decodeURLJSON(t, server.URL+"/runs?status=completed&executor=gemini&limit=2&offset=1", &filtered)
+	if len(filtered) != 2 {
+		t.Fatalf("filtered /runs count = %d, want 2: %+v", len(filtered), filtered)
+	}
+	if filtered[0].TaskKey != "run-filter-task-004" || filtered[1].TaskKey != "run-filter-task-006" {
+		t.Fatalf("filtered /runs = %+v, want tasks 004 and 006", filtered)
+	}
+	for _, run := range filtered {
+		if run.Status != "completed" || run.Executor != "gemini" {
+			t.Fatalf("filtered /runs includes wrong row: %+v", run)
+		}
+	}
+
+	taskID := filtered[0].TaskID
+	var taskFiltered []projections.RunSummaryView
+	decodeURLJSON(t, fmt.Sprintf("%s/runs?task_id=%d", server.URL, taskID), &taskFiltered)
+	if len(taskFiltered) != 1 || taskFiltered[0].TaskID != taskID {
+		t.Fatalf("task_id filtered /runs = %+v, want task_id %d", taskFiltered, taskID)
+	}
+}
+
+func TestOperationalHandlerRejectsInvalidDashboardRunPagination(t *testing.T) {
+	t.Parallel()
+
+	store := openStore(t)
+	defer store.Close()
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{DB: store.DB()},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+	}))
+	defer server.Close()
+
+	assertGETStatus(t, server.URL+"/runs?limit=0", http.StatusBadRequest)
+	assertGETStatus(t, server.URL+"/runs?offset=-1", http.StatusBadRequest)
+	assertGETStatus(t, server.URL+"/runs?task_id=abc", http.StatusBadRequest)
+}
+
 func TestOperationalHandlerProtectsAdminActions(t *testing.T) {
 	t.Parallel()
 
@@ -358,6 +798,24 @@ func TestOperationalHandlerProtectsAdminActions(t *testing.T) {
 		t.Fatalf("KillSwitchOn calls = %d, want 1", admin.killSwitchOnCalls)
 	}
 
+	res = mustPost(t, server.URL+"/issues/not-a-number/pause", "dashboard-secret")
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /issues/not-a-number/pause status = %d, want %d", res.StatusCode, http.StatusBadRequest)
+	}
+	res.Body.Close()
+	if admin.pauseIssueID != 0 {
+		t.Fatalf("PauseIssue called for invalid issue id %d, want no call", admin.pauseIssueID)
+	}
+
+	res = mustPost(t, server.URL+"/issues/42/pause", "")
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /issues/42/pause without token status = %d, want %d", res.StatusCode, http.StatusUnauthorized)
+	}
+	res.Body.Close()
+	if admin.pauseIssueID != 0 {
+		t.Fatalf("PauseIssue called without token for issue id %d, want no call", admin.pauseIssueID)
+	}
+
 	res = mustPost(t, server.URL+"/issues/42/pause", "dashboard-secret")
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("POST /issues/42/pause status = %d, want %d", res.StatusCode, http.StatusOK)
@@ -365,6 +823,15 @@ func TestOperationalHandlerProtectsAdminActions(t *testing.T) {
 	res.Body.Close()
 	if admin.pauseIssueID != 42 {
 		t.Fatalf("PauseIssue issue id = %d, want 42", admin.pauseIssueID)
+	}
+
+	res = mustPost(t, server.URL+"/issues/42/resume", "dashboard-secret")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("POST /issues/42/resume status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	res.Body.Close()
+	if admin.resumeIssueID != 42 {
+		t.Fatalf("ResumeIssue issue id = %d, want 42", admin.resumeIssueID)
 	}
 }
 
@@ -1022,9 +1489,216 @@ func TestOperationalHandlerBrowserSessionHandoffCompleteRejectsInvalidStates(t *
 	assertHandoffCompleteJSONStatus(t, server.URL, "", revokedRequest.HandoffID, http.StatusUnauthorized)
 }
 
+func TestMobileAPIRequiresAuthForReadsAndMutations(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{DB: store.DB()},
+		Metrics:         metricsvc.Service{DB: store.DB()},
+		Store:           store,
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+		AdminToken:      "secret",
+	}))
+	defer server.Close()
+
+	res := mustRequest(t, server, http.MethodGet, "/mobile/status", nil)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /mobile/status unauthenticated status = %d, want %d", res.StatusCode, http.StatusUnauthorized)
+	}
+
+	res = mustRequestWithHeaders(t, server, http.MethodPost, "/mobile/intake/raw", bytes.NewBufferString(`{"kind":"idea","content":"ship mobile"}`), map[string]string{
+		"Authorization": "Bearer wrong",
+	})
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("POST /mobile/intake/raw wrong-token status = %d, want %d", res.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestMobileOverviewUsesCanonicalOverviewProjection(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+	seedOperatorReadModels(t, ctx, store)
+	project := mustProject(t, ctx, store, "alpha")
+	seedDashboardTask(t, ctx, store, project.ID, "mobile-open-work")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{DB: store.DB()},
+		Metrics:         metricsvc.Service{DB: store.DB()},
+		Store:           store,
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+		AdminToken:      "secret",
+	}))
+	defer server.Close()
+
+	res := mustMobileRequest(t, server, http.MethodGet, "/mobile/overview", "secret", nil)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("GET /mobile/overview status = %d body=%s, want %d", res.StatusCode, string(body), http.StatusOK)
+	}
+	var got struct {
+		ActualUse struct {
+			WorkItemCount        int `json:"work_item_count"`
+			OpenWorkItemCount    int `json:"open_work_item_count"`
+			PendingApprovalCount int `json:"pending_approval_count"`
+			ReviewQueueCount     int `json:"review_queue_count"`
+		} `json:"actual_use"`
+	}
+	decodeJSON(t, res.Body, &got)
+
+	expected, err := (clioverview.Service{
+		Store:           store,
+		ReadinessStatus: "ready",
+		HealthStatus:    "healthy",
+	}).Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
+	if err != nil {
+		t.Fatalf("overview.Build() error = %v", err)
+	}
+	if got.ActualUse.WorkItemCount != expected.ActualUse.WorkItemCount ||
+		got.ActualUse.OpenWorkItemCount != expected.ActualUse.OpenWorkItemCount ||
+		got.ActualUse.PendingApprovalCount != expected.ActualUse.PendingApprovalCount ||
+		got.ActualUse.ReviewQueueCount != expected.ActualUse.ReviewQueueCount {
+		t.Fatalf("mobile overview actual_use = %+v, want canonical %+v", got.ActualUse, expected.ActualUse)
+	}
+}
+
+func TestMobileApprovalDecisionUsesApprovalServiceAndEmitsAudit(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedOperatorReadModels(t, ctx, store)
+	project := mustProject(t, ctx, store, "alpha")
+	task := seedDashboardTask(t, ctx, store, project.ID, "mobile-approval")
+	_, approval, err := store.BlockTaskAndRequestApproval(ctx, sqlite.BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval() error = %v", err)
+	}
+	if _, err := store.UpdateTaskQueueState(ctx, sqlite.UpdateTaskQueueStateParams{
+		TaskID:        task.ID,
+		Status:        "blocked",
+		BlockedReason: "approval_required",
+	}); err != nil {
+		t.Fatalf("UpdateTaskQueueState(approval_required) error = %v", err)
+	}
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Store:      store,
+		ReadModels: store.DB(),
+		AdminToken: "secret",
+	}))
+	defer server.Close()
+
+	body := bytes.NewBufferString(`{"action":"approve","reason":"mobile approval test","decision_by":"mobile-test"}`)
+	res := mustMobileRequest(t, server, http.MethodPost, fmt.Sprintf("/mobile/approvals/%d/decision", approval.ID), "secret", body)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(res.Body)
+		t.Fatalf("POST mobile approval decision status = %d body=%s, want %d", res.StatusCode, string(raw), http.StatusOK)
+	}
+	var response struct {
+		ApprovalID int64  `json:"approval_id"`
+		Status     string `json:"status"`
+	}
+	decodeJSON(t, res.Body, &response)
+	if response.ApprovalID != approval.ID || response.Status != "approved" {
+		t.Fatalf("approval decision response = %+v, want approval %d approved", response, approval.ID)
+	}
+
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if !hasRuntimeEventType(events, runtimeevents.EventApprovalResolved) {
+		t.Fatalf("events = %+v, want approval.resolved audit event", events)
+	}
+}
+
+func TestMobileRawIntakeCreateUsesCanonicalIntakePath(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Store:      store,
+		ReadModels: store.DB(),
+		AdminToken: "secret",
+	}))
+	defer server.Close()
+
+	res := mustMobileRequest(t, server, http.MethodPost, "/mobile/intake/raw", "secret", bytes.NewBufferString(`{"kind":"idea","title":"Mobile idea","content":"Build a governed mobile API"}`))
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusAccepted {
+		raw, _ := io.ReadAll(res.Body)
+		t.Fatalf("POST /mobile/intake/raw status = %d body=%s, want %d", res.StatusCode, string(raw), http.StatusAccepted)
+	}
+	rawBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if strings.Contains(string(rawBody), "Build a governed mobile API") {
+		t.Fatalf("mobile intake response echoed raw content: %s", string(rawBody))
+	}
+	var response struct {
+		IntakeItem struct {
+			ID         int64  `json:"id"`
+			Status     string `json:"status"`
+			Source     string `json:"source"`
+			IntakeType string `json:"intake_type"`
+			Subject    string `json:"subject"`
+		} `json:"intake_item"`
+	}
+	if err := json.Unmarshal(rawBody, &response); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if response.IntakeItem.ID == 0 || response.IntakeItem.Status != "received" || response.IntakeItem.Source != "mobile_api" || response.IntakeItem.IntakeType != "idea" {
+		t.Fatalf("mobile intake response = %+v, want received mobile idea", response.IntakeItem)
+	}
+
+	items, err := store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: "default"})
+	if err != nil {
+		t.Fatalf("ListIntakeItems() error = %v", err)
+	}
+	if len(items) != 1 || items[0].Subject != "Mobile idea" {
+		t.Fatalf("intake items = %+v, want one Mobile idea", items)
+	}
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if !hasRuntimeEventType(events, runtimeevents.EventIntakeItemCreated) {
+		t.Fatalf("events = %+v, want intake.item_created audit event", events)
+	}
+}
+
 type recordingAdminActions struct {
 	killSwitchOnCalls int
 	pauseIssueID      int64
+	resumeIssueID     int64
 }
 
 func (admin *recordingAdminActions) KillSwitchOn(context.Context) error {
@@ -1041,7 +1715,8 @@ func (admin *recordingAdminActions) PauseIssue(_ context.Context, issueID int64)
 	return nil
 }
 
-func (admin *recordingAdminActions) ResumeIssue(context.Context, int64) error {
+func (admin *recordingAdminActions) ResumeIssue(_ context.Context, issueID int64) error {
+	admin.resumeIssueID = issueID
 	return nil
 }
 
@@ -1062,7 +1737,40 @@ func mustPost(t *testing.T, url string, token string) *http.Response {
 	return response
 }
 
+func mustMobileRequest(t *testing.T, server *httptest.Server, method string, target string, token string, body io.Reader) *http.Response {
+	t.Helper()
+
+	request, err := http.NewRequest(method, server.URL+target, body)
+	if err != nil {
+		t.Fatalf("NewRequest(%s %s) error = %v", method, target, err)
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("%s %s error = %v", method, target, err)
+	}
+	return response
+}
+
 func assertHandoffStatus(t *testing.T, url string, want int) {
+	t.Helper()
+	response, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s error = %v", url, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != want {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("GET %s status = %d body=%s, want %d", url, response.StatusCode, string(body), want)
+	}
+}
+
+func assertGETStatus(t *testing.T, url string, want int) {
 	t.Helper()
 	response, err := http.Get(url)
 	if err != nil {
@@ -1110,6 +1818,15 @@ func openStore(t *testing.T) *sqlite.Store {
 	return store
 }
 
+func mustProject(t *testing.T, ctx context.Context, store *sqlite.Store, key string) sqlite.Project {
+	t.Helper()
+	project, err := store.GetProjectByKey(ctx, key)
+	if err != nil {
+		t.Fatalf("GetProjectByKey(%s) error = %v", key, err)
+	}
+	return project
+}
+
 func countBrowserSessionEvents(t *testing.T, ctx context.Context, store *sqlite.Store) int {
 	t.Helper()
 	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
@@ -1140,6 +1857,35 @@ func countBrowserSessionEventTypes(t *testing.T, ctx context.Context, store *sql
 	return counts
 }
 
+func hasRuntimeEventType(events []runtimeevents.Record, target runtimeevents.Type) bool {
+	for _, event := range events {
+		if event.Type == target {
+			return true
+		}
+	}
+	return false
+}
+
+func seedDashboardIssue(t *testing.T, ctx context.Context, store *sqlite.Store, repo string, number int, provider string, state string, syncStatus string) {
+	t.Helper()
+
+	project := mustProject(t, ctx, store, "alpha")
+	if _, err := store.UpsertExternalIssue(ctx, sqlite.UpsertExternalIssueParams{
+		ProjectID:  project.ID,
+		Provider:   provider,
+		Repo:       repo,
+		Number:     number,
+		Title:      fmt.Sprintf("Issue %d", number),
+		BodyHash:   fmt.Sprintf("sha256:%d", number),
+		URL:        fmt.Sprintf("https://github.com/%s/issues/%d", repo, number),
+		State:      state,
+		LabelsJSON: `[]`,
+		SyncStatus: syncStatus,
+	}); err != nil {
+		t.Fatalf("UpsertExternalIssue(%s#%d) error = %v", repo, number, err)
+	}
+}
+
 func seedExternalIssue(t *testing.T, ctx context.Context, store *sqlite.Store) {
 	t.Helper()
 
@@ -1161,6 +1907,22 @@ func seedExternalIssue(t *testing.T, ctx context.Context, store *sqlite.Store) {
 	}); err != nil {
 		t.Fatalf("UpsertExternalIssue() error = %v", err)
 	}
+}
+
+func seedDashboardTask(t *testing.T, ctx context.Context, store *sqlite.Store, projectID int64, key string) sqlite.Task {
+	t.Helper()
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   projectID,
+		Key:         key,
+		Title:       key,
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(%s) error = %v", key, err)
+	}
+	return task
 }
 
 func seedHealthyObservability(t *testing.T, ctx context.Context, store *sqlite.Store) {

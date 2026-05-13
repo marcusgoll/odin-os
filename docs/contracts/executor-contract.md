@@ -63,6 +63,24 @@ Requirements may express:
 - route selection may prefer headless lanes, but runtime execution must fail explicitly when no configured headless driver satisfies the route
 - API and broker executors remain distinct classes; they are not substitutes for a required harness-driver lane
 
+## Worker environment allowlist
+
+Worker and harness-driver subprocesses must build their environment through
+`internal/executors/drivers.AllowlistedEnvironment`. They must not inherit
+`os.Environ()` directly.
+
+To add a safe worker environment variable:
+
+1. Add the exact non-secret key to the allowlist in `internal/executors/drivers`.
+2. Add or update a regression test proving sensitive keys such as
+   `GITHUB_TOKEN`, `OPENAI_API_KEY`, and `ODIN_ADMIN_TOKEN` are still excluded.
+3. Document why the key is required for the worker lane.
+
+Do not allow broad prefixes such as `ODIN_*`, and do not allow key names that
+contain token, secret, password, API key, access key, private key, or credential
+markers. Runtime IDs, workspace paths, sandbox mode, fixture responses, and
+temporary paths are acceptable only when they are non-secret and lane-specific.
+
 ## Browser read-only foundation
 
 `internal/executors/browser` defines the read-only browser task boundary for goal evidence collection. The foundation validates goal ID, objective, allowed domains, start URLs, page and duration limits, and read-only action names before it records `browser_readonly` goal evidence through SQLite.

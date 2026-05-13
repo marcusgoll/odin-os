@@ -242,7 +242,7 @@ func (executor headlessExecutor) runLegacyDriver(ctx context.Context, driver str
 	defer cancel()
 
 	cmd := exec.CommandContext(driverCtx, driver)
-	cmd.Env = append(os.Environ(), "ODIN_CODEX_DRIVER_ACTION=run")
+	cmd.Env = drivers.AllowlistedEnvironment("ODIN_CODEX_DRIVER_ACTION=run")
 	cmd.Stdin = bytes.NewReader(payload)
 
 	var stderr bytes.Buffer

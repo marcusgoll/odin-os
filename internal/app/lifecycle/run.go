@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	apihttp "odin-os/internal/api/http"
@@ -36,13 +37,14 @@ import (
 	"odin-os/internal/core/companions"
 	"odin-os/internal/core/followups"
 	"odin-os/internal/core/initiatives"
-	coreintake "odin-os/internal/core/intake"
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/skillbinding"
 	coreworkspace "odin-os/internal/core/workspace"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/e2e"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
+	"odin-os/internal/registry"
 	approvalsvc "odin-os/internal/runtime/approvals"
 	"odin-os/internal/runtime/checkpoints"
 	conversationsvc "odin-os/internal/runtime/conversation"
@@ -63,6 +65,7 @@ import (
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/telemetry/logs"
 	metricsvc "odin-os/internal/telemetry/metrics"
+	"odin-os/internal/tools/catalog"
 	gitadapter "odin-os/internal/vcs/git"
 	"odin-os/internal/vcs/leases"
 	"odin-os/internal/vcs/worktrees"
@@ -70,7 +73,16 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs approvals review intake agenda logs knowledge goal browser task initiative companion profile followup trigger transition skills e2e"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal browser task initiative companion profile followup trigger scheduler transition skills e2e\n\nRun detail: odin runs show <id>"
+
+const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<true|false>] [--dry-run|dry_run=<true|false>] [--json]"
+const capabilitiesUsage = "usage: odin capabilities list [--kind agent|skill|workflow|command|tool] [--scope <scope>] [--json]\n       odin capabilities show <id> [--version <version>] [--json]"
+const capabilityCommandSource = "capability_gateway"
+const capabilityPluginModel = "plugins_are_packages_not_runtime_kind"
+const serveUsage = "usage: odin serve"
+const backupUsage = "usage: odin backup <archive-path>"
+const restoreUsage = "usage: odin restore <archive-path> <destination-root>"
+const verifyBackupUsage = "usage: odin verify-backup <archive-path>"
 
 var (
 	serveTaskLoopInterval     = 1 * time.Second
@@ -140,6 +152,7 @@ type healthLoopDeps struct {
 	Store              *sqlite.Store
 	RuntimeState       runtimestate.Service
 	Health             healthsvc.Service
+	Notifications      runtimenotifications.Service
 	Executors          map[string]contract.Executor
 	ExecutorConfig     executorrouter.Config
 	RegistryHealthy    bool
@@ -147,12 +160,12 @@ type healthLoopDeps struct {
 	ShutdownRequested  *atomic.Bool
 	BootID             string
 	RuntimeRoot        string
-	Notifications      runtimenotifications.Service
 }
 
 type serveDashboardAdmin struct {
 	ImmediateNotReady *atomic.Bool
 	RuntimeState      runtimestate.Service
+	Jobs              jobs.Service
 	BootID            string
 	RuntimeRoot       string
 	Logger            *logs.Logger
@@ -196,18 +209,43 @@ func (admin serveDashboardAdmin) KillSwitchOff(context.Context) error {
 	return nil
 }
 
-func (admin serveDashboardAdmin) PauseIssue(_ context.Context, issueID int64) error {
-	logBackgroundEvent(admin.Logger, logs.LevelWarn, "dashboard_admin", "issue pause requested but not implemented", map[string]any{
+func (admin serveDashboardAdmin) PauseIssue(ctx context.Context, issueID int64) error {
+	task, err := admin.Jobs.PauseIssue(ctx, issueID)
+	if err != nil {
+		logBackgroundError(admin.Logger, "dashboard_admin", err)
+		return dashboardAdminIssueActionError(err)
+	}
+	logBackgroundEvent(admin.Logger, logs.LevelWarn, "dashboard_admin", "issue paused", map[string]any{
 		"external_issue_id": issueID,
+		"task_id":           task.ID,
+		"blocked_reason":    task.BlockedReason,
 	})
-	return apihttp.ErrAdminActionNotImplemented
+	return nil
 }
 
-func (admin serveDashboardAdmin) ResumeIssue(_ context.Context, issueID int64) error {
-	logBackgroundEvent(admin.Logger, logs.LevelWarn, "dashboard_admin", "issue resume requested but not implemented", map[string]any{
+func (admin serveDashboardAdmin) ResumeIssue(ctx context.Context, issueID int64) error {
+	task, err := admin.Jobs.ResumeIssue(ctx, issueID)
+	if err != nil {
+		logBackgroundError(admin.Logger, "dashboard_admin", err)
+		return dashboardAdminIssueActionError(err)
+	}
+	logBackgroundEvent(admin.Logger, logs.LevelInfo, "dashboard_admin", "issue resumed", map[string]any{
 		"external_issue_id": issueID,
+		"task_id":           task.ID,
+		"status":            task.Status,
 	})
-	return apihttp.ErrAdminActionNotImplemented
+	return nil
+}
+
+func dashboardAdminIssueActionError(err error) error {
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("%w: issue or work item not found", apihttp.ErrAdminTargetNotFound)
+	case errors.Is(err, jobs.ErrOperatorPauseUnsupported), errors.Is(err, jobs.ErrOperatorResumeUnsupported):
+		return fmt.Errorf("%w: %v", apihttp.ErrAdminActionConflict, err)
+	default:
+		return err
+	}
 }
 
 // Run dispatches between the interactive shell and machine-oriented operational commands.
@@ -218,6 +256,15 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 
 	cfg, err := appconfig.Load(filepath.Join(root, "config", "odin.yaml"), root, runtimeEnv())
 	if err != nil {
+		return err
+	}
+
+	if len(args) > 0 && args[0] == "serve" && isHelpArgs(args[1:]) {
+		_, err := fmt.Fprintln(stdout, serveUsage)
+		return err
+	}
+	if len(args) > 0 && isOperationalHelpCommand(args[0]) && isHelpArgs(args[1:]) {
+		_, err := fmt.Fprintln(stdout, operationalHelpUsage(args[0]))
 		return err
 	}
 
@@ -254,6 +301,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runRepl(ctx, app, stdin, stdout, now)
 	case "overview":
 		return runOverview(ctx, app, args[1:], stdout)
+	case "capabilities":
+		return runCapabilities(ctx, app, args[1:], stdout)
 	case "tui":
 		return runTUI(ctx, args[1:], stdout)
 	case "status":
@@ -267,13 +316,20 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	case "work":
 		return commands.RunWork(ctx, app.Store, app.Registry, app.RegistrySnapshot, args[1:], stdout, commands.WorkOptions{
 			JobService: jobs.Service{
-				Store:          app.Store,
-				RuntimeRoot:    app.RuntimeRoot,
-				Registry:       app.Registry,
-				Executors:      app.Executors,
-				ExecutorConfig: app.ExecutorConfig,
-				Transitions:    projects.Service{Store: app.Store},
-				Now:            time.Now,
+				Store:              app.Store,
+				RuntimeRoot:        app.RuntimeRoot,
+				Registry:           app.Registry,
+				Executors:          app.Executors,
+				ExecutorConfig:     app.ExecutorConfig,
+				PromptRenderer:     app.PromptRenderer,
+				PromptTemplateName: app.PromptTemplateName,
+				Transitions:        projects.Service{Store: app.Store},
+				Leases: leases.Manager{
+					Store:        app.Store,
+					Git:          gitadapter.Adapter{},
+					WorktreeRoot: worktrees.DefaultRoot(),
+				},
+				Now: time.Now,
 			},
 		})
 	case "scope":
@@ -282,6 +338,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runJobs(ctx, app, args[1:], stdout)
 	case "runs":
 		return runRuns(ctx, app, args[1:], stdout)
+	case "leases":
+		return runLeases(ctx, app, args[1:], stdout)
 	case "approvals":
 		return runApprovals(ctx, app, args[1:], stdout)
 	case "review":
@@ -298,6 +356,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runLogs(ctx, app, args[1:], stdout)
 	case "knowledge":
 		return commands.RunKnowledge(ctx, app.Store, args[1:], stdout)
+	case "memory":
+		return commands.RunMemory(ctx, app.Store, args[1:], stdout)
 	case "goal":
 		return runGoal(ctx, app, args[1:], stdout)
 	case "browser":
@@ -316,6 +376,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runFollowup(ctx, app, args[1:], stdout)
 	case "trigger":
 		return commands.RunTrigger(ctx, triggers.Service{Store: app.Store, Registry: app.Registry}, args[1:], stdout)
+	case "scheduler":
+		return runScheduler(ctx, app, args[1:], stdout)
 	case "skills":
 		return runSkills(ctx, app, args[1:], stdout)
 	case "doctor":
@@ -323,6 +385,13 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	case "healthcheck":
 		return runHealthcheck(ctx, app, cfg, stdout)
 	case "serve":
+		if isHelpArgs(args[1:]) {
+			_, err := fmt.Fprintln(stdout, serveUsage)
+			return err
+		}
+		if len(args) != 1 {
+			return fmt.Errorf(serveUsage)
+		}
 		now, err := runtimeNow()
 		if err != nil {
 			return err
@@ -336,6 +405,28 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runVerifyBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
+	}
+}
+
+func isOperationalHelpCommand(command string) bool {
+	switch command {
+	case "backup", "restore", "verify-backup":
+		return true
+	default:
+		return false
+	}
+}
+
+func operationalHelpUsage(command string) string {
+	switch command {
+	case "backup":
+		return backupUsage
+	case "restore":
+		return restoreUsage
+	case "verify-backup":
+		return verifyBackupUsage
+	default:
+		return rootUsageBanner
 	}
 }
 
@@ -364,10 +455,16 @@ func runOverview(ctx context.Context, app bootstrap.App, args []string, stdout i
 		return err
 	}
 
+	readinessStatus, healthStatus := overviewRuntimeStatus(ctx, app)
+	binaryPath, _ := os.Executable()
 	view, err := clioverview.Service{
 		Store:            app.Store,
 		Registry:         app.Registry,
 		RegistrySnapshot: app.RegistrySnapshot,
+		ReadinessStatus:  readinessStatus,
+		HealthStatus:     healthStatus,
+		BinaryPath:       binaryPath,
+		SourceRoot:       app.RepoRoot,
 	}.Build(ctx, state.Scope)
 	if err != nil {
 		return err
@@ -377,6 +474,374 @@ func runOverview(ctx context.Context, app bootstrap.App, args []string, stdout i
 	}
 	_, err = fmt.Fprintln(stdout, clirender.RenderOverview(view))
 	return err
+}
+
+func overviewRuntimeStatus(ctx context.Context, app bootstrap.App) (string, string) {
+	health := healthsvc.Service{DB: app.Store.DB()}
+	registryHealthy := len(app.RegistryDiagnostics) == 0
+	report, err := health.Doctor(ctx, registryHealthy)
+	if err != nil {
+		return "unknown", "unknown"
+	}
+	_, ready, err := health.Readiness(ctx, registryHealthy)
+	if err != nil {
+		return "unknown", string(report.Status)
+	}
+	if ready {
+		return "ready", string(report.Status)
+	}
+	return "not_ready", string(report.Status)
+}
+
+type capabilityListView struct {
+	Source       string               `json:"source"`
+	PluginModel  string               `json:"plugin_model"`
+	Count        int                  `json:"count"`
+	Capabilities []capabilityCardView `json:"capabilities"`
+}
+
+type capabilityShowView struct {
+	Source      string                   `json:"source"`
+	PluginModel string                   `json:"plugin_model"`
+	Capability  capabilityDescriptorView `json:"capability"`
+}
+
+type capabilityCardView struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Name    string `json:"name,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Version string `json:"version"`
+	Scope   string `json:"scope,omitempty"`
+	Summary string `json:"summary,omitempty"`
+	Status  string `json:"status,omitempty"`
+}
+
+type capabilityDescriptorView struct {
+	ID             string                         `json:"id"`
+	APIVersion     string                         `json:"api_version,omitempty"`
+	Kind           string                         `json:"kind"`
+	Name           string                         `json:"name,omitempty"`
+	Title          string                         `json:"title,omitempty"`
+	Version        string                         `json:"version"`
+	Summary        string                         `json:"summary,omitempty"`
+	Status         string                         `json:"status,omitempty"`
+	Availability   capabilityAvailabilityView     `json:"availability,omitempty"`
+	Permissions    []string                       `json:"permissions,omitempty"`
+	InputSchema    capabilitySchemaView           `json:"input_schema,omitempty"`
+	OutputSchema   capabilitySchemaView           `json:"output_schema,omitempty"`
+	Dependencies   []capabilityDependencyView     `json:"dependencies,omitempty"`
+	Execution      capabilityExecutionView        `json:"execution,omitempty"`
+	Implementation capabilityImplementationView   `json:"implementation,omitempty"`
+	Scopes         []string                       `json:"scopes,omitempty"`
+	Tags           []string                       `json:"tags,omitempty"`
+	Owners         []string                       `json:"owners,omitempty"`
+	Source         capabilityDescriptorSourceView `json:"source,omitempty"`
+}
+
+type capabilityAvailabilityView struct {
+	Scope string `json:"scope,omitempty"`
+	Mode  string `json:"mode,omitempty"`
+}
+
+type capabilitySchemaView struct {
+	Ref  string `json:"ref,omitempty"`
+	Type string `json:"type,omitempty"`
+}
+
+type capabilityDependencyView struct {
+	Kind    string `json:"kind,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Version string `json:"version,omitempty"`
+}
+
+type capabilityExecutionView struct {
+	Mode    string `json:"mode,omitempty"`
+	Timeout string `json:"timeout,omitempty"`
+}
+
+type capabilityImplementationView struct {
+	Kind string `json:"kind,omitempty"`
+	Ref  string `json:"ref,omitempty"`
+	Path string `json:"path,omitempty"`
+}
+
+type capabilityDescriptorSourceView struct {
+	Path         string `json:"path,omitempty"`
+	RelativePath string `json:"relative_path,omitempty"`
+}
+
+func runCapabilities(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	_ = ctx
+	if len(args) == 0 || args[0] == "help" {
+		_, err := fmt.Fprintln(stdout, capabilitiesUsage)
+		return err
+	}
+
+	gateway := newReadOnlyCapabilityGateway(app)
+	if gateway == nil {
+		return fmt.Errorf("capability gateway unavailable")
+	}
+
+	switch args[0] {
+	case "list":
+		return runCapabilitiesList(gateway, args[1:], stdout)
+	case "show":
+		return runCapabilitiesShow(gateway, args[1:], stdout)
+	default:
+		return fmt.Errorf("%s", capabilitiesUsage)
+	}
+}
+
+func runCapabilitiesList(gateway *capabilities.Gateway, args []string, stdout io.Writer) error {
+	jsonOutput, kind, scope, err := parseCapabilitiesListArgs(args)
+	if err != nil {
+		return err
+	}
+
+	cards := gateway.ListCapabilities(kind, scope)
+	view := capabilityListView{
+		Source:       capabilityCommandSource,
+		PluginModel:  capabilityPluginModel,
+		Count:        len(cards),
+		Capabilities: make([]capabilityCardView, 0, len(cards)),
+	}
+	for _, card := range cards {
+		view.Capabilities = append(view.Capabilities, capabilityCardToView(card))
+	}
+
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+
+	for _, card := range view.Capabilities {
+		if _, err := fmt.Fprintf(stdout, "%s version=%s kind=%s scope=%s status=%s\n", card.ID, card.Version, card.Kind, card.Scope, card.Status); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runCapabilitiesShow(gateway *capabilities.Gateway, args []string, stdout io.Writer) error {
+	id, version, jsonOutput, err := parseCapabilitiesShowArgs(args)
+	if err != nil {
+		return err
+	}
+
+	descriptor, err := resolveCLICapabilityDescriptor(gateway, id, version)
+	if err != nil {
+		return err
+	}
+	view := capabilityShowView{
+		Source:      capabilityCommandSource,
+		PluginModel: capabilityPluginModel,
+		Capability:  capabilityDescriptorToView(descriptor),
+	}
+
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+
+	_, err = fmt.Fprintf(stdout, "%s version=%s kind=%s scope=%s status=%s implementation=%s:%s\n",
+		view.Capability.ID,
+		view.Capability.Version,
+		view.Capability.Kind,
+		view.Capability.Availability.Scope,
+		view.Capability.Status,
+		view.Capability.Implementation.Kind,
+		view.Capability.Implementation.Path,
+	)
+	return err
+}
+
+func parseCapabilitiesListArgs(args []string) (bool, registry.Kind, string, error) {
+	jsonOutput := false
+	kind := registry.KindUnknown
+	scope := ""
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--json":
+			if jsonOutput {
+				return false, registry.KindUnknown, "", fmt.Errorf("duplicate --json flag")
+			}
+			jsonOutput = true
+		case "--kind":
+			if kind != registry.KindUnknown {
+				return false, registry.KindUnknown, "", fmt.Errorf("duplicate --kind flag")
+			}
+			if index+1 >= len(args) {
+				return false, registry.KindUnknown, "", fmt.Errorf("--kind requires a value")
+			}
+			parsed, err := parseCapabilityKind(args[index+1])
+			if err != nil {
+				return false, registry.KindUnknown, "", err
+			}
+			kind = parsed
+			index++
+		case "--scope":
+			if scope != "" {
+				return false, registry.KindUnknown, "", fmt.Errorf("duplicate --scope flag")
+			}
+			if index+1 >= len(args) {
+				return false, registry.KindUnknown, "", fmt.Errorf("--scope requires a value")
+			}
+			scope = strings.TrimSpace(args[index+1])
+			if scope == "" {
+				return false, registry.KindUnknown, "", fmt.Errorf("--scope requires a value")
+			}
+			index++
+		default:
+			return false, registry.KindUnknown, "", fmt.Errorf("%s", capabilitiesUsage)
+		}
+	}
+	return jsonOutput, kind, scope, nil
+}
+
+func parseCapabilitiesShowArgs(args []string) (string, string, bool, error) {
+	id := ""
+	version := ""
+	jsonOutput := false
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--json":
+			if jsonOutput {
+				return "", "", false, fmt.Errorf("duplicate --json flag")
+			}
+			jsonOutput = true
+		case "--version":
+			if version != "" {
+				return "", "", false, fmt.Errorf("duplicate --version flag")
+			}
+			if index+1 >= len(args) {
+				return "", "", false, fmt.Errorf("--version requires a value")
+			}
+			version = strings.TrimSpace(args[index+1])
+			if version == "" {
+				return "", "", false, fmt.Errorf("--version requires a value")
+			}
+			index++
+		default:
+			if strings.HasPrefix(args[index], "-") {
+				return "", "", false, fmt.Errorf("%s", capabilitiesUsage)
+			}
+			if id != "" {
+				return "", "", false, fmt.Errorf("%s", capabilitiesUsage)
+			}
+			id = strings.TrimSpace(args[index])
+		}
+	}
+	if id == "" {
+		return "", "", false, fmt.Errorf("%s", capabilitiesUsage)
+	}
+	return id, version, jsonOutput, nil
+}
+
+func parseCapabilityKind(value string) (registry.Kind, error) {
+	switch registry.Kind(strings.TrimSpace(value)) {
+	case registry.KindAgent:
+		return registry.KindAgent, nil
+	case registry.KindSkill:
+		return registry.KindSkill, nil
+	case registry.KindWorkflow:
+		return registry.KindWorkflow, nil
+	case registry.KindCommand:
+		return registry.KindCommand, nil
+	case registry.KindTool:
+		return registry.KindTool, nil
+	default:
+		return registry.KindUnknown, fmt.Errorf("unknown capability kind %q", value)
+	}
+}
+
+func resolveCLICapabilityDescriptor(gateway *capabilities.Gateway, id, version string) (capabilities.Descriptor, error) {
+	if strings.TrimSpace(version) != "" {
+		descriptor, err := gateway.GetCapability(id, version)
+		if err != nil {
+			return capabilities.Descriptor{}, fmt.Errorf("capability %q version %q not found: %w", id, version, err)
+		}
+		return descriptor, nil
+	}
+
+	var matches []capabilities.CapabilityCard
+	for _, card := range gateway.ListCapabilities(registry.KindUnknown, "") {
+		if card.ID == id {
+			matches = append(matches, card)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return capabilities.Descriptor{}, fmt.Errorf("capability %q not found", id)
+	case 1:
+		return gateway.GetCapability(id, matches[0].Version)
+	default:
+		return capabilities.Descriptor{}, fmt.Errorf("capability %q requires --version", id)
+	}
+}
+
+func capabilityCardToView(card capabilities.CapabilityCard) capabilityCardView {
+	return capabilityCardView{
+		ID:      card.ID,
+		Kind:    string(card.Kind),
+		Name:    card.Name,
+		Title:   card.Title,
+		Version: card.Version,
+		Scope:   card.Scope,
+		Summary: card.Summary,
+		Status:  card.Status,
+	}
+}
+
+func capabilityDescriptorToView(descriptor capabilities.Descriptor) capabilityDescriptorView {
+	dependencies := make([]capabilityDependencyView, 0, len(descriptor.Dependencies))
+	for _, dependency := range descriptor.Dependencies {
+		dependencies = append(dependencies, capabilityDependencyView{
+			Kind:    string(dependency.Kind),
+			Name:    dependency.Name,
+			Version: dependency.Version,
+		})
+	}
+
+	return capabilityDescriptorView{
+		ID:         descriptor.Key,
+		APIVersion: descriptor.APIVersion,
+		Kind:       string(descriptor.Kind),
+		Name:       descriptor.Name,
+		Title:      descriptor.Title,
+		Version:    descriptor.Version,
+		Summary:    descriptor.Summary,
+		Status:     descriptor.Status,
+		Availability: capabilityAvailabilityView{
+			Scope: descriptor.Availability.Scope,
+			Mode:  descriptor.Availability.Mode,
+		},
+		Permissions: append([]string(nil), descriptor.Permissions...),
+		InputSchema: capabilitySchemaView{
+			Ref:  descriptor.InputSchema.Ref,
+			Type: descriptor.InputSchema.Type,
+		},
+		OutputSchema: capabilitySchemaView{
+			Ref:  descriptor.OutputSchema.Ref,
+			Type: descriptor.OutputSchema.Type,
+		},
+		Dependencies: dependencies,
+		Execution: capabilityExecutionView{
+			Mode:    descriptor.Execution.Mode,
+			Timeout: descriptor.Execution.Timeout,
+		},
+		Implementation: capabilityImplementationView{
+			Kind: descriptor.Implementation.Kind,
+			Ref:  descriptor.Implementation.Ref,
+			Path: descriptor.Implementation.Path,
+		},
+		Scopes: append([]string(nil), descriptor.Scopes...),
+		Tags:   append([]string(nil), descriptor.Tags...),
+		Owners: append([]string(nil), descriptor.Owners...),
+		Source: capabilityDescriptorSourceView{
+			Path:         descriptor.Source.Path,
+			RelativePath: descriptor.Source.RelativePath,
+		},
+	}
 }
 
 func runScope(app bootstrap.App, args []string, stdout io.Writer) error {
@@ -429,6 +894,7 @@ func runJobs(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 				TaskID:                view.TaskID,
 				TaskKey:               view.TaskKey,
 				Status:                view.Status,
+				WorkKind:              view.WorkKind,
 				ExecutionIntent:       view.ExecutionIntent,
 				ExecutionIntentSource: view.ExecutionIntentSource,
 				BlockedReason:         view.BlockedReason,
@@ -490,8 +956,27 @@ func runRuns(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 	if err != nil {
 		return err
 	}
-	if len(remaining) != 0 {
-		return fmt.Errorf("usage: odin runs [--json]")
+	if len(remaining) > 0 {
+		if strings.EqualFold(remaining[0], "show") {
+			if jsonOutput || len(remaining) != 2 {
+				return fmt.Errorf("usage: odin runs [--json] | odin runs show <run-id>")
+			}
+			runID, err := strconv.ParseInt(remaining[1], 10, 64)
+			if err != nil || runID <= 0 {
+				return fmt.Errorf("run id must be a positive integer")
+			}
+			state, err := loadCLIState(app)
+			if err != nil {
+				return err
+			}
+			detail, err := runs.Service{DB: app.Store.DB(), Store: app.Store}.Show(ctx, state.Scope, runID)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprint(stdout, clirender.RenderRunDetail(detail))
+			return err
+		}
+		return fmt.Errorf("usage: odin runs [--json] | odin runs show <run-id>")
 	}
 
 	state, err := loadCLIState(app)
@@ -535,6 +1020,112 @@ func runRuns(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 	return nil
 }
 
+func runLeases(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] != "cleanup" {
+		return fmt.Errorf("usage: odin leases cleanup [--dry-run|confirm]")
+	}
+	return runLeasesCleanup(ctx, app, args[1:], stdout)
+}
+
+func runLeasesCleanup(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	dryRun := true
+	switch len(args) {
+	case 0:
+	case 1:
+		switch strings.ToLower(args[0]) {
+		case "--dry-run", "dry-run":
+			dryRun = true
+		case "confirm":
+			dryRun = false
+		default:
+			return fmt.Errorf("usage: odin leases cleanup [--dry-run|confirm]")
+		}
+	default:
+		return fmt.Errorf("usage: odin leases cleanup [--dry-run|confirm]")
+	}
+
+	manager := worktrees.Manager{
+		Store:        app.Store,
+		Git:          gitadapter.Adapter{},
+		WorktreeRoot: worktrees.DefaultRoot(),
+	}
+	logger, logCloser, err := openServiceLogger(app.RuntimeRoot)
+	if err != nil {
+		return err
+	}
+	if logCloser != nil {
+		defer logCloser.Close()
+	}
+	manager.Logger = logger
+	staleBefore := time.Now().UTC().Add(-defaultServeLoopConfig.leaseStaleAfter)
+	preview, err := manager.PreviewCleanup(ctx, staleBefore)
+	if err != nil {
+		return err
+	}
+	if err := renderLeaseCleanupPreview(ctx, app, preview, stdout); err != nil {
+		return err
+	}
+	if dryRun {
+		return nil
+	}
+
+	cleanupLeases := make([]sqlite.WorktreeLease, 0)
+	for _, decision := range preview.Leases {
+		if decision.Action == worktrees.CleanupActionCleanup {
+			cleanupLeases = append(cleanupLeases, decision.Lease)
+		}
+	}
+	if len(cleanupLeases) == 0 {
+		_, err := fmt.Fprintln(stdout, "no cleanup-eligible leases")
+		return err
+	}
+
+	result, err := manager.CleanupLeases(ctx, cleanupLeases)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "cleaned %d lease(s)\n", len(result.Removed))
+	return err
+}
+
+func renderLeaseCleanupPreview(ctx context.Context, app bootstrap.App, preview worktrees.CleanupPreview, stdout io.Writer) error {
+	if len(preview.Leases) == 0 {
+		_, err := fmt.Fprintln(stdout, "no worktree leases")
+		return err
+	}
+	projectKeyByID := map[int64]string{}
+	for _, decision := range preview.Leases {
+		projectKey, err := projectKeyForID(ctx, app.Store, projectKeyByID, decision.Lease.ProjectID)
+		if err != nil {
+			return err
+		}
+		cleanup := "pending"
+		if decision.Lease.CleanedUpAt != nil || decision.Lease.State == "cleaned" {
+			cleanup = "complete"
+		}
+		dirty := "unknown"
+		if decision.Dirty != nil {
+			dirty = strconv.FormatBool(*decision.Dirty)
+		}
+		if _, err := fmt.Fprintf(stdout, "lease_id=%d project=%s state=%s cleanup=%s action=%s reason=%s dirty=%s task=%d run=%d branch=%s worktree=%s\n", decision.Lease.ID, projectKey, decision.Lease.State, cleanup, decision.Action, decision.Reason, dirty, decision.Lease.TaskID, decision.Lease.RunID, decision.Lease.BranchName, decision.Lease.WorktreePath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func projectKeyForID(ctx context.Context, store *sqlite.Store, cache map[int64]string, projectID int64) (string, error) {
+	if projectKey := cache[projectID]; projectKey != "" {
+		return projectKey, nil
+	}
+	project, err := store.GetProject(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	cache[projectID] = project.Key
+	return project.Key, nil
+}
+
 func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
 	jsonOutput, remaining, err := consumeJSONFlag(args)
 	if err != nil {
@@ -553,16 +1144,29 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 			return err
 		}
 		if jsonOutput {
+			resolverSupport := string(detail.ResolverSupport)
+			reason := approvalOperatorReason(detail.Approval.Status, resolverSupport)
+			if storedReason := strings.TrimSpace(detail.Approval.Reason); storedReason != "" {
+				reason = storedReason
+			}
+			allowedActions := approvalOperatorAllowedActions(detail.Approval.Status, resolverSupport)
+			nextSteps := approvalOperatorNextSteps(detail.Approval.ID, detail.Approval.Status, resolverSupport)
+			onApprove := approvalOperatorOnApprove(resolverSupport)
 			return commands.WriteJSON(stdout, struct {
-				ID              int64  `json:"id"`
-				Status          string `json:"status"`
-				TaskID          int64  `json:"task_id"`
-				TaskKey         string `json:"task_key"`
-				TaskStatus      string `json:"task_status"`
-				RunID           *int64 `json:"run_id,omitempty"`
-				DecisionBy      string `json:"decision_by,omitempty"`
-				Reason          string `json:"reason,omitempty"`
-				ResolverSupport string `json:"resolver_support"`
+				ID              int64    `json:"id"`
+				Status          string   `json:"status"`
+				TaskID          int64    `json:"task_id"`
+				TaskKey         string   `json:"task_key"`
+				TaskStatus      string   `json:"task_status"`
+				RunID           *int64   `json:"run_id,omitempty"`
+				DecisionBy      string   `json:"decision_by,omitempty"`
+				Reason          string   `json:"reason,omitempty"`
+				ResolverSupport string   `json:"resolver_support"`
+				Source          string   `json:"source,omitempty"`
+				Risk            string   `json:"risk,omitempty"`
+				AllowedActions  []string `json:"allowed_actions,omitempty"`
+				NextSteps       string   `json:"next_steps,omitempty"`
+				OnApprove       string   `json:"on_approve,omitempty"`
 			}{
 				ID:              detail.Approval.ID,
 				Status:          detail.Approval.Status,
@@ -571,20 +1175,38 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 				TaskStatus:      detail.Task.Status,
 				RunID:           detail.Approval.RunID,
 				DecisionBy:      detail.Approval.DecisionBy,
-				Reason:          detail.Approval.Reason,
-				ResolverSupport: string(detail.ResolverSupport),
+				Reason:          reason,
+				ResolverSupport: resolverSupport,
+				Source:          "approval_requests",
+				Risk:            "governance",
+				AllowedActions:  allowedActions,
+				NextSteps:       nextSteps,
+				OnApprove:       onApprove,
 			})
 		}
-		_, err = fmt.Fprintf(
-			stdout,
-			"approval=%d task=%s run=%s status=%s task_status=%s resolver=%s\n",
+		resolverSupport := string(detail.ResolverSupport)
+		reason := approvalOperatorReason(detail.Approval.Status, resolverSupport)
+		if storedReason := strings.TrimSpace(detail.Approval.Reason); storedReason != "" {
+			reason = storedReason
+		}
+		_, err = fmt.Fprintf(stdout,
+			"approval=%d source=approval_requests risk=governance reason=%s task=%s run=%s status=%s task_status=%s resolver=%s actions=%s\n",
 			detail.Approval.ID,
+			reason,
 			detail.Task.Key,
 			approvalRunIDLabel(detail.Approval.RunID),
 			detail.Approval.Status,
 			detail.Task.Status,
-			detail.ResolverSupport,
+			resolverSupport,
+			strings.Join(approvalOperatorAllowedActions(detail.Approval.Status, resolverSupport), ","),
 		)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(stdout, "next_steps=%s\n", approvalOperatorNextSteps(detail.Approval.ID, detail.Approval.Status, resolverSupport)); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "on_approve=%s\n", approvalOperatorOnApprove(resolverSupport))
 		return err
 	}
 	if len(remaining) > 0 && strings.EqualFold(remaining[0], "resolve") {
@@ -683,13 +1305,23 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 	for _, approval := range approvals {
 		if _, err := fmt.Fprintf(
 			stdout,
-			"approval=%d task=%s run=%s status=%s resolver=%s\n",
+			"approval=%d source=%s risk=%s reason=%s task=%s run=%s status=%s resolver=%s actions=%s\n",
 			approval.ApprovalID,
+			approval.Source,
+			approval.Risk,
+			approval.Reason,
 			approval.TaskKey,
 			approvalRunIDLabel(approval.RunID),
 			approval.Status,
 			approval.ResolverSupport,
+			strings.Join(approval.AllowedActions, ","),
 		); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(stdout, "next_steps=%s\n", approval.NextSteps); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(stdout, "on_approve=%s\n", approval.OnApprove); err != nil {
 			return err
 		}
 	}
@@ -805,31 +1437,45 @@ func runIntake(ctx context.Context, app bootstrap.App, stdin io.Reader, args []s
 const rawIntakePayloadPolicy = "stored_in_source_facts_json"
 
 type rawIntakeItemView struct {
-	ID                     int64           `json:"id"`
-	Key                    string          `json:"key"`
-	Status                 string          `json:"status"`
-	Source                 string          `json:"source"`
-	IntakeType             string          `json:"intake_type"`
-	DedupKey               string          `json:"dedup_key"`
-	RequestedBy            string          `json:"requested_by"`
-	CreatedAt              string          `json:"created_at"`
-	PayloadPolicy          string          `json:"payload_policy"`
-	ProjectKey             string          `json:"project_key,omitempty"`
-	Title                  string          `json:"title,omitempty"`
-	Summary                string          `json:"summary,omitempty"`
-	CanonicalIntakeKey     string          `json:"canonical_intake_key,omitempty"`
-	GoalID                 int64           `json:"goal_id,omitempty"`
-	SuppressionReason      string          `json:"suppression_reason,omitempty"`
-	AcceptedWorkItemID     int64           `json:"accepted_work_item_id,omitempty"`
-	AcceptedWorkItemKey    string          `json:"accepted_work_item_key,omitempty"`
-	AcceptedWorkItemStatus string          `json:"accepted_work_item_status,omitempty"`
-	ApprovalRequired       bool            `json:"approval_required,omitempty"`
-	BlockedPendingApproval bool            `json:"blocked_pending_approval,omitempty"`
-	PolicyReason           string          `json:"policy_reason,omitempty"`
-	PolicyDecision         string          `json:"policy_decision,omitempty"`
-	Payload                json.RawMessage `json:"payload,omitempty"`
-	Processing             json.RawMessage `json:"processing,omitempty"`
-	Proposal               json.RawMessage `json:"proposal,omitempty"`
+	ID                     int64                  `json:"id"`
+	Key                    string                 `json:"key"`
+	Status                 string                 `json:"status"`
+	Source                 string                 `json:"source"`
+	IntakeType             string                 `json:"intake_type"`
+	DedupKey               string                 `json:"dedup_key"`
+	RequestedBy            string                 `json:"requested_by"`
+	ReceivedAt             string                 `json:"received_at"`
+	CreatedAt              string                 `json:"created_at"`
+	UpdatedAt              string                 `json:"updated_at"`
+	PayloadPolicy          string                 `json:"payload_policy"`
+	ProjectKey             string                 `json:"project_key,omitempty"`
+	Title                  string                 `json:"title,omitempty"`
+	Summary                string                 `json:"summary,omitempty"`
+	CanonicalIntakeKey     string                 `json:"canonical_intake_key,omitempty"`
+	GoalID                 int64                  `json:"goal_id,omitempty"`
+	SuppressionReason      string                 `json:"suppression_reason,omitempty"`
+	AcceptedWorkItemID     int64                  `json:"accepted_work_item_id,omitempty"`
+	AcceptedWorkItemKey    string                 `json:"accepted_work_item_key,omitempty"`
+	AcceptedWorkItemStatus string                 `json:"accepted_work_item_status,omitempty"`
+	ApprovalRequired       bool                   `json:"approval_required,omitempty"`
+	BlockedPendingApproval bool                   `json:"blocked_pending_approval,omitempty"`
+	PolicyReason           string                 `json:"policy_reason,omitempty"`
+	PolicyDecision         string                 `json:"policy_decision,omitempty"`
+	Classification         string                 `json:"classification,omitempty"`
+	DedupeResult           string                 `json:"dedupe_result,omitempty"`
+	DedupeBasis            string                 `json:"dedupe_basis,omitempty"`
+	Risk                   string                 `json:"risk,omitempty"`
+	SuggestedRoute         string                 `json:"suggested_route,omitempty"`
+	Evidence               *rawIntakeEvidenceView `json:"evidence,omitempty"`
+	Payload                json.RawMessage        `json:"payload,omitempty"`
+	Processing             json.RawMessage        `json:"processing,omitempty"`
+}
+
+type rawIntakeEvidenceView struct {
+	PayloadPolicy        string `json:"payload_policy"`
+	SourceFactsAvailable bool   `json:"source_facts_available"`
+	PayloadAvailable     bool   `json:"payload_available"`
+	PayloadIncluded      bool   `json:"payload_included"`
 }
 
 type rawIntakeItemEnvelope struct {
@@ -862,6 +1508,8 @@ type intakeReviewDecisionView struct {
 	PolicyReason           string              `json:"policy_reason,omitempty"`
 	PolicyDecision         string              `json:"policy_decision,omitempty"`
 	WorkItem               *reviewWorkItemView `json:"work_item,omitempty"`
+	GoalID                 int64               `json:"goal_id,omitempty"`
+	GoalStatus             string              `json:"goal_status,omitempty"`
 }
 
 type reviewWorkItemView struct {
@@ -871,34 +1519,42 @@ type reviewWorkItemView struct {
 }
 
 type intakeProcessingNotes struct {
-	ProcessingStarted bool                           `json:"processing_started"`
-	Classification    intakeClassification           `json:"classification"`
-	Dedupe            intakeDedupeReview             `json:"dedupe"`
-	Routing           intakeRoutingResult            `json:"routing"`
-	DraftArtifact     *intakeDraftArtifact           `json:"draft_artifact,omitempty"`
-	Proposal          *coreintake.ReviewableProposal `json:"proposal,omitempty"`
-	Goal              *intakeGoalConversion          `json:"goal,omitempty"`
-	Clarification     *intakeClarification           `json:"clarification,omitempty"`
-	Review            *intakeReviewDecision          `json:"review,omitempty"`
+	ProcessingStarted bool                  `json:"processing_started"`
+	Classification    intakeClassification  `json:"classification"`
+	Dedupe            intakeDedupeReview    `json:"dedupe"`
+	Routing           intakeRoutingResult   `json:"routing"`
+	DraftArtifact     *intakeDraftArtifact  `json:"draft_artifact,omitempty"`
+	Goal              *intakeGoalConversion `json:"goal,omitempty"`
+	Clarification     *intakeClarification  `json:"clarification,omitempty"`
+	Review            *intakeReviewDecision `json:"review,omitempty"`
 }
 
 type intakeClassification struct {
-	Result   string `json:"result"`
-	Reason   string `json:"reason"`
-	Category string `json:"category,omitempty"`
+	Result         string `json:"result"`
+	Reason         string `json:"reason"`
+	SourceType     string `json:"source_type,omitempty"`
+	Intent         string `json:"intent,omitempty"`
+	Risk           string `json:"risk,omitempty"`
+	Confidence     string `json:"confidence,omitempty"`
+	Category       string `json:"category,omitempty"`
+	PriorityScore  int    `json:"priority_score,omitempty"`
+	SuggestedRoute string `json:"suggested_route,omitempty"`
 }
 
 type intakeDedupeReview struct {
 	Result             string `json:"result"`
+	Basis              string `json:"basis,omitempty"`
 	CanonicalIntakeKey string `json:"canonical_intake_key,omitempty"`
+	MatchReason        string `json:"match_reason,omitempty"`
 }
 
 type intakeRoutingResult struct {
-	Outcome               string `json:"outcome"`
-	ProjectKey            string `json:"project_key,omitempty"`
-	ExecutionIntent       string `json:"execution_intent,omitempty"`
-	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
-	GoalID                int64  `json:"goal_id,omitempty"`
+	Outcome               string                `json:"outcome"`
+	ProjectKey            string                `json:"project_key,omitempty"`
+	ExecutionIntent       string                `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string                `json:"execution_intent_source,omitempty"`
+	SkillInvocation       *skillbinding.Binding `json:"skill_invocation,omitempty"`
+	GoalID                int64                 `json:"goal_id,omitempty"`
 }
 
 type intakeGoalConversion struct {
@@ -930,11 +1586,17 @@ type intakeReviewDecision struct {
 	PolicyReason           string            `json:"policy_reason,omitempty"`
 	PolicyDecision         string            `json:"policy_decision,omitempty"`
 	WorkItem               *intakeReviewWork `json:"work_item,omitempty"`
+	Goal                   *intakeReviewGoal `json:"goal,omitempty"`
 }
 
 type intakeReviewWork struct {
 	ID     int64  `json:"id"`
 	Key    string `json:"key"`
+	Status string `json:"status"`
+}
+
+type intakeReviewGoal struct {
+	ID     int64  `json:"id"`
 	Status string `json:"status"`
 }
 
@@ -967,17 +1629,9 @@ func runRawIntakeCreate(ctx context.Context, app bootstrap.App, stdin io.Reader,
 		scopeKey = command.ProjectKey
 	}
 
-	envelope, err := rawIntakeSourceEnvelope(command, payloadJSON)
+	sourceFactsJSON, err := rawIntakeSourceFactsJSON(command, payloadJSON)
 	if err != nil {
 		return err
-	}
-	sourceFactsJSON, err := envelope.SourceFactsJSON()
-	if err != nil {
-		return err
-	}
-	dedupeKey := command.DedupKey
-	if strings.TrimSpace(dedupeKey) == "" {
-		dedupeKey = envelope.DedupeKey(workspaces.DefaultWorkspaceKey)
 	}
 
 	item, err := app.Store.CreateIntakeItem(ctx, sqlite.CreateIntakeItemParams{
@@ -986,8 +1640,8 @@ func runRawIntakeCreate(ctx context.Context, app bootstrap.App, stdin io.Reader,
 		ExternalObjectID:    command.ActionKey,
 		EventKind:           command.Type,
 		Subject:             command.Title,
-		DedupeKey:           dedupeKey,
-		DedupeRecipeVersion: coreintake.DedupeRecipeVersion,
+		DedupeKey:           command.DedupKey,
+		DedupeRecipeVersion: "raw-cli-v1",
 		SourceFactsJSON:     sourceFactsJSON,
 		Status:              "received",
 		Scope:               scopeKind,
@@ -1415,6 +2069,7 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 	decision := ""
 	eventType := runtimeevents.EventIntakeReviewRejected
 	var task *sqlite.Task
+	var goal *sqlite.Goal
 	workCreated := false
 	policyDecision := "direct_work_allowed"
 	policyReason := "low_risk_review_acceptance"
@@ -1466,6 +2121,24 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 		}
 		if item.Status != "review_required" || !isAcceptableIntakeDraftArtifact(notes.DraftArtifact) {
 			return fmt.Errorf("intake %s cannot be accepted into work from status %s", rawIntakeKey(item.ID), item.Status)
+		}
+		if isDraftGoalArtifact(notes.DraftArtifact) {
+			createdGoal, err := ensureGoalForIntakeGoalReview(ctx, app.Store, item)
+			if err != nil {
+				return err
+			}
+			approvedGoal, _, err := approveGoalThroughReview(ctx, app.Store, createdGoal, fmt.Sprintf("intake-goal:%d", item.ID))
+			if err != nil {
+				return err
+			}
+			goal = &approvedGoal
+			decision = "accepted"
+			eventType = runtimeevents.EventIntakeReviewAccepted
+			status = "accepted"
+			summary = "Draft goal accepted by operator and promoted to goal review"
+			policyDecision = "goal_review_accepted"
+			policyReason = "operator_accepted_draft_goal"
+			break
 		}
 		policy := intakePromotionPolicy(item)
 		if policy.ApprovalRequired {
@@ -1530,6 +2203,14 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 		workItemKey = task.Key
 		review.WorkItem = &intakeReviewWork{ID: task.ID, Key: task.Key, Status: task.Status}
 	}
+	var goalID *int64
+	goalStatus := ""
+	if goal != nil {
+		id := goal.ID
+		goalID = &id
+		goalStatus = string(goal.Status)
+		review.Goal = &intakeReviewGoal{ID: goal.ID, Status: string(goal.Status)}
+	}
 	notes.Review = &review
 	notesJSON, err := json.Marshal(notes)
 	if err != nil {
@@ -1548,6 +2229,8 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 		PolicyReason:     policyReason,
 		WorkItemID:       workItemID,
 		WorkItemKey:      workItemKey,
+		GoalID:           goalID,
+		GoalStatus:       goalStatus,
 	})
 	if err != nil {
 		return err
@@ -1568,6 +2251,10 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 	if task != nil {
 		result.WorkItem = &reviewWorkItemView{ID: task.ID, Key: task.Key, Status: task.Status}
 	}
+	if goal != nil {
+		result.GoalID = goal.ID
+		result.GoalStatus = string(goal.Status)
+	}
 	if jsonOutput {
 		return commands.WriteJSON(stdout, result)
 	}
@@ -1577,6 +2264,10 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 	}
 	_, err = fmt.Fprintf(stdout, "review_intake=%s decision=%s status=%s work_created=%t work_item=%s\n", view.Key, decision, view.Status, workCreated, workKey)
 	return err
+}
+
+func isDraftGoalArtifact(artifact *intakeDraftArtifact) bool {
+	return artifact != nil && strings.TrimSpace(artifact.Kind) == "draft_goal"
 }
 
 func createTaskFromReviewedIntake(ctx context.Context, app bootstrap.App, item sqlite.IntakeItem) (sqlite.Task, bool, error) {
@@ -1594,6 +2285,20 @@ func createTaskFromReviewedIntake(ctx context.Context, app bootstrap.App, item s
 		},
 	})
 	intent := intakeExecutionIntentForTask(item)
+	workKind := ""
+	artifactsJSON := ""
+	if notes, err := intakeNotesFromItem(item); err == nil && notes.Routing.SkillInvocation != nil {
+		binding := *notes.Routing.SkillInvocation
+		binding.ReviewState = "accepted"
+		if encoded, err := skillbinding.EncodeArtifacts(binding); err != nil {
+			return sqlite.Task{}, false, err
+		} else {
+			workKind = skillbinding.WorkKind
+			artifactsJSON = encoded
+			intent.ExecutionIntent = binding.ExecutionIntent
+			intent.ExecutionIntentSource = binding.ExecutionIntentSource
+		}
+	}
 	result, err := jobs.Service{
 		Store:       app.Store,
 		Registry:    app.Registry,
@@ -1604,6 +2309,8 @@ func createTaskFromReviewedIntake(ctx context.Context, app bootstrap.App, item s
 		Title:                 item.Subject,
 		RequestedBy:           "intake_review:" + rawIntakeKey(item.ID),
 		Key:                   reviewedIntakeWorkItemKey(item.ID),
+		WorkKind:              workKind,
+		ArtifactsJSON:         artifactsJSON,
 		ExecutionIntent:       intent.ExecutionIntent,
 		ExecutionIntentSource: intent.ExecutionIntentSource,
 	})
@@ -1681,7 +2388,7 @@ func intakeExecutionIntentForTask(item sqlite.IntakeItem) intakeDerivedRoute {
 			}
 		}
 	}
-	route := deriveIntakeRoute(item)
+	route := deriveIntakeRoute(item, classifyIntakeItem(item))
 	return intakeDerivedRoute{
 		ExecutionIntent:       route.ExecutionIntent,
 		ExecutionIntentSource: route.ExecutionIntentSource,
@@ -1737,15 +2444,23 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 	notes.Dedupe = intakeDedupeReview{Result: "unique"}
 	if duplicate != nil {
 		notes.Dedupe = intakeDedupeReview{
-			Result:             "duplicate_linked",
-			CanonicalIntakeKey: rawIntakeKey(*duplicate),
+			Result:             duplicate.Result,
+			Basis:              duplicate.Basis,
+			CanonicalIntakeKey: rawIntakeKey(duplicate.CanonicalIntakeItemID),
+			MatchReason:        duplicate.Basis,
 		}
 		notes.Routing = intakeRoutingResult{Outcome: "duplicate_linked_or_suppressed", ProjectKey: item.ScopeKey}
+		populateIntakeClassificationRoute(&notes, item)
+		notes.DraftArtifact = &intakeDraftArtifact{
+			Kind:        "duplicate_review",
+			Title:       item.Subject,
+			ReviewState: "duplicate_linked_or_suppressed",
+		}
 		outcome := intakeProcessOutcome{
 			status:                "duplicate_linked_or_suppressed",
-			summary:               "Duplicate raw intake linked to " + rawIntakeKey(*duplicate),
-			canonicalIntakeItemID: duplicate,
-			suppressionReason:     "duplicate_dedupe_key",
+			summary:               "Duplicate raw intake linked to " + rawIntakeKey(duplicate.CanonicalIntakeItemID),
+			canonicalIntakeItemID: &duplicate.CanonicalIntakeItemID,
+			suppressionReason:     duplicate.SuppressionReason,
 			notes:                 notes,
 		}
 		return outcome, nil
@@ -1753,6 +2468,12 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 
 	if notes.Classification.Result == "ambiguous" {
 		notes.Routing = intakeRoutingResult{Outcome: "needs_clarification", ProjectKey: item.ScopeKey}
+		populateIntakeClassificationRoute(&notes, item)
+		notes.DraftArtifact = &intakeDraftArtifact{
+			Kind:        "clarification_request",
+			Title:       item.Subject,
+			ReviewState: "needs_clarification",
+		}
 		notes.Clarification = &intakeClarification{
 			State: "needs_clarification",
 			Prompts: []string{
@@ -1760,7 +2481,6 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 				"Which project or operator surface owns this intake?",
 			},
 		}
-		notes.Proposal = clarificationReviewableProposal(item, notes)
 		outcome := intakeProcessOutcome{
 			status:  "needs_clarification",
 			summary: "Raw intake needs operator clarification before drafting work",
@@ -1769,49 +2489,52 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 		return outcome, nil
 	}
 
-	if isGoalLikeIntake(item) {
+	if notes.Classification.Category == "project" || isGoalLikeIntake(item) {
 		notes.Routing = intakeRoutingResult{
-			Outcome:               "goal_created",
+			Outcome:               "draft_goal",
 			ProjectKey:            item.ScopeKey,
-			ExecutionIntent:       "read_only",
+			ExecutionIntent:       "governance",
 			ExecutionIntentSource: "intake_goal_rule:v1",
 		}
-		outcome := intakeProcessOutcome{
-			status:     "review_required",
-			summary:    "Goal created from raw intake for operator review; no execution approval granted",
-			goalID:     item.GoalID,
-			createGoal: item.GoalID == nil,
-			notes:      notes,
+		populateIntakeClassificationRoute(&notes, item)
+		notes.DraftArtifact = &intakeDraftArtifact{
+			Kind:                  "draft_goal",
+			Title:                 item.Subject,
+			ReviewState:           "review_required",
+			ExecutionIntent:       notes.Routing.ExecutionIntent,
+			ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
 		}
-		if item.GoalID != nil {
-			notes.Routing.GoalID = *item.GoalID
-			notes.Goal = &intakeGoalConversion{
-				ID:              *item.GoalID,
-				Title:           item.Subject,
-				Status:          "created",
-				SourceIntakeKey: rawIntakeKey(item.ID),
-				ReviewState:     "created_not_approved",
-			}
-			outcome.notes = notes
+		outcome := intakeProcessOutcome{
+			status:  "review_required",
+			summary: "draft_goal prepared for human review; no goal created",
+			goalID:  item.GoalID,
+			notes:   notes,
 		}
 		return outcome, nil
 	}
 
-	route := deriveIntakeRoute(item)
+	route := deriveIntakeRoute(item, notes.Classification)
 	notes.Routing = intakeRoutingResult{
 		Outcome:               route.RoutingOutcome,
 		ProjectKey:            item.ScopeKey,
 		ExecutionIntent:       route.ExecutionIntent,
 		ExecutionIntentSource: route.ExecutionIntentSource,
 	}
+	if binding, ok, err := skillInvocationBindingFromIntake(item, route); err != nil {
+		return intakeProcessOutcome{}, err
+	} else if ok {
+		notes.Routing.SkillInvocation = &binding
+		notes.Routing.ExecutionIntent = binding.ExecutionIntent
+		notes.Routing.ExecutionIntentSource = binding.ExecutionIntentSource
+	}
+	populateIntakeClassificationRoute(&notes, item)
 	notes.DraftArtifact = &intakeDraftArtifact{
 		Kind:                  route.DraftArtifactKind,
 		Title:                 item.Subject,
 		ReviewState:           "review_required",
-		ExecutionIntent:       route.ExecutionIntent,
-		ExecutionIntentSource: route.ExecutionIntentSource,
+		ExecutionIntent:       notes.Routing.ExecutionIntent,
+		ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
 	}
-	notes.Proposal = draftReviewableProposal(item, notes, route)
 	outcome := intakeProcessOutcome{
 		status:  "review_required",
 		summary: route.DraftArtifactKind + " prepared for human review; no work item created",
@@ -1820,85 +2543,41 @@ func buildIntakeProcessOutcome(ctx context.Context, store *sqlite.Store, item sq
 	return outcome, nil
 }
 
-func draftReviewableProposal(item sqlite.IntakeItem, notes intakeProcessingNotes, route intakeDerivedRoute) *coreintake.ReviewableProposal {
-	proposal := coreintake.ReviewableProposal{
-		SourceIntakeKey: rawIntakeKey(item.ID),
-		Title:           item.Subject,
-		Category:        intakeProposalCategory(item, notes.Classification, route),
-		Route:           route.RoutingOutcome,
-		Summary:         route.DraftArtifactKind + " prepared for human review; no work item created",
-		DraftArtifact: &coreintake.DraftArtifact{
-			Kind:                  route.DraftArtifactKind,
-			Title:                 item.Subject,
-			ReviewState:           coreintake.StateReviewRequired,
-			ExecutionIntent:       route.ExecutionIntent,
-			ExecutionIntentSource: route.ExecutionIntentSource,
-		},
-		RiskLevel:             coreintake.RiskLow,
-		ApprovalPosture:       coreintake.ApprovalNeedsReview,
-		DedupeResult:          notes.Dedupe.Result,
-		RecommendedNextAction: "review",
-		OperatorNextAction:    "odin intake review show " + rawIntakeKey(item.ID),
-	}
-	if route.ExecutionIntent == "governance" || route.ExecutionIntent == "destructive" {
-		proposal.RiskLevel = coreintake.RiskHigh
-		proposal.ApprovalPosture = coreintake.ApprovalRequired
-	}
-	return &proposal
-}
-
-func clarificationReviewableProposal(item sqlite.IntakeItem, notes intakeProcessingNotes) *coreintake.ReviewableProposal {
-	proposal := coreintake.ReviewableProposal{
-		SourceIntakeKey:       rawIntakeKey(item.ID),
-		Title:                 item.Subject,
-		Category:              intakeProposalCategory(item, notes.Classification, intakeDerivedRoute{RoutingOutcome: notes.Routing.Outcome}),
-		Route:                 notes.Routing.Outcome,
-		Summary:               "Raw intake needs operator clarification before drafting work",
-		ClarificationPrompts:  append([]string(nil), notes.Clarification.Prompts...),
-		RiskLevel:             coreintake.RiskMedium,
-		ApprovalPosture:       coreintake.ApprovalBlocked,
-		DedupeResult:          notes.Dedupe.Result,
-		RecommendedNextAction: "clarify",
-		OperatorNextAction:    "odin intake review clarify " + rawIntakeKey(item.ID),
-	}
-	return &proposal
-}
-
-func intakeProposalCategory(item sqlite.IntakeItem, classification intakeClassification, route intakeDerivedRoute) string {
-	if category := strings.TrimSpace(classification.Category); category != "" {
-		return category
-	}
-	if classification.Result == "ambiguous" || route.RoutingOutcome == "needs_clarification" {
-		return "clarification_needed"
-	}
+func skillInvocationBindingFromIntake(item sqlite.IntakeItem, route intakeDerivedRoute) (skillbinding.Binding, bool, error) {
 	intakeType := normalizedIntakeType(item.EventKind)
-	if intakeType != "" && intakeType != "request" && intakeType != "prompt" {
-		return intakeType
+	text := strings.ToLower(strings.Join([]string{item.Subject, item.Summary, item.SourceFactsJSON}, " "))
+	if intakeType != "skill" && !(strings.Contains(text, "skill system") && strings.Contains(text, "triage")) {
+		return skillbinding.Binding{}, false, nil
 	}
-	switch route.RoutingOutcome {
-	case "draft_research":
-		return "research"
-	case "draft_document":
-		return "writing"
-	case "draft_admin_task":
-		return "admin"
-	case "draft_incident_review":
-		return "incident"
-	case "draft_policy_change":
-		return "governance"
-	case "draft_destructive_action":
-		return "destructive"
-	case "draft_routine":
-		return "routine"
-	case "draft_follow_up":
-		return "follow_up"
-	case "archive_candidate":
-		return "archive_candidate"
+	input, err := json.Marshal(map[string]any{
+		"message": item.Subject,
+		"scope":   item.Scope,
+	})
+	if err != nil {
+		return skillbinding.Binding{}, false, err
 	}
-	if result := strings.TrimSpace(classification.Result); result != "" {
-		return result
+	binding := skillbinding.Binding{
+		SkillKey:              "triage-skill",
+		InputJSON:             input,
+		SourceType:            "intake",
+		SourceID:              strconv.FormatInt(item.ID, 10),
+		SourceKey:             rawIntakeKey(item.ID),
+		Scope:                 item.Scope,
+		ProjectKey:            item.ScopeKey,
+		ExecutionIntent:       defaultIntakeBindingString(route.ExecutionIntent, "read_only"),
+		ExecutionIntentSource: "skill_binding:intake",
+		ReviewState:           "review_required",
 	}
-	return "request"
+	normalized, err := skillbinding.Normalize(binding)
+	return normalized, true, err
+}
+
+func defaultIntakeBindingString(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func isGoalLikeIntake(item sqlite.IntakeItem) bool {
@@ -1911,7 +2590,7 @@ func isGoalLikeIntake(item sqlite.IntakeItem) bool {
 	return strings.Contains(text, "plan the ") && strings.Contains(text, " project")
 }
 
-func deriveIntakeRoute(item sqlite.IntakeItem) intakeDerivedRoute {
+func deriveIntakeRoute(item sqlite.IntakeItem, classification intakeClassification) intakeDerivedRoute {
 	intakeType := normalizedIntakeType(item.EventKind)
 	source := "intake_type:" + intakeType
 	switch intakeType {
@@ -1927,6 +2606,28 @@ func deriveIntakeRoute(item sqlite.IntakeItem) intakeDerivedRoute {
 		return intakeDerivedRoute{RoutingOutcome: "draft_policy_change", DraftArtifactKind: "draft_policy_change", ExecutionIntent: "governance", ExecutionIntentSource: source}
 	case "destructive":
 		return intakeDerivedRoute{RoutingOutcome: "draft_destructive_action", DraftArtifactKind: "draft_destructive_action", ExecutionIntent: "destructive", ExecutionIntentSource: source}
+	}
+
+	if classification.Category != "" && (intakeType == "request" || intakeType == "prompt") {
+		source = "classification_category:" + classification.Category
+	}
+	switch classification.Category {
+	case "idea":
+		return intakeDerivedRoute{RoutingOutcome: "draft_idea", DraftArtifactKind: "draft_idea", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "bug":
+		return intakeDerivedRoute{RoutingOutcome: "draft_incident_review", DraftArtifactKind: "draft_incident_review", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "research_item":
+		return intakeDerivedRoute{RoutingOutcome: "draft_research", DraftArtifactKind: "draft_research", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "writing_request":
+		return intakeDerivedRoute{RoutingOutcome: "draft_document", DraftArtifactKind: "draft_document", ExecutionIntent: "mutation", ExecutionIntentSource: source}
+	case "admin_item":
+		return intakeDerivedRoute{RoutingOutcome: "draft_admin_task", DraftArtifactKind: "draft_admin_task", ExecutionIntent: "mutation", ExecutionIntentSource: source}
+	case "routine":
+		return intakeDerivedRoute{RoutingOutcome: "draft_routine", DraftArtifactKind: "draft_routine", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "waiting_for_item":
+		return intakeDerivedRoute{RoutingOutcome: "draft_follow_up", DraftArtifactKind: "draft_follow_up", ExecutionIntent: "read_only", ExecutionIntentSource: source}
+	case "archive_worthy_noise":
+		return intakeDerivedRoute{RoutingOutcome: "archive_candidate", DraftArtifactKind: "archive_candidate", ExecutionIntent: "read_only", ExecutionIntentSource: source}
 	default:
 		return intakeDerivedRoute{RoutingOutcome: "draft_task", DraftArtifactKind: "draft_task", ExecutionIntent: "read_only", ExecutionIntentSource: source}
 	}
@@ -1947,24 +2648,128 @@ func normalizedIntakeType(value string) string {
 func classifyIntakeItem(item sqlite.IntakeItem) intakeClassification {
 	title := strings.ToLower(strings.TrimSpace(item.Subject))
 	if title == "" || title == "help" || title == "help with this" || title == "fix this" || len(strings.Fields(title)) < 3 {
-		return intakeClassification{Result: "ambiguous", Reason: "intake title is too vague to draft reviewable work"}
+		return intakeClassification{
+			Result:     "ambiguous",
+			Reason:     "intake title is too vague to draft reviewable work",
+			SourceType: normalizedIntakeSourceType(item.SourceFamily),
+			Confidence: "low",
+			Category:   "clarification_needed",
+		}
 	}
-	return intakeClassification{Result: "actionable_request", Reason: "intake has enough subject detail for a draft review artifact"}
+	category, priority := classifyIntakeCategory(item)
+	return intakeClassification{
+		Result:        "actionable_request",
+		Reason:        "intake has enough subject detail for a draft review artifact",
+		SourceType:    normalizedIntakeSourceType(item.SourceFamily),
+		Confidence:    "high",
+		Category:      category,
+		PriorityScore: priority,
+	}
 }
 
-func isActiveCanonicalIntakeStatus(status string) bool {
-	switch coreintake.CanonicalState(status) {
-	case coreintake.StateReceived, coreintake.StateReviewRequired, coreintake.StateNeedsClarification:
-		return true
+func classifyIntakeCategory(item sqlite.IntakeItem) (string, int) {
+	intakeType := normalizedIntakeType(item.EventKind)
+	switch intakeType {
+	case "research":
+		return "research_item", 40
+	case "writing":
+		return "writing_request", 50
+	case "admin":
+		return "admin_item", 45
+	case "bug", "incident":
+		return "bug", 80
+	}
+
+	text := strings.ToLower(strings.TrimSpace(item.Subject + " " + item.Summary))
+	switch {
+	case hasAnyPhrase(text, "no action needed", "fyi", "newsletter", "unsubscribe", "spam"):
+		return "archive_worthy_noise", 10
+	case hasAnyPhrase(text, "waiting for", "wait for", "follow up", "follow-up"):
+		return "waiting_for_item", 35
+	case hasAnyPhrase(text, "remind me", "every day", "every week", "every friday", "every monday", "recurring"):
+		return "routine", 35
+	case hasAnyPhrase(text, "bug", "error", "failed", "failure", "incident", "broken", "fix "):
+		return "bug", 80
+	case hasAnyPhrase(text, "idea", "someday", "maybe"):
+		return "idea", 30
+	case isGoalLikeIntake(item):
+		return "project", 70
+	case hasAnyPhrase(text, "research", "investigate", "analyze", "compare", "options"):
+		return "research_item", 40
+	case hasAnyPhrase(text, "write", "draft", "memo", "document"):
+		return "writing_request", 50
+	case hasAnyPhrase(text, "organize", "book", "file", "labels", "admin"):
+		return "admin_item", 45
 	default:
-		return false
+		return "task", 50
 	}
 }
 
-func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlite.IntakeItem) (*int64, error) {
-	if strings.TrimSpace(item.DedupeKey) == "" {
-		return nil, nil
+func hasAnyPhrase(text string, phrases ...string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
 	}
+	return false
+}
+
+func normalizedIntakeSourceType(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return "unknown"
+	}
+	return normalized
+}
+
+func populateIntakeClassificationRoute(notes *intakeProcessingNotes, item sqlite.IntakeItem) {
+	if notes.Classification.SourceType == "" {
+		notes.Classification.SourceType = normalizedIntakeSourceType(item.SourceFamily)
+	}
+	notes.Classification.SuggestedRoute = notes.Routing.Outcome
+	notes.Classification.Intent = notes.Routing.ExecutionIntent
+	if notes.Classification.Intent == "" {
+		switch notes.Routing.Outcome {
+		case "needs_clarification":
+			notes.Classification.Intent = "clarification"
+		case "duplicate_linked_or_suppressed":
+			notes.Classification.Intent = "suppress_duplicate"
+		default:
+			notes.Classification.Intent = "review"
+		}
+	}
+	notes.Classification.Risk = intakeClassificationRisk(notes.Routing.ExecutionIntent, notes.Routing.Outcome)
+}
+
+func intakeClassificationRisk(intent string, outcome string) string {
+	switch strings.ToLower(strings.TrimSpace(intent)) {
+	case "destructive":
+		return "destructive"
+	case "governance":
+		return "governance"
+	case "mutation":
+		return "medium"
+	case "read_only":
+		return "low"
+	}
+	switch strings.ToLower(strings.TrimSpace(outcome)) {
+	case "needs_clarification":
+		return "unknown"
+	case "duplicate_linked_or_suppressed":
+		return "low"
+	default:
+		return "low"
+	}
+}
+
+type intakeDuplicateMatch struct {
+	CanonicalIntakeItemID int64
+	Result                string
+	Basis                 string
+	SuppressionReason     string
+}
+
+func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlite.IntakeItem) (*intakeDuplicateMatch, error) {
 	items, err := store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: item.WorkspaceID})
 	if err != nil {
 		return nil, err
@@ -1973,126 +2778,127 @@ func findCanonicalDuplicate(ctx context.Context, store *sqlite.Store, item sqlit
 		if candidate.ID >= item.ID {
 			continue
 		}
-		if !isActiveCanonicalIntakeStatus(candidate.Status) {
+		if strings.TrimSpace(item.DedupeKey) != "" && candidate.DedupeKey == item.DedupeKey {
+			return &intakeDuplicateMatch{
+				CanonicalIntakeItemID: candidate.ID,
+				Result:                "duplicate_linked",
+				Basis:                 "dedupe_key",
+				SuppressionReason:     "duplicate_dedupe_key",
+			}, nil
+		}
+	}
+
+	subjectKey := normalizedIntakeSubjectDedupeKey(item)
+	if subjectKey == "" {
+		return nil, nil
+	}
+	for _, candidate := range items {
+		if candidate.ID >= item.ID {
 			continue
 		}
-		if candidate.DedupeKey == item.DedupeKey {
-			id := candidate.ID
-			return &id, nil
+		if !sameIntakeRoutingScope(candidate, item) {
+			continue
+		}
+		if normalizedIntakeSubjectDedupeKey(candidate) == subjectKey {
+			return &intakeDuplicateMatch{
+				CanonicalIntakeItemID: candidate.ID,
+				Result:                "near_duplicate_linked",
+				Basis:                 "normalized_subject",
+				SuppressionReason:     "near_duplicate_subject",
+			}, nil
 		}
 	}
 	return nil, nil
 }
 
+func sameIntakeRoutingScope(left sqlite.IntakeItem, right sqlite.IntakeItem) bool {
+	return left.WorkspaceID == right.WorkspaceID &&
+		left.Scope == right.Scope &&
+		left.ScopeKey == right.ScopeKey &&
+		normalizedIntakeType(left.EventKind) == normalizedIntakeType(right.EventKind)
+}
+
+func normalizedIntakeSubjectDedupeKey(item sqlite.IntakeItem) string {
+	if classifyIntakeItem(item).Result == "ambiguous" {
+		return ""
+	}
+	var builder strings.Builder
+	lastWasSpace := true
+	for _, r := range strings.ToLower(item.Subject) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			builder.WriteRune(r)
+			lastWasSpace = false
+			continue
+		}
+		if !lastWasSpace {
+			builder.WriteByte(' ')
+			lastWasSpace = true
+		}
+	}
+	return strings.TrimSpace(builder.String())
+}
+
 func intakeProcessingEvents(itemID int64, status string, notes intakeProcessingNotes, canonical *int64) []sqlite.IntakeItemProcessingEvent {
 	events := []sqlite.IntakeItemProcessingEvent{
 		{
-			Type:   runtimeevents.EventIntakeProcessingStarted,
-			Stage:  "processing_started",
-			Result: "started",
+			Type:    runtimeevents.EventIntakeProcessingStarted,
+			Stage:   "processing_started",
+			Result:  "started",
+			Payload: intakeProcessingAuditPayload(itemID, status, "processing_started", "started", notes, canonical),
 		},
 		{
-			Type:   runtimeevents.EventIntakeClassified,
-			Stage:  "classification",
-			Result: notes.Classification.Result,
+			Type:    runtimeevents.EventIntakeClassified,
+			Stage:   "classification",
+			Result:  notes.Classification.Result,
+			Payload: intakeProcessingAuditPayload(itemID, status, "classification", notes.Classification.Result, notes, canonical),
 		},
 		{
-			Type:   runtimeevents.EventIntakeDedupeReviewed,
-			Stage:  "dedupe",
-			Result: notes.Dedupe.Result,
+			Type:    runtimeevents.EventIntakeDedupeReviewed,
+			Stage:   "dedupe",
+			Result:  notes.Dedupe.Result,
+			Payload: intakeProcessingAuditPayload(itemID, status, "dedupe", notes.Dedupe.Result, notes, canonical),
 		},
 		{
-			Type:   runtimeevents.EventIntakeRouted,
-			Stage:  "routing",
-			Result: notes.Routing.Outcome,
-			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:          itemID,
-				Status:                status,
-				Stage:                 "routing",
-				RoutedOutcome:         notes.Routing.Outcome,
-				ExecutionIntent:       notes.Routing.ExecutionIntent,
-				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
-				GoalID:                intakeGoalIDPtr(notes),
-			},
+			Type:    runtimeevents.EventIntakeRouted,
+			Stage:   "routing",
+			Result:  notes.Routing.Outcome,
+			Payload: intakeProcessingAuditPayload(itemID, status, "routing", notes.Routing.Outcome, notes, canonical),
 		},
 		{
-			Type:   runtimeevents.EventIntakeProcessed,
-			Stage:  "processed",
-			Result: status,
-			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:          itemID,
-				Status:                status,
-				Stage:                 "processed",
-				Result:                status,
-				RoutedOutcome:         notes.Routing.Outcome,
-				ExecutionIntent:       notes.Routing.ExecutionIntent,
-				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
-				CanonicalIntakeID:     canonical,
-				GoalID:                intakeGoalIDPtr(notes),
-			},
+			Type:    runtimeevents.EventIntakeProcessed,
+			Stage:   "processed",
+			Result:  status,
+			Payload: intakeProcessingAuditPayload(itemID, status, "processed", status, notes, canonical),
 		},
 	}
 	switch {
 	case notes.Goal != nil:
 		events = append(events, sqlite.IntakeItemProcessingEvent{
-			Type:   runtimeevents.EventIntakeRoutedToGoal,
-			Stage:  "goal",
-			Result: "goal_created",
-			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:          itemID,
-				Status:                status,
-				Stage:                 "goal",
-				Result:                "goal_created",
-				RoutedOutcome:         notes.Routing.Outcome,
-				ExecutionIntent:       notes.Routing.ExecutionIntent,
-				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
-				GoalID:                intakeGoalIDPtr(notes),
-			},
-		})
-	case notes.DraftArtifact != nil:
-		events = append(events, sqlite.IntakeItemProcessingEvent{
-			Type:   runtimeevents.EventIntakeDraftArtifactCreated,
-			Stage:  "draft_artifact",
-			Result: notes.DraftArtifact.Kind,
-			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:          itemID,
-				Status:                status,
-				Stage:                 "draft_artifact",
-				RoutedOutcome:         notes.Routing.Outcome,
-				ExecutionIntent:       notes.Routing.ExecutionIntent,
-				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
-				DraftArtifactKind:     notes.DraftArtifact.Kind,
-			},
+			Type:    runtimeevents.EventIntakeRoutedToGoal,
+			Stage:   "goal",
+			Result:  "goal_created",
+			Payload: intakeProcessingAuditPayload(itemID, status, "goal", "goal_created", notes, canonical),
 		})
 	case notes.Clarification != nil:
 		events = append(events, sqlite.IntakeItemProcessingEvent{
-			Type:   runtimeevents.EventIntakeClarificationNeeded,
-			Stage:  "clarification",
-			Result: notes.Clarification.State,
-			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:          itemID,
-				Status:                status,
-				Stage:                 "clarification",
-				RoutedOutcome:         notes.Routing.Outcome,
-				ExecutionIntent:       notes.Routing.ExecutionIntent,
-				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
-				ClarificationState:    notes.Clarification.State,
-			},
+			Type:    runtimeevents.EventIntakeClarificationNeeded,
+			Stage:   "clarification",
+			Result:  notes.Clarification.State,
+			Payload: intakeProcessingAuditPayload(itemID, status, "clarification", notes.Clarification.State, notes, canonical),
 		})
 	case canonical != nil:
 		events = append(events, sqlite.IntakeItemProcessingEvent{
-			Type:   runtimeevents.EventIntakeDuplicateLinkedOrSuppressed,
-			Stage:  "duplicate",
-			Result: notes.Dedupe.Result,
-			Payload: runtimeevents.IntakeProcessingPayload{
-				IntakeItemID:          itemID,
-				Status:                status,
-				Stage:                 "duplicate",
-				RoutedOutcome:         notes.Routing.Outcome,
-				ExecutionIntent:       notes.Routing.ExecutionIntent,
-				ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
-				CanonicalIntakeID:     canonical,
-			},
+			Type:    runtimeevents.EventIntakeDuplicateLinkedOrSuppressed,
+			Stage:   "duplicate",
+			Result:  notes.Dedupe.Result,
+			Payload: intakeProcessingAuditPayload(itemID, status, "duplicate", notes.Dedupe.Result, notes, canonical),
+		})
+	case notes.DraftArtifact != nil:
+		events = append(events, sqlite.IntakeItemProcessingEvent{
+			Type:    runtimeevents.EventIntakeDraftArtifactCreated,
+			Stage:   "draft_artifact",
+			Result:  notes.DraftArtifact.Kind,
+			Payload: intakeProcessingAuditPayload(itemID, status, "draft_artifact", notes.DraftArtifact.Kind, notes, canonical),
 		})
 	}
 	return events
@@ -2106,33 +2912,93 @@ func intakeGoalIDPtr(notes intakeProcessingNotes) *int64 {
 	return &id
 }
 
-func rawIntakeSourceEnvelope(command commands.IntakeCommand, payloadJSON string) (coreintake.SourceEnvelope, error) {
+func intakeProcessingAuditPayload(itemID int64, status string, stage string, result string, notes intakeProcessingNotes, canonical *int64) runtimeevents.IntakeProcessingPayload {
+	payload := runtimeevents.IntakeProcessingPayload{
+		IntakeItemID:          itemID,
+		Status:                status,
+		Stage:                 stage,
+		Result:                result,
+		RoutedOutcome:         notes.Routing.Outcome,
+		ExecutionIntent:       notes.Routing.ExecutionIntent,
+		ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
+		CanonicalIntakeID:     canonical,
+		GoalID:                intakeGoalIDPtr(notes),
+		Classification: &runtimeevents.IntakeClassification{
+			Result:         notes.Classification.Result,
+			Reason:         notes.Classification.Reason,
+			SourceType:     notes.Classification.SourceType,
+			Intent:         notes.Classification.Intent,
+			Risk:           notes.Classification.Risk,
+			Confidence:     notes.Classification.Confidence,
+			SuggestedRoute: notes.Classification.SuggestedRoute,
+		},
+		Dedupe: &runtimeevents.IntakeDedupeReview{
+			Result:             notes.Dedupe.Result,
+			Basis:              notes.Dedupe.Basis,
+			CanonicalIntakeKey: notes.Dedupe.CanonicalIntakeKey,
+		},
+		Routing: &runtimeevents.IntakeRoutingResult{
+			Outcome:               notes.Routing.Outcome,
+			ProjectKey:            notes.Routing.ProjectKey,
+			ExecutionIntent:       notes.Routing.ExecutionIntent,
+			ExecutionIntentSource: notes.Routing.ExecutionIntentSource,
+			GoalID:                intakeGoalIDPtr(notes),
+		},
+	}
+	if notes.DraftArtifact != nil {
+		payload.DraftArtifactKind = notes.DraftArtifact.Kind
+		payload.DraftArtifact = &runtimeevents.IntakeDraftArtifact{
+			Kind:                  notes.DraftArtifact.Kind,
+			Title:                 notes.DraftArtifact.Title,
+			ReviewState:           notes.DraftArtifact.ReviewState,
+			ExecutionIntent:       notes.DraftArtifact.ExecutionIntent,
+			ExecutionIntentSource: notes.DraftArtifact.ExecutionIntentSource,
+		}
+	}
+	if notes.Clarification != nil {
+		payload.ClarificationState = notes.Clarification.State
+		payload.Clarification = &runtimeevents.IntakeClarification{
+			State:   notes.Clarification.State,
+			Prompts: notes.Clarification.Prompts,
+		}
+	}
+	return payload
+}
+
+func rawIntakeSourceFactsJSON(command commands.IntakeCommand, payloadJSON string) (string, error) {
 	var payload json.RawMessage
 	if strings.TrimSpace(payloadJSON) == "" {
 		payloadJSON = "{}"
 	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return coreintake.SourceEnvelope{}, fmt.Errorf("raw intake payload json: %w", err)
+	if command.RawText != "" && payloadJSON == "{}" {
+		rawTextPayload, err := json.Marshal(map[string]string{"text": command.RawText})
+		if err != nil {
+			return "", err
+		}
+		payloadJSON = string(rawTextPayload)
 	}
-	adapterFacts := map[string]any{
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return "", fmt.Errorf("raw intake payload json: %w", err)
+	}
+	facts := map[string]any{
+		"source":         command.Source,
+		"intake_type":    command.Type,
+		"dedup_key":      command.DedupKey,
 		"requested_by":   command.RequestedBy,
 		"payload_policy": rawIntakePayloadPolicy,
 		"payload":        payload,
 	}
 	if command.ProjectKey != "" {
-		adapterFacts["project_key"] = command.ProjectKey
+		facts["project_key"] = command.ProjectKey
 	}
-	return coreintake.SourceEnvelope{
-		SourceFamily:     command.Source,
-		ExternalObjectID: command.ActionKey,
-		EventKind:        command.Type,
-		Subject:          command.Title,
-		Summary:          command.Title,
-		Actor:            command.RequestedBy,
-		AdapterFacts: map[string]any{
-			command.Source: adapterFacts,
-		},
-	}, nil
+	if command.ActionKey != "" {
+		facts["external_object_id"] = command.ActionKey
+	}
+	encoded, err := json.Marshal(facts)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
 }
 
 func rawIntakeView(item sqlite.IntakeItem, includePayload bool) (rawIntakeItemView, error) {
@@ -2147,7 +3013,9 @@ func rawIntakeView(item sqlite.IntakeItem, includePayload bool) (rawIntakeItemVi
 		Source:        item.SourceFamily,
 		IntakeType:    item.EventKind,
 		DedupKey:      item.DedupeKey,
+		ReceivedAt:    item.ReceivedAt.UTC().Format(time.RFC3339Nano),
 		CreatedAt:     item.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:     item.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		PayloadPolicy: rawIntakePayloadPolicy,
 		Title:         item.Subject,
 		Summary:       item.Summary,
@@ -2162,19 +3030,30 @@ func rawIntakeView(item sqlite.IntakeItem, includePayload bool) (rawIntakeItemVi
 		view.CanonicalIntakeKey = rawIntakeKey(*item.CanonicalIntakeItemID)
 	}
 	view.SuppressionReason = item.SuppressionReason
+	_, payloadAvailable := facts["payload"]
+	view.Evidence = &rawIntakeEvidenceView{
+		PayloadPolicy:        rawIntakePayloadPolicy,
+		SourceFactsAvailable: strings.TrimSpace(item.SourceFactsJSON) != "",
+		PayloadAvailable:     payloadAvailable,
+		PayloadIncluded:      includePayload && payloadAvailable,
+	}
 	if strings.TrimSpace(item.RoutingNotes) != "" && json.Valid([]byte(item.RoutingNotes)) {
 		view.Processing = json.RawMessage(item.RoutingNotes)
 		var notes intakeProcessingNotes
 		if err := json.Unmarshal([]byte(item.RoutingNotes), &notes); err == nil {
+			view.Classification = notes.Classification.Result
+			view.DedupeResult = notes.Dedupe.Result
+			view.DedupeBasis = notes.Dedupe.Basis
+			view.Risk = notes.Classification.Risk
+			view.SuggestedRoute = notes.Classification.SuggestedRoute
+			if view.SuggestedRoute == "" {
+				view.SuggestedRoute = notes.Routing.Outcome
+			}
 			if view.GoalID == 0 && notes.Goal != nil {
 				view.GoalID = notes.Goal.ID
 			}
-			if notes.Proposal != nil {
-				proposalJSON, err := json.Marshal(notes.Proposal)
-				if err != nil {
-					return rawIntakeItemView{}, err
-				}
-				view.Proposal = proposalJSON
+			if view.GoalID == 0 && notes.Review != nil && notes.Review.Goal != nil {
+				view.GoalID = notes.Review.Goal.ID
 			}
 			if notes.Review != nil && notes.Review.WorkItem != nil {
 				view.AcceptedWorkItemID = notes.Review.WorkItem.ID
@@ -2191,59 +3070,22 @@ func rawIntakeView(item sqlite.IntakeItem, includePayload bool) (rawIntakeItemVi
 	}
 	view.RequestedBy = rawStringFact(facts, "requested_by")
 	if view.RequestedBy == "" {
-		view.RequestedBy = rawStringFact(facts, "actor")
-	}
-	if view.RequestedBy == "" {
-		view.RequestedBy = rawStringFromRaw(rawIntakeAdapterFact(facts, item.SourceFamily, "requested_by"))
-	}
-	if view.RequestedBy == "" {
 		view.RequestedBy = item.SourceFamily
 	}
 	if policy := rawStringFact(facts, "payload_policy"); policy != "" {
 		view.PayloadPolicy = policy
-	} else if policy := rawStringFromRaw(rawIntakeAdapterFact(facts, item.SourceFamily, "payload_policy")); policy != "" {
-		view.PayloadPolicy = policy
 	}
 	if includePayload {
 		if payload, ok := facts["payload"]; ok {
-			view.Payload = payload
-		} else if payload := rawIntakeAdapterFact(facts, item.SourceFamily, "payload"); payload != nil {
 			view.Payload = payload
 		}
 	}
 	return view, nil
 }
 
-func rawIntakeAdapterFact(facts map[string]json.RawMessage, source string, key string) json.RawMessage {
-	rawAdapterFacts, ok := facts["adapter_facts"]
-	if !ok {
-		return nil
-	}
-	var adapterFacts map[string]map[string]json.RawMessage
-	if err := json.Unmarshal(rawAdapterFacts, &adapterFacts); err != nil {
-		return nil
-	}
-	if sourceFacts, ok := adapterFacts[source]; ok {
-		return sourceFacts[key]
-	}
-	for _, sourceFacts := range adapterFacts {
-		if raw := sourceFacts[key]; raw != nil {
-			return raw
-		}
-	}
-	return nil
-}
-
 func rawStringFact(facts map[string]json.RawMessage, key string) string {
 	raw, ok := facts[key]
 	if !ok {
-		return ""
-	}
-	return rawStringFromRaw(raw)
-}
-
-func rawStringFromRaw(raw json.RawMessage) string {
-	if raw == nil {
 		return ""
 	}
 	var value string
@@ -2377,13 +3219,12 @@ func runAgenda(ctx context.Context, app bootstrap.App, args []string, stdout io.
 	return commands.WriteAgendaText(stdout, view)
 }
 
+const logsUsage = "usage: odin logs [--json] | odin logs show <event-id> [--json] | odin logs trail (--task <id|key> | --run <id> | --approval <id>) [--json]"
+
 func runLogs(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
 	jsonOutput, remaining, err := consumeJSONFlag(args)
 	if err != nil {
 		return err
-	}
-	if len(remaining) != 0 {
-		return fmt.Errorf("usage: odin logs [--json]")
 	}
 
 	state, err := loadCLIState(app)
@@ -2394,6 +3235,16 @@ func runLogs(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 	records, err := listLogs(ctx, app.Store, state.Scope)
 	if err != nil {
 		return err
+	}
+	if len(remaining) != 0 {
+		switch remaining[0] {
+		case "show":
+			return runLogsShow(ctx, app.Store, records, remaining[1:], jsonOutput, stdout)
+		case "trail":
+			return runLogsTrail(ctx, app.Store, records, remaining[1:], jsonOutput, stdout)
+		default:
+			return fmt.Errorf(logsUsage)
+		}
 	}
 	if jsonOutput {
 		logViews := make([]commands.LogView, 0, len(records))
@@ -2423,6 +3274,275 @@ func runLogs(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		}
 	}
 	return nil
+}
+
+func runLogsShow(ctx context.Context, store *sqlite.Store, records []runtimeevents.Record, args []string, jsonOutput bool, stdout io.Writer) error {
+	if len(args) != 1 {
+		return fmt.Errorf(logsUsage)
+	}
+	eventID, err := parsePositiveInt64Arg(args[0], "event id")
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if record.ID != eventID {
+			continue
+		}
+		items, err := clioverview.BuildActivityEventSummaries(ctx, store, []runtimeevents.Record{record}, true)
+		if err != nil {
+			return err
+		}
+		if len(items) == 0 {
+			return fmt.Errorf("event %d not found", eventID)
+		}
+		if jsonOutput {
+			return commands.WriteJSON(stdout, struct {
+				Event clioverview.ActivityEventSummary `json:"event"`
+			}{Event: items[0]})
+		}
+		return writeActivityEventDetail(stdout, items[0])
+	}
+	return fmt.Errorf("event %d not found", eventID)
+}
+
+func runLogsTrail(ctx context.Context, store *sqlite.Store, records []runtimeevents.Record, args []string, jsonOutput bool, stdout io.Writer) error {
+	taskRef, runRef, approvalRef, err := parseLogsTrailArgs(args)
+	if err != nil {
+		return err
+	}
+	var filtered []runtimeevents.Record
+	switch {
+	case taskRef != "":
+		taskID, err := resolveLogsTaskID(ctx, store, taskRef)
+		if err != nil {
+			return err
+		}
+		filtered = filterActivityEventsByTask(records, taskID)
+	case runRef != "":
+		runID, err := parsePositiveInt64Arg(runRef, "run id")
+		if err != nil {
+			return err
+		}
+		run, err := store.GetRun(ctx, runID)
+		if err != nil {
+			return err
+		}
+		filtered = filterActivityEventsByRun(records, runID, run.TaskID)
+	case approvalRef != "":
+		approvalID, err := parsePositiveInt64Arg(approvalRef, "approval id")
+		if err != nil {
+			return err
+		}
+		detail, err := approvalsvc.Service{Store: store}.Detail(ctx, approvalID)
+		if err != nil {
+			return err
+		}
+		filtered = filterActivityEventsByApproval(records, approvalID, detail.Task.ID, detail.Approval.RunID)
+	default:
+		return fmt.Errorf(logsUsage)
+	}
+	items, err := clioverview.BuildActivityEventSummaries(ctx, store, filtered, jsonOutput)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, struct {
+			Items []clioverview.ActivityEventSummary `json:"items"`
+		}{Items: items})
+	}
+	return writeActivityEventTrail(stdout, items)
+}
+
+func parseLogsTrailArgs(args []string) (taskRef, runRef, approvalRef string, err error) {
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--task":
+			if taskRef != "" || index+1 >= len(args) {
+				return "", "", "", fmt.Errorf(logsUsage)
+			}
+			index++
+			taskRef = strings.TrimSpace(args[index])
+		case "--run":
+			if runRef != "" || index+1 >= len(args) {
+				return "", "", "", fmt.Errorf(logsUsage)
+			}
+			index++
+			runRef = strings.TrimSpace(args[index])
+		case "--approval":
+			if approvalRef != "" || index+1 >= len(args) {
+				return "", "", "", fmt.Errorf(logsUsage)
+			}
+			index++
+			approvalRef = strings.TrimSpace(args[index])
+		default:
+			return "", "", "", fmt.Errorf(logsUsage)
+		}
+	}
+	selected := 0
+	for _, value := range []string{taskRef, runRef, approvalRef} {
+		if value != "" {
+			selected++
+		}
+	}
+	if selected != 1 {
+		return "", "", "", fmt.Errorf(logsUsage)
+	}
+	return taskRef, runRef, approvalRef, nil
+}
+
+func resolveLogsTaskID(ctx context.Context, store *sqlite.Store, ref string) (int64, error) {
+	if id, err := strconv.ParseInt(strings.TrimSpace(ref), 10, 64); err == nil && id > 0 {
+		if _, err := store.GetTask(ctx, id); err != nil {
+			return 0, err
+		}
+		return id, nil
+	}
+	taskViews, err := projections.ListTaskStatusViews(ctx, store.DB())
+	if err != nil {
+		return 0, err
+	}
+	for _, task := range taskViews {
+		if task.TaskKey == ref {
+			return task.TaskID, nil
+		}
+	}
+	return 0, fmt.Errorf("work item %q not found", ref)
+}
+
+func filterActivityEventsByTask(records []runtimeevents.Record, taskID int64) []runtimeevents.Record {
+	filtered := make([]runtimeevents.Record, 0, len(records))
+	for _, record := range records {
+		if recordMatchesTask(record, taskID) {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered
+}
+
+func filterActivityEventsByRun(records []runtimeevents.Record, runID, taskID int64) []runtimeevents.Record {
+	filtered := make([]runtimeevents.Record, 0, len(records))
+	for _, record := range records {
+		if recordMatchesRun(record, runID) || recordMatchesTask(record, taskID) {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered
+}
+
+func filterActivityEventsByApproval(records []runtimeevents.Record, approvalID, taskID int64, runID *int64) []runtimeevents.Record {
+	filtered := make([]runtimeevents.Record, 0, len(records))
+	for _, record := range records {
+		if record.StreamType == runtimeevents.StreamApproval && record.StreamID == approvalID {
+			filtered = append(filtered, record)
+			continue
+		}
+		if recordMatchesTask(record, taskID) {
+			filtered = append(filtered, record)
+			continue
+		}
+		if runID != nil && recordMatchesRun(record, *runID) {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered
+}
+
+func recordMatchesTask(record runtimeevents.Record, taskID int64) bool {
+	if taskID <= 0 {
+		return false
+	}
+	if record.StreamType == runtimeevents.StreamTask && record.StreamID == taskID {
+		return true
+	}
+	if record.TaskID != nil && *record.TaskID == taskID {
+		return true
+	}
+	return eventPayloadInt64(record.Payload, "task_id") == taskID
+}
+
+func recordMatchesRun(record runtimeevents.Record, runID int64) bool {
+	if runID <= 0 {
+		return false
+	}
+	if record.StreamType == runtimeevents.StreamRun && record.StreamID == runID {
+		return true
+	}
+	if record.RunID != nil && *record.RunID == runID {
+		return true
+	}
+	return eventPayloadInt64(record.Payload, "run_id") == runID
+}
+
+func eventPayloadInt64(raw json.RawMessage, key string) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return 0
+	}
+	switch value := payload[key].(type) {
+	case float64:
+		return int64(value)
+	case string:
+		parsed, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func parsePositiveInt64Arg(raw, label string) (int64, error) {
+	id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", label)
+	}
+	return id, nil
+}
+
+func writeActivityEventDetail(stdout io.Writer, item clioverview.ActivityEventSummary) error {
+	if _, err := fmt.Fprintln(stdout, activityEventLine(item)); err != nil {
+		return err
+	}
+	if len(item.Payload) == 0 {
+		return nil
+	}
+	_, err := fmt.Fprintf(stdout, "  payload=%s\n", strings.TrimSpace(string(item.Payload)))
+	return err
+}
+
+func writeActivityEventTrail(stdout io.Writer, items []clioverview.ActivityEventSummary) error {
+	if len(items) == 0 {
+		_, err := fmt.Fprintln(stdout, "no logs")
+		return err
+	}
+	for _, item := range items {
+		if _, err := fmt.Fprintln(stdout, activityEventLine(item)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func activityEventLine(item clioverview.ActivityEventSummary) string {
+	return fmt.Sprintf(
+		"event=%d type=%s scope=%s project=%s work_item=%s run=%s approval=%s summary=%s",
+		item.EventID,
+		valueOrNone(item.EventType),
+		valueOrNone(item.Scope),
+		valueOrNone(item.ProjectKey),
+		valueOrNone(item.WorkItemKey),
+		activityInt64PtrLabel(item.RunID),
+		activityInt64PtrLabel(item.ApprovalID),
+		valueOrNone(item.Summary),
+	)
+}
+
+func activityInt64PtrLabel(value *int64) string {
+	if value == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%d", *value)
 }
 
 func runGoal(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
@@ -3568,6 +4688,377 @@ func runFollowup(ctx context.Context, app bootstrap.App, args []string, stdout i
 	}
 }
 
+type schedulerTickView struct {
+	Now               string                         `json:"now"`
+	DryRun            bool                           `json:"dry_run"`
+	Mutates           bool                           `json:"mutates"`
+	TriggerEvaluation schedulerTriggerEvaluationView `json:"trigger_evaluation"`
+	Supervision       schedulerSupervisionView       `json:"supervision"`
+	RecoveryRan       bool                           `json:"recovery_ran"`
+	Recovery          *schedulerRecoveryView         `json:"recovery,omitempty"`
+	WouldRun          int                            `json:"would_run,omitempty"`
+	WouldDefer        int                            `json:"would_defer,omitempty"`
+	WouldBatch        int                            `json:"would_batch,omitempty"`
+	ApprovalRequired  int                            `json:"approval_required,omitempty"`
+	Decisions         []schedulerDecisionView        `json:"decisions,omitempty"`
+}
+
+type schedulerTriggerEvaluationView struct {
+	Evaluated    int `json:"evaluated"`
+	Materialized int `json:"materialized"`
+	Deferred     int `json:"deferred"`
+	Errored      int `json:"errored"`
+}
+
+type schedulerSupervisionView struct {
+	Promoted   int `json:"promoted"`
+	Reconciled int `json:"reconciled"`
+}
+
+type schedulerRecoveryView struct {
+	Observations int `json:"observations"`
+	Decisions    int `json:"decisions"`
+	Outcomes     int `json:"outcomes"`
+}
+
+type schedulerDecisionView struct {
+	Key              string  `json:"key"`
+	Decision         string  `json:"decision"`
+	Reason           string  `json:"reason"`
+	TriggerType      string  `json:"trigger_type"`
+	Schedule         string  `json:"schedule"`
+	DueAt            *string `json:"due_at,omitempty"`
+	NextRun          *string `json:"next_run,omitempty"`
+	LastRun          *string `json:"last_run,omitempty"`
+	QuietHours       string  `json:"quiet_hours"`
+	QuietHourEffect  string  `json:"quiet_hour_effect"`
+	BatchKey         string  `json:"batch_key,omitempty"`
+	BatchWindow      string  `json:"batch_window,omitempty"`
+	BatchGroup       string  `json:"batch_group,omitempty"`
+	ApprovalRequired bool    `json:"approval_required"`
+	RecoveryState    string  `json:"recovery_state"`
+	Mutates          bool    `json:"mutates"`
+	Error            string  `json:"error,omitempty"`
+}
+
+func runScheduler(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
+		_, err := fmt.Fprintln(stdout, schedulerUsage)
+		return err
+	}
+	switch args[0] {
+	case "tick":
+		return runSchedulerTick(ctx, app, args[1:], stdout)
+	default:
+		return fmt.Errorf("unsupported scheduler subcommand: %s", args[0])
+	}
+}
+
+func runSchedulerTick(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	nowFunc, err := runtimeNow()
+	if err != nil {
+		return err
+	}
+	now := nowFunc().UTC()
+	recoveryEnabled := false
+	jsonOutput := false
+	dryRun := parseBoolEnv(os.Getenv("ODIN_DRY_RUN"))
+	for _, arg := range args {
+		switch {
+		case arg == "--help":
+			_, err := fmt.Fprintln(stdout, schedulerUsage)
+			return err
+		case arg == "--json":
+			jsonOutput = true
+		case arg == "--dry-run":
+			dryRun = true
+		case strings.HasPrefix(arg, "dry_run="):
+			parsed, err := strconv.ParseBool(strings.TrimPrefix(arg, "dry_run="))
+			if err != nil {
+				return fmt.Errorf("scheduler tick dry_run must be true or false: %w", err)
+			}
+			dryRun = parsed
+		case strings.HasPrefix(arg, "now="):
+			parsed, err := time.Parse(time.RFC3339, strings.TrimPrefix(arg, "now="))
+			if err != nil {
+				return fmt.Errorf("scheduler tick now must be RFC3339: %w", err)
+			}
+			now = parsed.UTC()
+		case strings.HasPrefix(arg, "recovery="):
+			parsed, err := strconv.ParseBool(strings.TrimPrefix(arg, "recovery="))
+			if err != nil {
+				return fmt.Errorf("scheduler tick recovery must be true or false: %w", err)
+			}
+			recoveryEnabled = parsed
+		default:
+			return fmt.Errorf("unknown scheduler tick argument: %s", arg)
+		}
+	}
+
+	if dryRun {
+		preview, err := (triggers.Service{Store: app.Store, Registry: app.Registry}).PreviewDue(ctx, now)
+		if err != nil {
+			return err
+		}
+		view := schedulerPreviewTickView(now, preview)
+		auditScope, auditProjectID := schedulerTickAuditTarget(ctx, app)
+		if err := app.Store.RecordSchedulerTick(ctx, sqlite.RecordSchedulerTickParams{
+			Now:              now,
+			Scope:            auditScope,
+			ProjectID:        auditProjectID,
+			DryRun:           true,
+			Mutates:          false,
+			Evaluated:        view.TriggerEvaluation.Evaluated,
+			Materialized:     view.TriggerEvaluation.Materialized,
+			Deferred:         view.TriggerEvaluation.Deferred,
+			Errored:          view.TriggerEvaluation.Errored,
+			WouldRun:         view.WouldRun,
+			WouldDefer:       view.WouldDefer,
+			WouldBatch:       view.WouldBatch,
+			ApprovalRequired: view.ApprovalRequired,
+			RecoveryRan:      false,
+		}); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return commands.WriteJSON(stdout, view)
+		}
+		if _, err := fmt.Fprintf(stdout,
+			"scheduler tick dry_run=true now=%s evaluated=%d materialized=0 would_run=%d would_defer=%d would_batch=%d approval_required=%d errored=%d recovery=false mutates=false\n",
+			view.Now,
+			view.TriggerEvaluation.Evaluated,
+			view.WouldRun,
+			view.WouldDefer,
+			view.WouldBatch,
+			view.ApprovalRequired,
+			view.TriggerEvaluation.Errored,
+		); err != nil {
+			return err
+		}
+		for _, decision := range view.Decisions {
+			if _, err := fmt.Fprintf(stdout, "trigger=%s decision=%s reason=%s type=%s schedule=%s next_run=%s quiet_hour_effect=%s batch=%s approval_required=%t recovery_state=%s\n",
+				decision.Key,
+				decision.Decision,
+				decision.Reason,
+				decision.TriggerType,
+				decision.Schedule,
+				defaultSchedulerStringPtr(decision.NextRun, "none"),
+				defaultSchedulerString(decision.QuietHourEffect, "none"),
+				formatSchedulerBatch(decision.BatchKey, decision.BatchWindow),
+				decision.ApprovalRequired,
+				decision.RecoveryState,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	triggerResult, err := (triggers.Service{Store: app.Store, Registry: app.Registry}).EvaluateDue(ctx, now)
+	if err != nil {
+		return err
+	}
+	supervisionResult, err := (supervision.Service{
+		Store: app.Store,
+		Now:   func() time.Time { return now },
+	}).Tick(ctx)
+	if err != nil {
+		return err
+	}
+
+	view := schedulerTickView{
+		Now:     now.Format(time.RFC3339),
+		DryRun:  false,
+		Mutates: true,
+		TriggerEvaluation: schedulerTriggerEvaluationView{
+			Evaluated:    triggerResult.Evaluated,
+			Materialized: triggerResult.Materialized,
+			Deferred:     triggerResult.Deferred,
+			Errored:      triggerResult.Errored,
+		},
+		Supervision: schedulerSupervisionView{
+			Promoted:   supervisionResult.Promoted,
+			Reconciled: supervisionResult.Reconciled,
+		},
+		RecoveryRan: recoveryEnabled,
+	}
+	if recoveryEnabled {
+		result, err := (recovery.Service{
+			Store:           app.Store,
+			RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),
+			ExecutorCatalog: app.Executors,
+			HealthConfig:    healthsvc.DefaultConfig(),
+			Now:             func() time.Time { return now },
+		}).RunCycle(ctx)
+		if err != nil {
+			return err
+		}
+		view.Recovery = &schedulerRecoveryView{
+			Observations: len(result.Observations),
+			Decisions:    len(result.Decisions),
+			Outcomes:     len(result.Outcomes),
+		}
+	}
+	auditScope, auditProjectID := schedulerTickAuditTarget(ctx, app)
+	if err := app.Store.RecordSchedulerTick(ctx, sqlite.RecordSchedulerTickParams{
+		Now:          now,
+		Scope:        auditScope,
+		ProjectID:    auditProjectID,
+		DryRun:       false,
+		Mutates:      true,
+		Evaluated:    view.TriggerEvaluation.Evaluated,
+		Materialized: view.TriggerEvaluation.Materialized,
+		Deferred:     view.TriggerEvaluation.Deferred,
+		Errored:      view.TriggerEvaluation.Errored,
+		RecoveryRan:  view.RecoveryRan,
+	}); err != nil {
+		return err
+	}
+
+	if jsonOutput {
+		return commands.WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout,
+		"scheduler tick now=%s evaluated=%d materialized=%d deferred=%d errored=%d promoted=%d reconciled=%d recovery=%t\n",
+		view.Now,
+		view.TriggerEvaluation.Evaluated,
+		view.TriggerEvaluation.Materialized,
+		view.TriggerEvaluation.Deferred,
+		view.TriggerEvaluation.Errored,
+		view.Supervision.Promoted,
+		view.Supervision.Reconciled,
+		view.RecoveryRan,
+	)
+	return err
+}
+
+func schedulerPreviewTickView(now time.Time, preview triggers.PreviewResult) schedulerTickView {
+	decisions := make([]schedulerDecisionView, 0, len(preview.Decisions))
+	for _, decision := range preview.Decisions {
+		decisions = append(decisions, newSchedulerDecisionView(decision))
+	}
+	return schedulerTickView{
+		Now:     now.UTC().Format(time.RFC3339),
+		DryRun:  true,
+		Mutates: false,
+		TriggerEvaluation: schedulerTriggerEvaluationView{
+			Evaluated:    preview.Evaluated,
+			Materialized: 0,
+			Deferred:     0,
+			Errored:      preview.Errored,
+		},
+		Supervision:      schedulerSupervisionView{},
+		RecoveryRan:      false,
+		WouldRun:         preview.WouldRun,
+		WouldDefer:       preview.WouldDefer,
+		WouldBatch:       preview.WouldBatch,
+		ApprovalRequired: preview.ApprovalRequired,
+		Decisions:        decisions,
+	}
+}
+
+func newSchedulerDecisionView(decision triggers.PreviewDecision) schedulerDecisionView {
+	schedule, quietHours, batchKey, batchWindow := schedulerTriggerRuleDetails(decision.Trigger)
+	return schedulerDecisionView{
+		Key:              decision.Trigger.Key,
+		Decision:         decision.Decision,
+		Reason:           decision.Reason,
+		TriggerType:      decision.Trigger.Kind,
+		Schedule:         schedule,
+		DueAt:            formatSchedulerOptionalTime(decision.DueAt),
+		NextRun:          formatSchedulerOptionalTime(decision.NextEligibleAt),
+		LastRun:          formatSchedulerOptionalTime(decision.Trigger.LastMaterializedAt),
+		QuietHours:       defaultSchedulerString(decision.QuietHours, quietHours),
+		QuietHourEffect:  defaultSchedulerString(decision.QuietHourEffect, "none"),
+		BatchKey:         defaultSchedulerString(decision.BatchKey, batchKey),
+		BatchWindow:      defaultSchedulerString(decision.BatchWindow, batchWindow),
+		BatchGroup:       decision.BatchGroup,
+		ApprovalRequired: decision.ApprovalRequired,
+		RecoveryState:    decision.RecoveryState,
+		Mutates:          false,
+		Error:            decision.Error,
+	}
+}
+
+func schedulerTriggerRuleDetails(trigger sqlite.AutomationTrigger) (string, string, string, string) {
+	var rule struct {
+		Cadence     string `json:"cadence"`
+		Cron        string `json:"cron"`
+		QuietHours  string `json:"quiet_hours"`
+		BatchKey    string `json:"batch_key"`
+		BatchWindow string `json:"batch_window"`
+		EventType   string `json:"event_type"`
+	}
+	_ = json.Unmarshal([]byte(trigger.RuleJSON), &rule)
+	schedule := "manual"
+	switch {
+	case strings.TrimSpace(rule.Cron) != "":
+		schedule = "cron:" + strings.TrimSpace(rule.Cron)
+	case strings.TrimSpace(rule.Cadence) != "":
+		schedule = "cadence:" + strings.TrimSpace(rule.Cadence)
+	case strings.EqualFold(trigger.Kind, "event") && strings.TrimSpace(rule.EventType) != "":
+		schedule = "event:" + strings.TrimSpace(rule.EventType)
+	}
+	return schedule, strings.TrimSpace(rule.QuietHours), strings.TrimSpace(rule.BatchKey), strings.TrimSpace(rule.BatchWindow)
+}
+
+func schedulerTickAuditTarget(ctx context.Context, app bootstrap.App) (string, *int64) {
+	state, err := loadCLIState(app)
+	if err != nil {
+		return "runtime", nil
+	}
+	if state.Scope.Kind != cliscope.ScopeProject && state.Scope.Kind != cliscope.ScopeOdinCore {
+		return "runtime", nil
+	}
+	project, err := app.Store.GetProjectByKey(ctx, state.Scope.ProjectKey)
+	if err != nil {
+		return state.Scope.ProjectKey, nil
+	}
+	return project.Scope, &project.ID
+}
+
+func parseBoolEnv(value string) bool {
+	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+	return err == nil && parsed
+}
+
+func formatSchedulerOptionalTime(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	formatted := value.UTC().Format(time.RFC3339)
+	return &formatted
+}
+
+func defaultSchedulerString(value string, fallback string) string {
+	if strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	if strings.TrimSpace(fallback) != "" {
+		return strings.TrimSpace(fallback)
+	}
+	return "none"
+}
+
+func defaultSchedulerStringPtr(value *string, fallback string) string {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func formatSchedulerBatch(key string, window string) string {
+	key = strings.TrimSpace(key)
+	window = strings.TrimSpace(window)
+	if key == "" {
+		return "none"
+	}
+	if window == "" {
+		return key
+	}
+	return key + " window=" + window
+}
+
 func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, args []string, stdout io.Writer) error {
 	jsonOutput, remaining, err := consumeJSONFlag(args)
 	if err != nil {
@@ -3589,6 +5080,19 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 	if err != nil {
 		return err
 	}
+	healthService := newHealthService(app, healthsvc.DefaultConfig(), cfg)
+	readinessReport, ready, err := healthService.Readiness(ctx, len(app.RegistryDiagnostics) == 0)
+	if err != nil {
+		return err
+	}
+	runtimeStatus := "unknown"
+	runtimeState, err := app.Store.GetRuntimeState(ctx)
+	if err == nil {
+		runtimeStatus = runtimeState.Status
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	workerDispatch := healthsvc.NewWorkerDispatchStatus(ready, runtimeStatus, readinessReport.Status)
 
 	if jsonOutput {
 		companionSwarmCounts := struct {
@@ -3618,11 +5122,12 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 			"project_transition_ownership": snapshot.ProjectTransitionOwnership,
 			"companion_swarm_counts":       companionSwarmCounts,
 			"companion_swarms":             snapshot.CompanionSwarms,
+			"worker_dispatch":              workerDispatch,
 		})
 	}
 
 	companionSwarmCount := len(snapshot.CompanionSwarms)
-	_, err = fmt.Fprintf(stdout, "health=%s pending_approvals=%d stalled_runs=%d active_runs=%d project_transitions=%d companion_swarms=%d registry_healthy=%t\n",
+	_, err = fmt.Fprintf(stdout, "health=%s pending_approvals=%d stalled_runs=%d active_runs=%d project_transitions=%d companion_swarms=%d registry_healthy=%t worker_dispatch=%s dry_run=%t read_only=%t\n",
 		summary.Status,
 		len(snapshot.ApprovalsWaiting),
 		len(snapshot.StalledRuns),
@@ -3630,6 +5135,9 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 		len(snapshot.ProjectTransitions),
 		companionSwarmCount,
 		summary.RegistryHealthy,
+		workerDispatch.Mode,
+		workerDispatch.DryRun,
+		workerDispatch.ReadOnly,
 	)
 	return err
 }
@@ -3672,7 +5180,12 @@ func runTask(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 	})
 
 	jobService := newJobService(app)
-	task, err := jobService.CreateTaskFromAct(ctx, resolved, command.Title)
+	task, err := jobService.Service.CreateTask(ctx, jobs.CreateTaskParams{
+		Resolved:           resolved,
+		Title:              command.Title,
+		AcceptanceCriteria: command.AcceptanceCriteria,
+		RequestedBy:        "operator",
+	})
 	if err != nil {
 		return err
 	}
@@ -3734,11 +5247,13 @@ type servedJobService struct {
 func newJobService(app bootstrap.App) servedJobService {
 	return servedJobService{
 		Service: jobs.Service{
-			Store:          app.Store,
-			Registry:       app.Registry,
-			Executors:      app.Executors,
-			ExecutorConfig: app.ExecutorConfig,
-			Transitions:    projects.Service{Store: app.Store},
+			Store:              app.Store,
+			Registry:           app.Registry,
+			Executors:          app.Executors,
+			ExecutorConfig:     app.ExecutorConfig,
+			PromptRenderer:     app.PromptRenderer,
+			PromptTemplateName: app.PromptTemplateName,
+			Transitions:        projects.Service{Store: app.Store},
 			Leases: leases.Manager{
 				Store:        app.Store,
 				Git:          gitadapter.Adapter{},
@@ -3907,12 +5422,116 @@ func runHealthcheck(ctx context.Context, app bootstrap.App, cfg appconfig.Config
 }
 
 func runtimeEnv() map[string]string {
+	fileEnv := runtimeEnvFile()
+	applyRuntimeEnvDefaults(fileEnv)
 	return map[string]string{
-		"ODIN_ROOT":         os.Getenv("ODIN_ROOT"),
-		"ODIN_HTTP_ADDR":    os.Getenv("ODIN_HTTP_ADDR"),
-		"ODIN_ADMIN_TOKEN":  os.Getenv("ODIN_ADMIN_TOKEN"),
-		"ODIN_NOW":          os.Getenv("ODIN_NOW"),
-		"ODIN_MEDIA_CONFIG": os.Getenv("ODIN_MEDIA_CONFIG"),
+		"ODIN_ROOT":         runtimeEnvValue(fileEnv, "ODIN_ROOT"),
+		"ODIN_HTTP_ADDR":    runtimeEnvValue(fileEnv, "ODIN_HTTP_ADDR"),
+		"ODIN_ADMIN_TOKEN":  runtimeEnvValue(fileEnv, "ODIN_ADMIN_TOKEN"),
+		"ODIN_NOW":          runtimeEnvValue(fileEnv, "ODIN_NOW"),
+		"ODIN_MEDIA_CONFIG": runtimeEnvValue(fileEnv, "ODIN_MEDIA_CONFIG"),
+	}
+}
+
+func runtimeEnvValue(fileEnv map[string]string, key string) string {
+	if value := os.Getenv(key); strings.TrimSpace(value) != "" {
+		return value
+	}
+	return fileEnv[key]
+}
+
+func applyRuntimeEnvDefaults(fileEnv map[string]string) {
+	for _, key := range []string{
+		"ODIN_ROOT",
+		"ODIN_HTTP_ADDR",
+		"ODIN_ADMIN_TOKEN",
+		"ODIN_NOW",
+		"ODIN_MEDIA_CONFIG",
+		"ODIN_PROJECTS_OVERLAY",
+		"ODIN_CODEX_DRIVER",
+	} {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			continue
+		}
+		if value := strings.TrimSpace(fileEnv[key]); value != "" {
+			_ = os.Setenv(key, value)
+		}
+	}
+}
+
+func runtimeEnvFile() map[string]string {
+	env := make(map[string]string)
+	path := runtimeEnvFilePath()
+	if path == "" {
+		return env
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return env
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		key, value, ok := parseRuntimeEnvLine(line)
+		if !ok {
+			continue
+		}
+		env[key] = value
+	}
+	return env
+}
+
+func runtimeEnvFilePath() string {
+	if parseBoolEnv(os.Getenv("ODIN_DISABLE_ENV_FILE")) {
+		return ""
+	}
+	if path := strings.TrimSpace(os.Getenv("ODIN_ENV_FILE")); path != "" {
+		return path
+	}
+	configHome := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME"))
+	if configHome == "" {
+		home := strings.TrimSpace(os.Getenv("HOME"))
+		if home == "" {
+			return ""
+		}
+		configHome = filepath.Join(home, ".config")
+	}
+	return filepath.Join(configHome, "odin", "odin-os.env")
+}
+
+func parseRuntimeEnvLine(line string) (string, string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", "", false
+	}
+	line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+	key, value, ok := strings.Cut(line, "=")
+	if !ok {
+		return "", "", false
+	}
+	key = strings.TrimSpace(key)
+	if !runtimeEnvKeyAllowed(key) {
+		return "", "", false
+	}
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 {
+		if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+			value = value[1 : len(value)-1]
+		}
+	}
+	return key, value, true
+}
+
+func runtimeEnvKeyAllowed(key string) bool {
+	switch key {
+	case "ODIN_ROOT",
+		"ODIN_HTTP_ADDR",
+		"ODIN_ADMIN_TOKEN",
+		"ODIN_NOW",
+		"ODIN_MEDIA_CONFIG",
+		"ODIN_PROJECTS_OVERLAY",
+		"ODIN_CODEX_DRIVER":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -3979,9 +5598,58 @@ func listPendingApprovals(ctx context.Context, store *sqlite.Store, resolved sco
 			RunID:           detail.Approval.RunID,
 			Status:          view.Status,
 			ResolverSupport: resolverSupport,
+			Source:          "approval_requests",
+			Risk:            "governance",
+			Reason:          approvalOperatorReason(view.Status, resolverSupport),
+			AllowedActions:  approvalOperatorAllowedActions(view.Status, resolverSupport),
+			NextSteps:       approvalOperatorNextSteps(view.ApprovalID, view.Status, resolverSupport),
+			OnApprove:       approvalOperatorOnApprove(resolverSupport),
 		})
 	}
 	return approvals, nil
+}
+
+func approvalOperatorReason(status string, resolverSupport string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "pending" {
+		if resolverSupport == string(approvalsvc.ResolverUnsupported) {
+			return "approval_required_no_registered_resolver"
+		}
+		return "approval_required"
+	}
+	if status == "" {
+		return "approval_state_unknown"
+	}
+	return "approval_" + status
+}
+
+func approvalOperatorAllowedActions(status string, resolverSupport string) []string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status != "pending" {
+		return []string{"inspect"}
+	}
+	if resolverSupport == string(approvalsvc.ResolverSupported) {
+		return []string{"approve", "deny"}
+	}
+	return []string{"inspect"}
+}
+
+func approvalOperatorNextSteps(approvalID int64, status string, resolverSupport string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "pending" && resolverSupport == string(approvalsvc.ResolverSupported) {
+		return fmt.Sprintf("inspect with odin approvals show %d; resolve with odin approvals resolve %d <approve|deny> <reason...>", approvalID, approvalID)
+	}
+	if status == "pending" {
+		return fmt.Sprintf("inspect with odin approvals show %d; no supported resolver is registered", approvalID)
+	}
+	return fmt.Sprintf("inspect with odin approvals show %d; already %s", approvalID, status)
+}
+
+func approvalOperatorOnApprove(resolverSupport string) string {
+	if resolverSupport == string(approvalsvc.ResolverSupported) {
+		return "task unblocked or registered continuation starts"
+	}
+	return "not resolved; inspect only"
 }
 
 func approvalRunIDLabel(runID *int64) string {
@@ -4290,16 +5958,19 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 
 	var shutdownRequested atomic.Bool
 	jobService := jobs.Service{
-		Store:          app.Store,
-		RuntimeRoot:    app.RuntimeRoot,
-		Registry:       app.Registry,
-		Executors:      app.Executors,
-		ExecutorConfig: app.ExecutorConfig,
-		Transitions:    projects.Service{Store: app.Store},
+		Store:              app.Store,
+		RuntimeRoot:        app.RuntimeRoot,
+		Registry:           app.Registry,
+		Executors:          app.Executors,
+		ExecutorConfig:     app.ExecutorConfig,
+		PromptRenderer:     app.PromptRenderer,
+		PromptTemplateName: app.PromptTemplateName,
+		Transitions:        projects.Service{Store: app.Store},
 		Leases: leases.Manager{
 			Store:        app.Store,
 			Git:          gitadapter.Adapter{},
 			WorktreeRoot: worktrees.DefaultRoot(),
+			Logger:       logger,
 		},
 		ShutdownRequested: &shutdownRequested,
 		Now:               now,
@@ -4331,6 +6002,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 			Store:        app.Store,
 			Git:          gitadapter.Adapter{},
 			WorktreeRoot: worktrees.DefaultRoot(),
+			Logger:       logger,
 		},
 		Now: time.Now,
 	}
@@ -4346,6 +6018,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		Store:              app.Store,
 		RuntimeState:       stateService,
 		Health:             healthService,
+		Notifications:      runtimenotifications.Service{Store: app.Store},
 		Executors:          app.Executors,
 		ExecutorConfig:     app.ExecutorConfig,
 		RegistryHealthy:    len(app.RegistryDiagnostics) == 0,
@@ -4353,7 +6026,6 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		ShutdownRequested:  &shutdownRequested,
 		BootID:             bootID,
 		RuntimeRoot:        cfg.RuntimeRoot,
-		Notifications:      runtimenotifications.Service{Store: app.Store},
 	}
 	if cfg.Service.SocialCopilot.Enabled {
 		socialCtx, cancel := serveOperationContext(operationCtx)
@@ -4371,21 +6043,34 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 
 	server := &stdhttp.Server{
 		Handler: apihttp.NewCapabilitiesHandler(apihttp.CapabilitiesDependencies{
-			Gateway: newServeCapabilityGateway(app),
+			Gateway:    newServeCapabilityGateway(app),
+			AdminToken: cfg.AdminToken,
 			Fallback: apihttp.NewOperationalHandler(apihttp.Dependencies{
-				Health:          healthService,
-				Metrics:         metricsService,
-				Store:           app.Store,
-				ReadModels:      app.Store.DB(),
-				RegistryHealthy: healthDeps.RegistryHealthy,
-				Now:             now,
-				AdminToken:      cfg.AdminToken,
+				Health:           healthService,
+				Metrics:          metricsService,
+				Store:            app.Store,
+				ReadModels:       app.Store.DB(),
+				RegistryHealthy:  healthDeps.RegistryHealthy,
+				RegistrySnapshot: app.RegistrySnapshot,
+				Registry:         app.Registry,
+				Now:              now,
+				Tmux: apihttp.WorkspaceTmuxStatusProvider{
+					Workspaces: coreworkspace.Service{
+						Store:    app.Store,
+						Registry: app.Registry,
+					},
+				},
+				AdminToken: cfg.AdminToken,
 				Admin: serveDashboardAdmin{
 					ImmediateNotReady: &immediateNotReady,
 					RuntimeState:      stateService,
-					BootID:            bootID,
-					RuntimeRoot:       cfg.RuntimeRoot,
-					Logger:            logger,
+					Jobs: jobs.Service{
+						Store: app.Store,
+						Now:   now,
+					},
+					BootID:      bootID,
+					RuntimeRoot: cfg.RuntimeRoot,
+					Logger:      logger,
 				},
 				GitHubWebhookSecret: os.Getenv("ODIN_GITHUB_WEBHOOK_SECRET"),
 				GitHubIssueIngester: triggers.Service{Store: app.Store, Registry: app.Registry},
@@ -4493,7 +6178,43 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 }
 
 func newServeCapabilityGateway(app bootstrap.App) *capabilities.Gateway {
-	return nil
+	definitions := catalog.BuiltinDefinitions()
+	snapshot := newCapabilitySnapshot(app, definitions, "serve-capabilities")
+	service, err := capabilities.NewService(snapshot)
+	if err != nil {
+		return nil
+	}
+
+	var runLookup capabilities.RunLookup
+	if app.Store != nil {
+		runLookup = runs.Service{
+			DB:    app.Store.DB(),
+			Store: app.Store,
+		}
+	}
+
+	return capabilities.NewGateway(service, func(ctx context.Context, request capabilities.InvokeRequest, descriptor capabilities.Descriptor) (capabilities.InvokeResponse, error) {
+		if descriptor.Kind == registry.KindTool {
+			return capabilities.InvokeBuiltinToolCapability(ctx, definitions, request, descriptor)
+		}
+		return servedCommandService{app: app}.Execute(ctx, request)
+	}, runLookup)
+}
+
+func newReadOnlyCapabilityGateway(app bootstrap.App) *capabilities.Gateway {
+	definitions := catalog.BuiltinDefinitions()
+	snapshot := newCapabilitySnapshot(app, definitions, capabilityCommandSource)
+	service, err := capabilities.NewService(snapshot)
+	if err != nil {
+		return nil
+	}
+
+	return capabilities.NewGateway(service, nil, nil)
+}
+
+func newCapabilitySnapshot(app bootstrap.App, definitions map[string]catalog.ToolDefinition, digest string) capabilities.Snapshot {
+	snapshot := capabilities.FromRegistrySnapshot(digest, app.RegistrySnapshot)
+	return capabilities.WithBuiltinToolDescriptors(snapshot, definitions)
 }
 
 func recordServeStopped(ctx context.Context, service runtimestate.Service, bootID string, reason string, cause error) error {
@@ -4804,7 +6525,7 @@ func attemptDispatchIfReady(ctx context.Context, healthService healthsvc.Service
 	if err != nil {
 		return err
 	}
-	if outcome.Executed || outcome.Reason == "run_already_executing" {
+	if outcome.Executed || outcome.Reason == "run_already_executing" || outcome.Reason == "stale_executing_run_recovered" {
 		return nil
 	}
 	return service.ExecuteNextQueued(ctx)
@@ -5143,8 +6864,12 @@ func logBackgroundEvent(logger *logs.Logger, level logs.Level, component, messag
 }
 
 func runBackup(ctx context.Context, service appbackup.Service, args []string, stdout io.Writer) error {
+	if isHelpArgs(args) {
+		_, err := fmt.Fprintln(stdout, backupUsage)
+		return err
+	}
 	if len(args) != 1 {
-		return fmt.Errorf("usage: odin backup <archive-path>")
+		return fmt.Errorf(backupUsage)
 	}
 	if err := service.CreateArchive(ctx, args[0]); err != nil {
 		return err
@@ -5154,8 +6879,12 @@ func runBackup(ctx context.Context, service appbackup.Service, args []string, st
 }
 
 func runRestore(ctx context.Context, service appbackup.Service, args []string, stdout io.Writer) error {
+	if isHelpArgs(args) {
+		_, err := fmt.Fprintln(stdout, restoreUsage)
+		return err
+	}
 	if len(args) != 2 {
-		return fmt.Errorf("usage: odin restore <archive-path> <destination-root>")
+		return fmt.Errorf(restoreUsage)
 	}
 	if err := service.RestoreArchive(ctx, args[0], args[1]); err != nil {
 		return err
@@ -5165,12 +6894,20 @@ func runRestore(ctx context.Context, service appbackup.Service, args []string, s
 }
 
 func runVerifyBackup(ctx context.Context, service appbackup.Service, args []string, stdout io.Writer) error {
+	if isHelpArgs(args) {
+		_, err := fmt.Fprintln(stdout, verifyBackupUsage)
+		return err
+	}
 	if len(args) != 1 {
-		return fmt.Errorf("usage: odin verify-backup <archive-path>")
+		return fmt.Errorf(verifyBackupUsage)
 	}
 	if err := service.VerifyArchive(ctx, args[0]); err != nil {
 		return err
 	}
 	_, err := fmt.Fprintln(stdout, "backup verified")
 	return err
+}
+
+func isHelpArgs(args []string) bool {
+	return len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h")
 }

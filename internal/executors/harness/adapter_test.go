@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"odin-os/internal/executors/contract"
@@ -68,6 +69,46 @@ printf '{"status":"completed","output":"driver ok","external_id":"fixture-1"}'
 	}
 }
 
+func TestDriverExecutorUsesAllowlistedEnvironment(t *testing.T) {
+	requestPath := filepath.Join(t.TempDir(), "request.json")
+	envPath := filepath.Join(t.TempDir(), "env.txt")
+	script := writeFixtureDriver(t, requestPath, `#!/usr/bin/env bash
+set -euo pipefail
+env > `+shellQuote(envPath)+`
+cat >"$ODIN_DRIVER_REQUEST_PATH"
+printf '{"status":"completed","output":"driver ok","external_id":"fixture-1"}'
+`)
+	t.Setenv("ODIN_CODEX_DRIVER", script)
+	t.Setenv("ODIN_DRIVER_REQUEST_PATH", requestPath)
+	t.Setenv("GITHUB_TOKEN", "ghp_secret")
+	t.Setenv("OPENAI_API_KEY", "sk-secret")
+	t.Setenv("ODIN_ADMIN_TOKEN", "admin-secret")
+
+	executor := NewDriver("codex_headless", "ODIN_CODEX_DRIVER", "codex")
+	if _, err := executor.RunTask(context.Background(), contract.TaskSpec{
+		ID:     "t-1",
+		Kind:   contract.TaskKindGeneral,
+		Scope:  "project",
+		Prompt: "hi",
+	}); err != nil {
+		t.Fatalf("RunTask() error = %v", err)
+	}
+
+	envBytes, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("ReadFile(env) error = %v", err)
+	}
+	env := string(envBytes)
+	for _, forbidden := range []string{"GITHUB_TOKEN=", "OPENAI_API_KEY=", "ODIN_ADMIN_TOKEN=", "ghp_secret", "sk-secret", "admin-secret"} {
+		if strings.Contains(env, forbidden) {
+			t.Fatalf("driver env contains forbidden value %q in:\n%s", forbidden, env)
+		}
+	}
+	if !strings.Contains(env, "ODIN_DRIVER_REQUEST_PATH="+requestPath) {
+		t.Fatalf("driver env missing request path in:\n%s", env)
+	}
+}
+
 func writeFixtureDriver(t *testing.T, requestPath string, content string) string {
 	t.Helper()
 
@@ -80,4 +121,8 @@ func writeFixtureDriver(t *testing.T, requestPath string, content string) string
 	}
 	_ = requestPath
 	return path
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }

@@ -68,6 +68,23 @@ Each analysis should include:
 
 Retry recommendations must stop at the configured maximum attempt count.
 
+## Follow-Up Materialization
+
+Failure-analysis follow-ups are approval gated through the existing review
+surface:
+
+1. `odin review show failed-work:<task-id> --json` previews the proposed
+   follow-up and marks external GitHub issue creation as `not_created`.
+2. `odin review act failed-work:<task-id> follow-up --dry-run --json` shows the
+   same proposal without writing any follow-up obligation or external issue.
+3. `odin review act failed-work:<task-id> follow-up --json` is the explicit
+   human approval to create one internal Follow-Up Obligation through the
+   existing follow-up persistence layer.
+
+This path does not create GitHub issues. External tracker writes remain
+proposal-only until the GitHub tracker mutation contract is implemented and an
+approved tracker-mutation bundle exists for the exact write.
+
 ## Safety Rules
 
 - Do not hide failed runs.
@@ -76,3 +93,5 @@ Retry recommendations must stop at the configured maximum attempt count.
 - Do not convert a ticket-readiness failure into an implementation retry.
 - Security blockers and unsafe shims require explicit follow-up and human
   review.
+- Do not create external GitHub issues from failure analysis without the
+  approved tracker-mutation contract.

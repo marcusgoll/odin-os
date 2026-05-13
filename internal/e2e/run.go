@@ -14,7 +14,10 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"odin-os/internal/core/projects"
+	"odin-os/internal/executors/contract"
+	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/prompts"
+	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tracker"
 	trackergithub "odin-os/internal/tracker/github"
@@ -134,6 +137,8 @@ func (runner *runner) run(ctx context.Context) error {
 	switch runner.scenario.Name {
 	case "github-readonly-intake":
 		err = runner.runGitHubReadOnlyIntake(ctx, registry)
+	case "github-issue-delivery-dry-run":
+		err = runner.runGitHubIssueDeliveryDryRun(ctx, registry)
 	case "tracker-dry-run-lifecycle":
 		err = runner.runTrackerDryRunLifecycle(ctx)
 	case "workspace-safe-creation":
@@ -357,6 +362,182 @@ func (runner *runner) runGitHubReadOnlyIntake(ctx context.Context, registry proj
 	return nil
 }
 
+func (runner *runner) runGitHubIssueDeliveryDryRun(ctx context.Context, registry projects.Registry) error {
+	loadStep := runner.step("load_fixture_issue")
+	issues, err := runner.loadTrackerIssues(loadStep.Fixture)
+	if err != nil {
+		return runner.failStage("load_fixture_issue", err)
+	}
+	eligible := filterEligibleIssues(issues, tracker.LabelReady, []string{tracker.LabelPaused, tracker.LabelBlocked})
+	if loadStep.Expect.EligibleCount != 0 && len(eligible) != loadStep.Expect.EligibleCount {
+		return runner.failStage("load_fixture_issue", fmt.Errorf("eligible_count = %d, want %d", len(eligible), loadStep.Expect.EligibleCount))
+	}
+	if len(eligible) == 0 {
+		return runner.failStage("load_fixture_issue", errors.New("fixture produced no eligible issue"))
+	}
+	runner.passStage("load_fixture_issue", fmt.Sprintf("eligible_count=%d", len(eligible)))
+
+	runner.fixture = &fixtureTracker{issues: eligible}
+	intakeService := trackerintake.Service{
+		Store:    runner.store,
+		Registry: registry,
+		NewTracker: func(project projects.Manifest, _ trackerintake.SyncOptions) (tracker.Tracker, error) {
+			if project.GitHub.Repo != runner.scenario.Project.GitHubRepo {
+				return nil, fmt.Errorf("project repo = %q, want %q", project.GitHub.Repo, runner.scenario.Project.GitHubRepo)
+			}
+			return runner.fixture, nil
+		},
+	}
+	syncSummary, err := intakeService.SyncProject(ctx, trackerintake.SyncOptions{ProjectKey: runner.scenario.Project.Key})
+	if err != nil {
+		return runner.failStage("review_issue_into_work_item", err)
+	}
+	reconcileSummary, err := intakeService.ReconcileProject(ctx, trackerintake.ReconcileOptions{ProjectKey: runner.scenario.Project.Key})
+	if err != nil {
+		return runner.failStage("review_issue_into_work_item", err)
+	}
+	reviewStep := runner.step("review_issue_into_work_item")
+	if reviewStep.Expect.Created != 0 && reconcileSummary.Created != reviewStep.Expect.Created {
+		return runner.failStage("review_issue_into_work_item", fmt.Errorf("created = %d, want %d", reconcileSummary.Created, reviewStep.Expect.Created))
+	}
+	if reviewStep.Expect.Linked != 0 && reconcileSummary.Linked != reviewStep.Expect.Linked {
+		return runner.failStage("review_issue_into_work_item", fmt.Errorf("linked = %d, want %d", reconcileSummary.Linked, reviewStep.Expect.Linked))
+	}
+
+	project, err := runner.store.GetProjectByKey(ctx, runner.scenario.Project.Key)
+	if err != nil {
+		return runner.failStage("review_issue_into_work_item", err)
+	}
+	if _, err := (projects.Service{Store: runner.store}).SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "e2e",
+		Notes:       "fixture issue delivery dry-run proof",
+	}); err != nil {
+		return runner.failStage("review_issue_into_work_item", err)
+	}
+	task, err := runner.store.GetTaskByProjectAndKey(ctx, project.ID, externalIssueTaskKey(eligible[0]))
+	if err != nil {
+		return runner.failStage("review_issue_into_work_item", err)
+	}
+	if task.Status != "queued" || task.RequestedBy != "github_issue_intake" {
+		return runner.failStage("review_issue_into_work_item", fmt.Errorf("task status/requested_by = %s/%s, want queued/github_issue_intake", task.Status, task.RequestedBy))
+	}
+	runner.report.Intake = intakeReport{
+		Project:   syncSummary.ProjectKey,
+		Repo:      syncSummary.Repo,
+		Fetched:   syncSummary.Fetched,
+		Persisted: syncSummary.Persisted,
+		Stored:    reconcileSummary.Eligible,
+	}
+	runner.report.Delivery.WorkItemKey = task.Key
+	runner.passStage("review_issue_into_work_item", fmt.Sprintf("created=%d linked=%d work_item=%s", reconcileSummary.Created, reconcileSummary.Linked, task.Key))
+
+	git := &fixtureGit{}
+	worktreeRoot := filepath.Join(runner.odinRoot, "worktrees")
+	jobService := jobs.Service{
+		Store:    runner.store,
+		Registry: registry,
+		Executors: map[string]contract.Executor{
+			"fixture_delivery": fixtureDeliveryExecutor{},
+		},
+		ExecutorConfig: executorrouter.Config{
+			Version: 1,
+			Executors: []executorrouter.ExecutorConfig{{
+				Key:      "fixture_delivery",
+				Adapter:  "fixture_delivery",
+				Class:    contract.ExecutorClassPlanBackedCLI,
+				Enabled:  true,
+				Priority: 10,
+			}},
+			Routes: []executorrouter.RouteConfig{{
+				Name: "fixture_delivery",
+				Match: executorrouter.RouteMatch{
+					TaskKinds: []contract.TaskKind{contract.TaskKindGeneral},
+					Scopes:    []string{"project"},
+				},
+				Preferred: []string{"fixture_delivery"},
+			}},
+		},
+		Leases: leases.Manager{
+			Store:        runner.store,
+			Git:          git,
+			WorktreeRoot: worktreeRoot,
+		},
+	}
+	dispatch, err := jobService.DispatchTaskRunAttempt(ctx, task.ID)
+	if err != nil {
+		return runner.failStage("dispatch_to_isolated_worktree", err)
+	}
+	if !dispatch.Dispatched || dispatch.Run == nil || dispatch.Task.Status != "running" {
+		return runner.failStage("dispatch_to_isolated_worktree", fmt.Errorf("dispatch = %+v, want running dispatched run", dispatch))
+	}
+	lease, err := runner.store.GetActiveWorktreeLeaseByTaskRun(ctx, dispatch.Task.ID, dispatch.Run.ID)
+	if err != nil {
+		return runner.failStage("dispatch_to_isolated_worktree", err)
+	}
+	dispatchStep := runner.step("dispatch_to_isolated_worktree")
+	if !strings.HasPrefix(lease.BranchName, dispatchStep.Expect.BranchPrefix) {
+		return runner.failStage("dispatch_to_isolated_worktree", fmt.Errorf("branch %q does not start with %q", lease.BranchName, dispatchStep.Expect.BranchPrefix))
+	}
+	if dispatchStep.Expect.InsideWorkspaceRoot && !isInside(worktreeRoot, lease.WorktreePath) {
+		return runner.failStage("dispatch_to_isolated_worktree", fmt.Errorf("worktree path %q escaped root %q", lease.WorktreePath, worktreeRoot))
+	}
+	runner.report.Workspace = workspaceReport{
+		Branch:              lease.BranchName,
+		WorktreePath:        lease.WorktreePath,
+		InsideWorkspaceRoot: isInside(worktreeRoot, lease.WorktreePath),
+	}
+	runner.report.Delivery.RunID = dispatch.Run.ID
+	runner.passStage("dispatch_to_isolated_worktree", fmt.Sprintf("branch=%s worktree=%s", lease.BranchName, lease.WorktreePath))
+
+	executed, err := jobService.ExecuteDispatchedRun(ctx, task.ID)
+	if err != nil {
+		return runner.failStage("execute_deterministic_stub", err)
+	}
+	if !executed.Executed || executed.Run == nil || executed.Task.Status != "completed" || executed.Run.Status != "completed" {
+		return runner.failStage("execute_deterministic_stub", fmt.Errorf("execute = %+v, want completed deterministic run", executed))
+	}
+	artifacts, err := runner.store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{RunID: executed.Run.ID, ArtifactType: "executor_evidence"})
+	if err != nil {
+		return runner.failStage("execute_deterministic_stub", err)
+	}
+	testsRecorded, reviewArtifact := deliveryEvidenceFlags(artifacts)
+	executeStep := runner.step("execute_deterministic_stub")
+	if executeStep.Expect.TestsRecorded && !testsRecorded {
+		return runner.failStage("execute_deterministic_stub", errors.New("test evidence artifact was not recorded"))
+	}
+	if executeStep.Expect.ReviewArtifact && !reviewArtifact {
+		return runner.failStage("execute_deterministic_stub", errors.New("review artifact evidence was not recorded"))
+	}
+	runner.report.Delivery.TestsRecorded = testsRecorded
+	runner.report.Delivery.ReviewArtifact = reviewArtifact
+	runner.passStage("execute_deterministic_stub", fmt.Sprintf("tests_recorded=%t review_artifact=%t", testsRecorded, reviewArtifact))
+
+	runID := executed.Run.ID
+	approval, err := runner.store.RequestApproval(ctx, sqlite.RequestApprovalParams{
+		TaskID:      executed.Task.ID,
+		RunID:       &runID,
+		Status:      "pending",
+		RequestedBy: "pr_creation_dry_run",
+	})
+	if err != nil {
+		return runner.failStage("require_pr_approval", err)
+	}
+	if approval.Status != "pending" {
+		return runner.failStage("require_pr_approval", fmt.Errorf("approval status = %q, want pending", approval.Status))
+	}
+	if runner.fixture.mutationCalls != runner.step("require_pr_approval").Expect.GitHubWrites {
+		runner.report.GitHub.Mutated = true
+		return runner.failStage("require_pr_approval", fmt.Errorf("github writes = %d, want %d", runner.fixture.mutationCalls, runner.step("require_pr_approval").Expect.GitHubWrites))
+	}
+	runner.report.Delivery.PRReadyBranch = lease.BranchName
+	runner.report.Delivery.PRApprovalRequired = true
+	runner.passStage("require_pr_approval", fmt.Sprintf("approval=%d status=pending github_writes=%d", approval.ID, runner.fixture.mutationCalls))
+	return nil
+}
+
 func (runner *runner) runTrackerDryRunLifecycle(ctx context.Context) error {
 	doer := &countingDoer{}
 	client := trackergithub.NewClientWithConfigAndDoer(trackergithub.Config{
@@ -380,7 +561,8 @@ func (runner *runner) runTrackerDryRunLifecycle(ctx context.Context) error {
 		default:
 			continue
 		}
-		if err != nil {
+		denied := errors.Is(err, tracker.ErrMutationUnsupported)
+		if err != nil && !denied {
 			return runner.failStage(step.Name, err)
 		}
 		writes := doer.requests - before
@@ -388,7 +570,7 @@ func (runner *runner) runTrackerDryRunLifecycle(ctx context.Context) error {
 			runner.report.GitHub.Mutated = writes > 0
 			return runner.failStage(step.Name, fmt.Errorf("github_writes = %d, want %d", writes, step.Expect.GitHubWrites))
 		}
-		runner.passStage(step.Name, fmt.Sprintf("dry_run=%t github_writes=%d", step.DryRun, writes))
+		runner.passStage(step.Name, fmt.Sprintf("dry_run=%t mutation_denied=%t github_writes=%d", step.DryRun, denied, writes))
 	}
 	return nil
 }
@@ -495,10 +677,11 @@ func (runner *runner) runFailureAnalysis(ctx context.Context) error {
 		Body:   input.Summary,
 		Labels: []string{tracker.LabelHumanReview},
 	})
-	if err != nil {
+	denied := errors.Is(err, tracker.ErrMutationUnsupported)
+	if err != nil && !denied {
 		return runner.failStage(step.Name, err)
 	}
-	created := followUp.State == "dry-run" && followUp.Title != ""
+	created := !denied && followUp.State == "dry-run" && followUp.Title != ""
 	if created != step.Expect.CreatesFollowUp {
 		return runner.failStage(step.Name, fmt.Errorf("creates_follow_up = %t, want %t", created, step.Expect.CreatesFollowUp))
 	}
@@ -507,7 +690,7 @@ func (runner *runner) runFailureAnalysis(ctx context.Context) error {
 		return runner.failStage(step.Name, fmt.Errorf("github writes = %d, want 0", doer.requests))
 	}
 	runner.report.Failure = failureReport{Category: category, CreatesFollowUp: created}
-	runner.passStage(step.Name, fmt.Sprintf("category=%q creates_follow_up=%t", category, created))
+	runner.passStage(step.Name, fmt.Sprintf("category=%q creates_follow_up=%t mutation_denied=%t", category, created, denied))
 	return nil
 }
 
@@ -825,6 +1008,8 @@ func (step *scenarioStep) UnmarshalYAML(value *yaml.Node) error {
 
 type stepExpect struct {
 	EligibleCount       int      `yaml:"eligible_count"`
+	Created             int      `yaml:"created"`
+	Linked              int      `yaml:"linked"`
 	RequiredLabel       string   `yaml:"required_label"`
 	ExcludedLabels      []string `yaml:"excluded_labels"`
 	IDempotent          bool     `yaml:"idempotent"`
@@ -835,6 +1020,9 @@ type stepExpect struct {
 	Rejected            bool     `yaml:"rejected"`
 	Category            string   `yaml:"category"`
 	CreatesFollowUp     bool     `yaml:"creates_follow_up"`
+	TestsRecorded       bool     `yaml:"tests_recorded"`
+	ReviewArtifact      bool     `yaml:"review_artifact"`
+	ApprovalRequired    bool     `yaml:"approval_required"`
 }
 
 type scenarioIssue struct {
@@ -866,6 +1054,7 @@ type report struct {
 	Codex     codexReport     `json:"codex"`
 	Intake    intakeReport    `json:"intake"`
 	Workspace workspaceReport `json:"workspace,omitempty"`
+	Delivery  deliveryReport  `json:"delivery,omitempty"`
 	Prompt    promptReport    `json:"prompt,omitempty"`
 	Failure   failureReport   `json:"failure,omitempty"`
 }
@@ -898,6 +1087,15 @@ type workspaceReport struct {
 	Branch              string `json:"branch,omitempty"`
 	WorktreePath        string `json:"worktree_path,omitempty"`
 	InsideWorkspaceRoot bool   `json:"inside_workspace_root,omitempty"`
+}
+
+type deliveryReport struct {
+	WorkItemKey        string `json:"work_item_key,omitempty"`
+	RunID              int64  `json:"run_id,omitempty"`
+	PRReadyBranch      string `json:"pr_ready_branch,omitempty"`
+	PRApprovalRequired bool   `json:"pr_approval_required,omitempty"`
+	TestsRecorded      bool   `json:"tests_recorded,omitempty"`
+	ReviewArtifact     bool   `json:"review_artifact,omitempty"`
 }
 
 type promptReport struct {
@@ -995,4 +1193,119 @@ func (git *fixtureGit) RemoveWorktree(context.Context, string, string) error {
 	return nil
 }
 
+func (git *fixtureGit) WorktreeDirty(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 var _ leases.Git = (*fixtureGit)(nil)
+
+type fixtureDeliveryExecutor struct{}
+
+func (fixtureDeliveryExecutor) Key() string {
+	return "fixture_delivery"
+}
+
+func (fixtureDeliveryExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+
+func (fixtureDeliveryExecutor) Health(context.Context) (contract.HealthReport, error) {
+	return contract.HealthReport{
+		Status: contract.HealthStatusHealthy,
+	}, nil
+}
+
+func (fixtureDeliveryExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsHeadlessPlan: true,
+		TaskKinds:            []contract.TaskKind{contract.TaskKindGeneral},
+		Scopes:               []string{"project"},
+	}, nil
+}
+
+func (fixtureDeliveryExecutor) RunTask(_ context.Context, spec contract.TaskSpec) (contract.ExecutionResult, error) {
+	worktreePath := strings.TrimSpace(spec.Metadata["worktree_path"])
+	if worktreePath == "" {
+		return contract.ExecutionResult{}, errors.New("worktree_path metadata is required")
+	}
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		return contract.ExecutionResult{}, err
+	}
+	reviewPath := filepath.Join(worktreePath, "ODIN_REVIEW.md")
+	if err := os.WriteFile(reviewPath, []byte("tests: passed\nreview: pr-ready\n"), 0o644); err != nil {
+		return contract.ExecutionResult{}, err
+	}
+	artifactsJSON := `[{"type":"test","status":"passed","command":"fixture deterministic test"},{"type":"review","status":"ready","target":"pr-ready-branch"}]`
+	return contract.ExecutionResult{
+		Handle: contract.TaskHandle{
+			ExecutorKey: "fixture_delivery",
+			ExternalID:  "fixture-delivery-run",
+			Status:      "completed",
+		},
+		Status: "completed",
+		Output: "deterministic tests passed; review artifact ready; branch is PR-ready",
+		Metadata: map[string]string{
+			"operation":       "issue_to_pr_delivery_dry_run",
+			"marker_path":     reviewPath,
+			"marker_written":  "true",
+			"branch_observed": strings.TrimSpace(spec.Metadata["branch_name"]),
+			"artifacts_json":  artifactsJSON,
+		},
+	}, nil
+}
+
+func (fixtureDeliveryExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+
+func (fixtureDeliveryExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return contract.ErrNotImplemented
+}
+
+func (fixtureDeliveryExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, contract.ErrNotImplemented
+}
+
+func externalIssueTaskKey(issue tracker.Issue) string {
+	provider := strings.TrimSpace(issue.Provider)
+	if provider == "" {
+		provider = "github"
+	}
+	return fmt.Sprintf("%s-issue-%d", slugKeyPart(provider), issue.Number)
+}
+
+func slugKeyPart(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(builder.String(), "-")
+}
+
+func deliveryEvidenceFlags(artifacts []sqlite.RunArtifact) (testsRecorded bool, reviewArtifact bool) {
+	for _, artifact := range artifacts {
+		var details map[string]string
+		if err := json.Unmarshal([]byte(artifact.DetailsJSON), &details); err != nil {
+			continue
+		}
+		artifactsJSON := details["artifacts_json"]
+		if strings.Contains(artifactsJSON, `"type":"test"`) && strings.Contains(artifactsJSON, `"status":"passed"`) {
+			testsRecorded = true
+		}
+		if strings.Contains(artifactsJSON, `"type":"review"`) && strings.Contains(artifactsJSON, `"target":"pr-ready-branch"`) {
+			reviewArtifact = true
+		}
+	}
+	return testsRecorded, reviewArtifact
+}
