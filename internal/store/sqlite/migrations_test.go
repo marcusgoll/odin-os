@@ -521,6 +521,45 @@ func TestCreateTaskFailsClosedWhenFollowUpColumnsAreMissing(t *testing.T) {
 	}
 }
 
+func TestMigrateRecordsApprovalGuardMigrationWhenColumnsAlreadyExist(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openMigrationBackfillStore(t)
+	defer store.Close()
+
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations() error = %v", err)
+	}
+	for _, migration := range migrations {
+		if migration.Version >= 41 {
+			continue
+		}
+		if err := store.applyMigration(ctx, migration); err != nil {
+			t.Fatalf("applyMigration(%d) error = %v", migration.Version, err)
+		}
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		ALTER TABLE approvals ADD COLUMN policy_snapshot_hash TEXT NOT NULL DEFAULT '';
+		ALTER TABLE approvals ADD COLUMN runtime_snapshot_hash TEXT NOT NULL DEFAULT '';
+	`); err != nil {
+		t.Fatalf("preseed approval guard columns error = %v", err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	var migrationCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 41`).Scan(&migrationCount); err != nil {
+		t.Fatalf("schema_migrations query error = %v", err)
+	}
+	if migrationCount != 1 {
+		t.Fatalf("schema_migrations version 41 count = %d, want 1", migrationCount)
+	}
+}
+
 func openMigrationBackfillStore(t *testing.T) *Store {
 	t.Helper()
 
