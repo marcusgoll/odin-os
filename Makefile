@@ -2,7 +2,7 @@ GO ?= go
 GOFMT ?= gofmt
 GOFILES := $(shell git ls-files '*.go')
 
-.PHONY: format fmt fmtcheck lint vet test test-alpha test-media test-skills ci build docker-smoke odin-pwa-build odin-pwa-e2e odin-e2e-local odin-e2e-contract odin-actual-use-e2e actual-use-phase0-proof homelab-release-dry-run run clean install-local uninstall-local
+.PHONY: format fmt fmtcheck lint vet test test-alpha test-media test-skills ci build docker-smoke odin-pwa-build odin-pwa-e2e odin-mobile-e2e odin-e2e-local odin-e2e-contract odin-actual-use-e2e actual-use-phase0-proof homelab-release-dry-run run clean install-local uninstall-local
 
 format:
 	$(GOFMT) -w $(GOFILES)
@@ -61,7 +61,7 @@ odin-pwa-e2e:
 	$(GO) test ./internal/api/http -run 'TestMobileShare|TestPWA|TestNotification' -count=1 -v
 
 odin-mobile-e2e:
-	$(GO) test ./internal/api/http -run 'TestMobile|TestPWA' -count=1
+	$(GO) test ./internal/api/http -run 'TestMobile|TestPWA|TestOperationalHandlerServesMobileCapturePWAShell' -count=1 -v
 
 odin-e2e-local:
 	./scripts/odin-e2e-local.sh

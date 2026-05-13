@@ -186,7 +186,7 @@ func TestPWAShellContainsMobileApprovalReviewClient(t *testing.T) {
 	buf := new(bytes.Buffer)
 	_, _ = buf.ReadFrom(resp.Body)
 	body := buf.String()
-	for _, expected := range []string{"Browser Review", "Approvals", "app.js"} {
+	for _, expected := range []string{"Action Required", "Approvals", "Browser Needs Help", "app.js"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("app shell missing %q", expected)
 		}
@@ -200,7 +200,7 @@ func TestPWAShellContainsMobileApprovalReviewClient(t *testing.T) {
 	buf.Reset()
 	_, _ = buf.ReadFrom(resp.Body)
 	js := buf.String()
-	for _, expected := range []string{"/mobile/approvals", "/mobile/review-queue", "/mobile/notifications", "approval_id", "decision"} {
+	for _, expected := range []string{"/mobile/approvals", "/mobile/review-queue", "/mobile/browser/status", "/mobile/notifications", "approval_id", "decision"} {
 		if !strings.Contains(js, expected) {
 			t.Fatalf("app js missing %q", expected)
 		}
