@@ -39,6 +39,8 @@ func TestOperationalHandlerServesInstallablePWAShellAssets(t *testing.T) {
 		`data-screen="work"`,
 		`data-screen="inbox"`,
 		`data-screen="settings"`,
+		`id="admin-token"`,
+		`id="approvals-status"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("/app/ missing %q:\n%s", want, html)

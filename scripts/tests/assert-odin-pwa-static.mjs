@@ -7,7 +7,7 @@ const checks = [
   ['manifest.webmanifest', ['"name":"Odin Operator"', '"start_url":"/app/"', '"display":"standalone"', '"icons"']],
   ['service-worker.js', ['shell-only', "event.request.method !== 'GET'", '/app/offline.html']],
   ['offline.html', ['Offline shell', 'Runtime data is unavailable']],
-  ['app.js', ['/mobile/summary', '/mobile/approvals', '/mobile/review', '/mobile/work', '/mobile/inbox', '/mobile/settings']]
+  ['app.js', ['/mobile/summary', '/mobile/approvals', '/mobile/review', '/mobile/work', '/mobile/inbox', '/mobile/settings', 'data-approval-action', 'confirmation_text', 'expected_policy_snapshot_hash']]
 ];
 
 for (const [file, expected] of checks) {
