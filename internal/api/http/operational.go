@@ -300,6 +300,8 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		}
 		writeJSON(writer, http.StatusOK, view)
 	})
+	registerMobileHandlers(mux, deps, now)
+	registerPWAHandlers(mux)
 	return mux
 }
 

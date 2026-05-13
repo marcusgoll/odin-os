@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#121826">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Odin">
+  <link rel="manifest" href="/app/manifest.webmanifest">
+  <link rel="icon" href="/app/icons/icon-192.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/app/icons/icon-192.svg">
+  <link rel="stylesheet" href="/app/styles.css">
+  <title>Odin Operator</title>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="top-bar">
+      <div>
+        <p class="eyebrow">Authenticated operator shell</p>
+        <h1>Odin</h1>
+      </div>
+      <div class="runtime-pill" id="runtime-pill">loading</div>
+    </header>
+
+    <main class="screen-stack" id="screen-stack">
+      <section class="screen is-active" data-screen="dashboard" aria-labelledby="dashboard-title">
+        <div class="section-title">
+          <h2 id="dashboard-title">Dashboard</h2>
+          <button class="icon-button" type="button" data-refresh aria-label="Refresh runtime data">Refresh</button>
+        </div>
+        <div class="state-line" id="dashboard-state">Loading Odin API...</div>
+        <div class="metric-grid" id="dashboard-metrics"></div>
+        <div class="panel-list" id="dashboard-panels"></div>
+      </section>
+
+      <section class="screen" data-screen="approvals" aria-labelledby="approvals-title">
+        <div class="section-title">
+          <h2 id="approvals-title">Approvals</h2>
+          <button class="icon-button" type="button" data-refresh aria-label="Refresh approvals">Refresh</button>
+        </div>
+        <div class="panel-list" id="approvals-list"></div>
+      </section>
+
+      <section class="screen" data-screen="review" aria-labelledby="review-title">
+        <div class="section-title">
+          <h2 id="review-title">Review Queue</h2>
+          <button class="icon-button" type="button" data-refresh aria-label="Refresh review queue">Refresh</button>
+        </div>
+        <div class="panel-list" id="review-list"></div>
+      </section>
+
+      <section class="screen" data-screen="work" aria-labelledby="work-title">
+        <div class="section-title">
+          <h2 id="work-title">Work & Runs</h2>
+          <button class="icon-button" type="button" data-refresh aria-label="Refresh work and runs">Refresh</button>
+        </div>
+        <div class="panel-list" id="work-list"></div>
+      </section>
+
+      <section class="screen" data-screen="inbox" aria-labelledby="inbox-title">
+        <div class="section-title">
+          <h2 id="inbox-title">Inbox Capture</h2>
+          <button class="icon-button" type="button" data-refresh aria-label="Refresh inbox">Refresh</button>
+        </div>
+        <form class="capture-panel" id="capture-form">
+          <label for="capture-text">New intake</label>
+          <textarea id="capture-text" rows="4" placeholder="Capture is read-only until an Odin write endpoint is designed." disabled></textarea>
+          <button type="submit" disabled>Capture disabled</button>
+          <p id="capture-policy">No offline or background action queue is active.</p>
+        </form>
+        <div class="panel-list" id="inbox-list"></div>
+      </section>
+
+      <section class="screen" data-screen="settings" aria-labelledby="settings-title">
+        <div class="section-title">
+          <h2 id="settings-title">Settings</h2>
+          <button class="icon-button" type="button" data-refresh aria-label="Refresh settings">Refresh</button>
+        </div>
+        <div class="panel-list" id="settings-list"></div>
+      </section>
+    </main>
+
+    <nav class="bottom-nav" aria-label="Primary">
+      <button type="button" class="nav-item is-active" data-target="dashboard"><span>Home</span></button>
+      <button type="button" class="nav-item" data-target="approvals"><span>Approvals</span></button>
+      <button type="button" class="nav-item" data-target="review"><span>Review</span></button>
+      <button type="button" class="nav-item" data-target="work"><span>Work</span></button>
+      <button type="button" class="nav-item" data-target="inbox"><span>Inbox</span></button>
+      <button type="button" class="nav-item" data-target="settings"><span>Settings</span></button>
+    </nav>
+  </div>
+  <script src="/app/app.js" defer></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/app/service-worker.js');
+      });
+    }
+  </script>
+</body>
+</html>
