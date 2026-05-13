@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	coreprojects "odin-os/internal/core/projects"
 	coreworkspace "odin-os/internal/core/workspace"
 	"odin-os/internal/core/workspaces"
 	"odin-os/internal/registry"
@@ -40,6 +41,7 @@ type Dependencies struct {
 	GitHubWebhookSecret string
 	GitHubIssueIngester GitHubIssueIngester
 	RegistrySnapshot    registry.Snapshot
+	Registry            coreprojects.Registry
 }
 
 type AdminActions interface {
@@ -388,6 +390,7 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		}
 		writeJSON(writer, http.StatusOK, view)
 	})
+	registerMobileRoutes(mux, deps, now)
 	return mux
 }
 

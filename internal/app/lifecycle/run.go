@@ -6049,6 +6049,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 				ReadModels:       app.Store.DB(),
 				RegistryHealthy:  healthDeps.RegistryHealthy,
 				RegistrySnapshot: app.RegistrySnapshot,
+				Registry:         app.Registry,
 				Now:              now,
 				Tmux: apihttp.WorkspaceTmuxStatusProvider{
 					Workspaces: coreworkspace.Service{

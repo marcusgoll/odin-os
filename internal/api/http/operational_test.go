@@ -18,6 +18,8 @@ import (
 	"time"
 
 	httpapi "odin-os/internal/api/http"
+	clioverview "odin-os/internal/cli/overview"
+	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/initiatives"
 	coremedia "odin-os/internal/core/media"
 	coreworkspace "odin-os/internal/core/workspace"
@@ -1487,6 +1489,212 @@ func TestOperationalHandlerBrowserSessionHandoffCompleteRejectsInvalidStates(t *
 	assertHandoffCompleteJSONStatus(t, server.URL, "", revokedRequest.HandoffID, http.StatusUnauthorized)
 }
 
+func TestMobileAPIRequiresAuthForReadsAndMutations(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{DB: store.DB()},
+		Metrics:         metricsvc.Service{DB: store.DB()},
+		Store:           store,
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+		AdminToken:      "secret",
+	}))
+	defer server.Close()
+
+	res := mustRequest(t, server, http.MethodGet, "/mobile/status", nil)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /mobile/status unauthenticated status = %d, want %d", res.StatusCode, http.StatusUnauthorized)
+	}
+
+	res = mustRequestWithHeaders(t, server, http.MethodPost, "/mobile/intake/raw", bytes.NewBufferString(`{"kind":"idea","content":"ship mobile"}`), map[string]string{
+		"Authorization": "Bearer wrong",
+	})
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("POST /mobile/intake/raw wrong-token status = %d, want %d", res.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestMobileOverviewUsesCanonicalOverviewProjection(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+	seedOperatorReadModels(t, ctx, store)
+	project := mustProject(t, ctx, store, "alpha")
+	seedDashboardTask(t, ctx, store, project.ID, "mobile-open-work")
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{DB: store.DB()},
+		Metrics:         metricsvc.Service{DB: store.DB()},
+		Store:           store,
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+		AdminToken:      "secret",
+	}))
+	defer server.Close()
+
+	res := mustMobileRequest(t, server, http.MethodGet, "/mobile/overview", "secret", nil)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("GET /mobile/overview status = %d body=%s, want %d", res.StatusCode, string(body), http.StatusOK)
+	}
+	var got struct {
+		ActualUse struct {
+			WorkItemCount        int `json:"work_item_count"`
+			OpenWorkItemCount    int `json:"open_work_item_count"`
+			PendingApprovalCount int `json:"pending_approval_count"`
+			ReviewQueueCount     int `json:"review_queue_count"`
+		} `json:"actual_use"`
+	}
+	decodeJSON(t, res.Body, &got)
+
+	expected, err := (clioverview.Service{
+		Store:           store,
+		ReadinessStatus: "ready",
+		HealthStatus:    "healthy",
+	}).Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
+	if err != nil {
+		t.Fatalf("overview.Build() error = %v", err)
+	}
+	if got.ActualUse.WorkItemCount != expected.ActualUse.WorkItemCount ||
+		got.ActualUse.OpenWorkItemCount != expected.ActualUse.OpenWorkItemCount ||
+		got.ActualUse.PendingApprovalCount != expected.ActualUse.PendingApprovalCount ||
+		got.ActualUse.ReviewQueueCount != expected.ActualUse.ReviewQueueCount {
+		t.Fatalf("mobile overview actual_use = %+v, want canonical %+v", got.ActualUse, expected.ActualUse)
+	}
+}
+
+func TestMobileApprovalDecisionUsesApprovalServiceAndEmitsAudit(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedOperatorReadModels(t, ctx, store)
+	project := mustProject(t, ctx, store, "alpha")
+	task := seedDashboardTask(t, ctx, store, project.ID, "mobile-approval")
+	_, approval, err := store.BlockTaskAndRequestApproval(ctx, sqlite.BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval() error = %v", err)
+	}
+	if _, err := store.UpdateTaskQueueState(ctx, sqlite.UpdateTaskQueueStateParams{
+		TaskID:        task.ID,
+		Status:        "blocked",
+		BlockedReason: "approval_required",
+	}); err != nil {
+		t.Fatalf("UpdateTaskQueueState(approval_required) error = %v", err)
+	}
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Store:      store,
+		ReadModels: store.DB(),
+		AdminToken: "secret",
+	}))
+	defer server.Close()
+
+	body := bytes.NewBufferString(`{"action":"approve","reason":"mobile approval test","decision_by":"mobile-test"}`)
+	res := mustMobileRequest(t, server, http.MethodPost, fmt.Sprintf("/mobile/approvals/%d/decision", approval.ID), "secret", body)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(res.Body)
+		t.Fatalf("POST mobile approval decision status = %d body=%s, want %d", res.StatusCode, string(raw), http.StatusOK)
+	}
+	var response struct {
+		ApprovalID int64  `json:"approval_id"`
+		Status     string `json:"status"`
+	}
+	decodeJSON(t, res.Body, &response)
+	if response.ApprovalID != approval.ID || response.Status != "approved" {
+		t.Fatalf("approval decision response = %+v, want approval %d approved", response, approval.ID)
+	}
+
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if !hasRuntimeEventType(events, runtimeevents.EventApprovalResolved) {
+		t.Fatalf("events = %+v, want approval.resolved audit event", events)
+	}
+}
+
+func TestMobileRawIntakeCreateUsesCanonicalIntakePath(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Store:      store,
+		ReadModels: store.DB(),
+		AdminToken: "secret",
+	}))
+	defer server.Close()
+
+	res := mustMobileRequest(t, server, http.MethodPost, "/mobile/intake/raw", "secret", bytes.NewBufferString(`{"kind":"idea","title":"Mobile idea","content":"Build a governed mobile API"}`))
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusAccepted {
+		raw, _ := io.ReadAll(res.Body)
+		t.Fatalf("POST /mobile/intake/raw status = %d body=%s, want %d", res.StatusCode, string(raw), http.StatusAccepted)
+	}
+	rawBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if strings.Contains(string(rawBody), "Build a governed mobile API") {
+		t.Fatalf("mobile intake response echoed raw content: %s", string(rawBody))
+	}
+	var response struct {
+		IntakeItem struct {
+			ID         int64  `json:"id"`
+			Status     string `json:"status"`
+			Source     string `json:"source"`
+			IntakeType string `json:"intake_type"`
+			Subject    string `json:"subject"`
+		} `json:"intake_item"`
+	}
+	if err := json.Unmarshal(rawBody, &response); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if response.IntakeItem.ID == 0 || response.IntakeItem.Status != "received" || response.IntakeItem.Source != "mobile_api" || response.IntakeItem.IntakeType != "idea" {
+		t.Fatalf("mobile intake response = %+v, want received mobile idea", response.IntakeItem)
+	}
+
+	items, err := store.ListIntakeItems(ctx, sqlite.ListIntakeItemsParams{WorkspaceID: "default"})
+	if err != nil {
+		t.Fatalf("ListIntakeItems() error = %v", err)
+	}
+	if len(items) != 1 || items[0].Subject != "Mobile idea" {
+		t.Fatalf("intake items = %+v, want one Mobile idea", items)
+	}
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if !hasRuntimeEventType(events, runtimeevents.EventIntakeItemCreated) {
+		t.Fatalf("events = %+v, want intake.item_created audit event", events)
+	}
+}
+
 type recordingAdminActions struct {
 	killSwitchOnCalls int
 	pauseIssueID      int64
@@ -1525,6 +1733,26 @@ func mustPost(t *testing.T, url string, token string) *http.Response {
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("POST %s error = %v", url, err)
+	}
+	return response
+}
+
+func mustMobileRequest(t *testing.T, server *httptest.Server, method string, target string, token string, body io.Reader) *http.Response {
+	t.Helper()
+
+	request, err := http.NewRequest(method, server.URL+target, body)
+	if err != nil {
+		t.Fatalf("NewRequest(%s %s) error = %v", method, target, err)
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("%s %s error = %v", method, target, err)
 	}
 	return response
 }
@@ -1627,6 +1855,15 @@ func countBrowserSessionEventTypes(t *testing.T, ctx context.Context, store *sql
 		}
 	}
 	return counts
+}
+
+func hasRuntimeEventType(events []runtimeevents.Record, target runtimeevents.Type) bool {
+	for _, event := range events {
+		if event.Type == target {
+			return true
+		}
+	}
+	return false
 }
 
 func seedDashboardIssue(t *testing.T, ctx context.Context, store *sqlite.Store, repo string, number int, provider string, state string, syncStatus string) {
