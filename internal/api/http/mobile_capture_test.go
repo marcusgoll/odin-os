@@ -93,7 +93,6 @@ func TestOperationalHandlerServesMobileCapturePWAShell(t *testing.T) {
 	html := getURLText(t, server.URL+"/app/")
 	for _, want := range []string{
 		`<link rel="manifest" href="/app/manifest.webmanifest">`,
-		`navigator.serviceWorker.register('/app/service-worker.js')`,
 		`data-capture-kind="note"`,
 		`data-capture-kind="prompt"`,
 		`accept="image/*"`,
@@ -117,6 +116,11 @@ func TestOperationalHandlerServesMobileCapturePWAShell(t *testing.T) {
 		if !strings.Contains(serviceWorker, want) {
 			t.Fatalf("service worker missing %q:\n%s", want, serviceWorker)
 		}
+	}
+
+	appJS := getURLText(t, server.URL+"/app/app.js")
+	if !strings.Contains(appJS, `navigator.serviceWorker.register('/app/service-worker.js')`) {
+		t.Fatalf("app.js missing service worker registration:\n%s", appJS)
 	}
 }
 

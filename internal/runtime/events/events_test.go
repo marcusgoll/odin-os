@@ -162,3 +162,39 @@ func TestMemoryProposalContract(t *testing.T) {
 		t.Fatalf("decoded payload = %#v, want %#v", decoded, want)
 	}
 }
+
+func TestMobileDeviceAuditContract(t *testing.T) {
+	t.Parallel()
+
+	if got := StreamMobileDevice; got != StreamType("mobile_device") {
+		t.Fatalf("StreamMobileDevice = %q, want %q", got, StreamType("mobile_device"))
+	}
+	if got := EventMobileLogin; got != Type("mobile.login") {
+		t.Fatalf("EventMobileLogin = %q, want mobile.login", got)
+	}
+	if got := EventMobileLogout; got != Type("mobile.logout") {
+		t.Fatalf("EventMobileLogout = %q, want mobile.logout", got)
+	}
+	if got := EventMobileIntakeCreated; got != Type("mobile.intake_created") {
+		t.Fatalf("EventMobileIntakeCreated = %q, want mobile.intake_created", got)
+	}
+	if got := EventMobileApprovalResolved; got != Type("mobile.approval_resolved") {
+		t.Fatalf("EventMobileApprovalResolved = %q, want mobile.approval_resolved", got)
+	}
+	if got := EventMobilePushSubscriptionRevoked; got != Type("mobile.push_subscription_revoked") {
+		t.Fatalf("EventMobilePushSubscriptionRevoked = %q, want mobile.push_subscription_revoked", got)
+	}
+
+	payload, err := EncodePayload(MobileIntakeCreatedPayload{
+		DeviceID:     "device-1",
+		SessionID:    2,
+		IntakeItemID: 3,
+		IntakeType:   "idea",
+	})
+	if err != nil {
+		t.Fatalf("EncodePayload(MobileIntakeCreatedPayload) error = %v", err)
+	}
+	if got := string(payload); got != `{"device_id":"device-1","session_id":2,"intake_item_id":3,"intake_type":"idea"}` {
+		t.Fatalf("encoded mobile intake payload = %s", got)
+	}
+}
