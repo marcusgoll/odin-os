@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+const EnvOdinCoreGitRoot = "ODIN_CORE_GIT_ROOT"
 
 type ProjectClass string
 
@@ -131,6 +134,7 @@ func LoadManifestFile(path string) (Config, error) {
 	for index := range cfg.Projects {
 		cfg.Projects[index].SourcePath = path
 		cfg.Projects[index].GitRoot = resolveGitRoot(baseDir, cfg.Projects[index].GitRoot)
+		applyOdinCoreGitRootOverride(&cfg.Projects[index])
 	}
 
 	return cfg, nil
@@ -175,4 +179,18 @@ func resolveGitRoot(baseDir, gitRoot string) string {
 		return gitRoot
 	}
 	return filepath.Clean(filepath.Join(baseDir, gitRoot))
+}
+
+func applyOdinCoreGitRootOverride(project *Manifest) {
+	if project == nil || project.Key != odinCoreKey {
+		return
+	}
+	if project.ProjectClass != ProjectClassSystem && !project.SystemProject {
+		return
+	}
+	override := strings.TrimSpace(os.Getenv(EnvOdinCoreGitRoot))
+	if override == "" {
+		return
+	}
+	project.GitRoot = override
 }
