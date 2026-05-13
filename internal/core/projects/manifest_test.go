@@ -233,6 +233,66 @@ projects:
 	}
 }
 
+func TestLoadManifestFileAppliesOdinCoreGitRootOverride(t *testing.T) {
+	root := t.TempDir()
+	releaseRoot := filepath.Join(root, "release")
+	repoRoot := filepath.Join(root, "odin-os")
+	if err := os.MkdirAll(filepath.Join(releaseRoot, "config"), 0o755); err != nil {
+		t.Fatalf("mkdir release config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir repo git root: %v", err)
+	}
+
+	t.Setenv(EnvOdinCoreGitRoot, repoRoot)
+
+	manifestPath := filepath.Join(releaseRoot, "config", "projects.yaml")
+	if err := os.WriteFile(manifestPath, []byte(`
+version: 1
+projects:
+  - key: odin-core
+    name: Odin Core
+    project_class: system_project
+    system_project: true
+    git_root: ..
+    default_branch: main
+    policy:
+      allowed_commands:
+        - status
+      branch_rules:
+        protected_branches:
+          - main
+        require_worktree: true
+        require_task_branch: true
+        allow_default_branch_mutation: false
+      approval_gates:
+        require_for_governance_changes: true
+        require_for_destructive_operations: true
+        require_for_system_project_changes: true
+      merge_policy:
+        mode: squash
+        allow_direct_to_default_branch: false
+      destructive_operations:
+        allow_reset: false
+        allow_clean: false
+        allow_force_push: false
+        require_explicit_approval: true
+`), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	cfg, err := LoadManifestFile(manifestPath)
+	if err != nil {
+		t.Fatalf("LoadManifestFile error = %v", err)
+	}
+	if got := cfg.Projects[0].GitRoot; got != repoRoot {
+		t.Fatalf("odin-core GitRoot = %q, want %q", got, repoRoot)
+	}
+	if diagnostics := Validate(cfg); len(diagnostics) != 0 {
+		t.Fatalf("Validate diagnostics = %#v, want none", diagnostics)
+	}
+}
+
 func TestLoadManifestFileParsesCutoverPilotProjects(t *testing.T) {
 	t.Parallel()
 

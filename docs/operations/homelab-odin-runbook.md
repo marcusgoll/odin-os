@@ -23,6 +23,7 @@ It is intentionally conservative:
 - Service unit: `deploy/systemd/odin-os.service`
 - Env template: `deploy/systemd/odin-os.env.example`
 - Installed env file: `~/.config/odin/odin-os.env`
+- Source checkout: `~/odin-os`
 - Live symlink: `~/odin-os-live`
 - Release root: `~/.local/share/odin-os/releases/<git-sha>`
 - Runtime root: `~/.local/state/odin-os`
@@ -35,6 +36,56 @@ public internet without a separate exposure review.
 
 Legacy `odin.service`, `odin.env`, and `scripts/dev/install-systemd-service.sh`
 are compatibility assets only. New homelab operation uses `odin-os.service`.
+
+When `odin-core` is loaded from a clean release archive, set
+`ODIN_CORE_GIT_ROOT` to the real source checkout. Release archives intentionally
+omit `.git`, and the system project registry must point at the checkout for
+readiness to stay clean:
+
+```bash
+ODIN_CORE_GIT_ROOT=/home/orchestrator/odin-os
+```
+
+## Public PWA ingress
+
+`odin.marcusgoll.com` is a public PWA ingress, not the full operator API. The
+Cloudflare Tunnel is remote-managed and currently targets `http://odin-overseer:80`
+on Docker network `infrastructure_default`.
+
+The public origin container is named `odin-overseer` for compatibility with that
+remote tunnel route. It runs the current `~/odin-os-live` release with
+`ODIN_HTTP_ADDR=127.0.0.1:9444` inside the container, then places nginx in front
+of Odin as a path gate.
+
+Allowed public paths:
+
+- `/` redirects to `/app/`
+- `/app/` serves the PWA shell and assets
+- `/mobile/` serves the authenticated mobile/PWA API
+- `/healthz` and `/readyz` expose health and fail-closed readiness
+
+All other public paths, including `/metrics` and legacy `/api/v1/*` routes, must
+return `404` at nginx before reaching Odin.
+
+Runtime config lives outside the repo at:
+
+```bash
+/home/orchestrator/.homelab-runtime/odin-pwa-proxy/
+```
+
+The active container must include these environment values:
+
+```bash
+ODIN_ROOT=/state
+ODIN_HTTP_ADDR=127.0.0.1:9444
+ODIN_PROJECTS_OVERLAY=/config/odin-os-projects.local.yaml
+ODIN_CODEX_DRIVER=/config/odin-codex-live-driver.sh
+ODIN_CORE_GIT_ROOT=/home/orchestrator/odin-os
+```
+
+If the Docker-backed public PWA serve process owns the live runtime root,
+`odin-os.service` must be stopped and disabled. Do not run two `odin serve`
+controllers against the same `ODIN_ROOT`.
 
 ## Dry-run release verification
 
