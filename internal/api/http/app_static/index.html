@@ -38,6 +38,7 @@
           <h2 id="approvals-title">Approvals</h2>
           <button class="icon-button" type="button" data-refresh aria-label="Refresh approvals">Refresh</button>
         </div>
+        <div class="state-line" id="approvals-status" role="status">Approval decisions require a live Odin API connection.</div>
         <div class="panel-list" id="approvals-list"></div>
       </section>
 
@@ -76,6 +77,13 @@
           <h2 id="settings-title">Settings</h2>
           <button class="icon-button" type="button" data-refresh aria-label="Refresh settings">Refresh</button>
         </div>
+        <form class="token-panel" id="token-form">
+          <label for="admin-token">Admin token</label>
+          <div class="token-row">
+            <input id="admin-token" name="admin-token" type="password" autocomplete="off" inputmode="text" placeholder="Paste token">
+            <button type="submit">Save</button>
+          </div>
+        </form>
         <div class="panel-list" id="settings-list"></div>
       </section>
     </main>

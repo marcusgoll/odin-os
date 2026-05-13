@@ -19,9 +19,10 @@ html, body {
   background: var(--bg);
   color: var(--text);
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
   letter-spacing: 0;
 }
-button, textarea { font: inherit; }
+button, textarea, input { font: inherit; }
 .app-shell {
   min-height: 100svh;
   display: grid;
@@ -51,6 +52,7 @@ h1, h2, h3, p { margin: 0; }
 h1 { font-size: 1.35rem; line-height: 1.15; }
 h2 { font-size: 1.05rem; line-height: 1.2; }
 h3 { font-size: 0.96rem; line-height: 1.25; }
+h1, h2, h3 { text-wrap: balance; }
 .runtime-pill {
   min-width: 84px;
   border: 1px solid var(--line);
@@ -84,7 +86,7 @@ h3 { font-size: 0.96rem; line-height: 1.25; }
   font-size: 0.84rem;
   font-weight: 700;
 }
-.icon-button:active, .nav-item:active { transform: translateY(1px); }
+.icon-button:active, .nav-item:active, .decision-button:active, .token-panel button:active { transform: scale(0.96); }
 .state-line {
   min-height: 34px;
   border: 1px solid var(--line);
@@ -94,6 +96,9 @@ h3 { font-size: 0.96rem; line-height: 1.25; }
   background: var(--surface);
   font-size: 0.84rem;
 }
+.state-line.ready { color: var(--ok); border-color: rgba(111, 227, 155, 0.45); }
+.state-line.pending { color: var(--warn); border-color: rgba(241, 201, 107, 0.45); }
+.state-line.error { color: var(--danger); border-color: rgba(255, 124, 138, 0.45); }
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -115,6 +120,7 @@ h3 { font-size: 0.96rem; line-height: 1.25; }
   text-transform: uppercase;
 }
 .metric strong { display: block; margin-top: 8px; font-size: 1.7rem; line-height: 1; }
+.metric strong { font-variant-numeric: tabular-nums; }
 .panel-list { display: grid; gap: 10px; }
 .panel {
   border: 1px solid var(--line);
@@ -135,6 +141,7 @@ h3 { font-size: 0.96rem; line-height: 1.25; }
   font-size: 0.8rem;
   line-height: 1.45;
   overflow-wrap: anywhere;
+  text-wrap: pretty;
 }
 .tag {
   flex: none;
@@ -149,7 +156,7 @@ h3 { font-size: 0.96rem; line-height: 1.25; }
 .tag.ready, .tag.running, .tag.enabled { color: var(--ok); }
 .tag.pending, .tag.review_required, .tag.needs_clarification { color: var(--warn); }
 .tag.failed, .tag.error { color: var(--danger); }
-.capture-panel {
+.capture-panel, .token-panel, .decision-form {
   display: grid;
   gap: 8px;
   border: 1px solid var(--line);
@@ -157,22 +164,98 @@ h3 { font-size: 0.96rem; line-height: 1.25; }
   padding: 12px;
   background: var(--surface);
 }
-.capture-panel label {
+.capture-panel label, .token-panel label, .decision-label {
   color: var(--muted);
   font-size: 0.78rem;
   font-weight: 800;
   text-transform: uppercase;
 }
-.capture-panel textarea {
+.capture-panel textarea, .decision-form textarea, .decision-form input, .token-panel input {
   width: 100%;
-  resize: vertical;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px;
   color: var(--text);
   background: #111722;
 }
+.capture-panel textarea, .decision-form textarea { resize: vertical; }
 .capture-panel p { color: var(--muted); font-size: 0.82rem; line-height: 1.45; }
+.token-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+.token-panel button, .decision-button {
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 12px;
+  color: var(--text);
+  background: var(--surface-2);
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+.approval-panel {
+  display: grid;
+  gap: 10px;
+}
+.approval-fields {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+.approval-fields div {
+  display: grid;
+  grid-template-columns: minmax(76px, 0.34fr) minmax(0, 1fr);
+  gap: 8px;
+}
+.approval-fields dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.approval-fields dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.approval-list {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+.approval-list h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+.approval-list ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+.decision-label {
+  display: grid;
+  gap: 6px;
+}
+.action-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.decision-button.approve { color: var(--ok); border-color: rgba(111, 227, 155, 0.5); }
+.decision-button.deny { color: var(--danger); border-color: rgba(255, 124, 138, 0.5); }
+.decision-button.clarify { color: var(--warn); border-color: rgba(241, 201, 107, 0.5); }
+.decision-button:disabled, .token-panel button:disabled, .decision-form textarea:disabled, .decision-form input:disabled {
+  opacity: 0.62;
+}
 .bottom-nav {
   position: fixed;
   left: 0;
