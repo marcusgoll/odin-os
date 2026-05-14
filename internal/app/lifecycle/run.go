@@ -513,13 +513,9 @@ func runOverview(ctx context.Context, app bootstrap.App, args []string, stdout i
 func overviewRuntimeStatus(ctx context.Context, app bootstrap.App) (string, string) {
 	health := healthsvc.Service{DB: app.Store.DB()}
 	registryHealthy := len(app.RegistryDiagnostics) == 0
-	report, err := health.Doctor(ctx, registryHealthy)
+	report, ready, err := health.Readiness(ctx, registryHealthy)
 	if err != nil {
 		return "unknown", "unknown"
-	}
-	_, ready, err := health.Readiness(ctx, registryHealthy)
-	if err != nil {
-		return "unknown", string(report.Status)
 	}
 	if ready {
 		return "ready", string(report.Status)
@@ -956,7 +952,7 @@ func runDoctor(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 		return err
 	}
 
-	report, err := newHealthService(app, healthsvc.DefaultConfig(), cfg).Doctor(ctx, len(app.RegistryDiagnostics) == 0)
+	report, _, err := newHealthService(app, healthsvc.DefaultConfig(), cfg).Readiness(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
@@ -5161,7 +5157,7 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 		encoder := json.NewEncoder(stdout)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(map[string]any{
-			"health":                       string(summary.Status),
+			"health":                       string(readinessReport.Status),
 			"pending_approvals":            len(snapshot.ApprovalsWaiting),
 			"registry_healthy":             summary.RegistryHealthy,
 			"generated_at":                 snapshot.GeneratedAt,
@@ -5178,7 +5174,7 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 
 	companionSwarmCount := len(snapshot.CompanionSwarms)
 	_, err = fmt.Fprintf(stdout, "health=%s pending_approvals=%d stalled_runs=%d active_runs=%d project_transitions=%d companion_swarms=%d registry_healthy=%t worker_dispatch=%s dry_run=%t read_only=%t\n",
-		summary.Status,
+		readinessReport.Status,
 		len(snapshot.ApprovalsWaiting),
 		len(snapshot.StalledRuns),
 		len(snapshot.ActiveRuns),

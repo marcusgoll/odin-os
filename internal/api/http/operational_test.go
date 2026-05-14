@@ -261,7 +261,7 @@ func TestReadyzFailsClosedWhenRuntimeIsNotReady(t *testing.T) {
 	defer server.Close()
 
 	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "healthy")
-	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "healthy")
+	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "degraded")
 }
 
 func TestReadyzFailsClosedWhenRuntimeHeartbeatIsStale(t *testing.T) {
@@ -291,7 +291,7 @@ func TestReadyzFailsClosedWhenRuntimeHeartbeatIsStale(t *testing.T) {
 	defer server.Close()
 
 	assertReportStatus(t, server.URL+"/healthz", http.StatusOK, "healthy")
-	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "healthy")
+	assertReportStatus(t, server.URL+"/readyz", http.StatusServiceUnavailable, "degraded")
 }
 
 func TestReadyzIsUnavailableWhenDoctorIsDegraded(t *testing.T) {

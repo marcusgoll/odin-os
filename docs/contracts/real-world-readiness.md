@@ -30,6 +30,9 @@ Current credited lane:
 - `codex_headless` is the only lane credited for bounded alpha execution when
   `odin doctor --json` reports it healthy and live task dispatch proves it can
   execute through the shared runtime router.
+- `codex_headless` is not credited from command presence alone. The configured
+  `ODIN_CODEX_DRIVER` must return a valid healthy driver health response before
+  `doctor`, `status`, `/readyz`, or worker dispatch can treat it as available.
 
 Explicitly de-scoped lanes until promoted:
 

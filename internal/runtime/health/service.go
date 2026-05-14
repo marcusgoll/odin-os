@@ -242,12 +242,25 @@ func (service Service) Readiness(ctx context.Context, registryHealthy bool) (Rep
 		return Report{}, false, err
 	}
 	if service.ImmediateNotReady != nil && service.ImmediateNotReady.Load() {
+		check := Check{
+			Name:       "runtime",
+			Status:     StatusDegraded,
+			Summary:    "runtime readiness is blocked by an immediate not-ready flag",
+			ObservedAt: report.GeneratedAt,
+		}
+		report.Checks = append(report.Checks, check)
+		report.Status = combineStatus(report.Status, check.Status)
 		return report, false, nil
 	}
 
-	runtimeReady, err := service.runtimeReady(ctx)
+	config := service.resolvedConfig()
+	runtimeCheck, runtimeReady, err := service.runtimeCheck(ctx, report.GeneratedAt, config)
 	if err != nil {
 		return Report{}, false, err
+	}
+	if runtimeCheck.Name != "" {
+		report.Checks = append(report.Checks, runtimeCheck)
+		report.Status = combineStatus(report.Status, runtimeCheck.Status)
 	}
 	return report, safeToDispatch && runtimeReady, nil
 }
@@ -584,15 +597,17 @@ func dispatchSafe(report Report) bool {
 	return true
 }
 
-func (service Service) runtimeReady(ctx context.Context) (bool, error) {
-	if service.DB == nil {
-		return false, nil
+func (service Service) runtimeCheck(ctx context.Context, now time.Time, config Config) (Check, bool, error) {
+	check := Check{
+		Name:       "runtime",
+		Status:     StatusHealthy,
+		Summary:    "runtime is ready",
+		ObservedAt: now,
 	}
-
-	config := service.resolvedConfig()
-	now := time.Now().UTC()
-	if service.Now != nil {
-		now = service.Now().UTC()
+	if service.DB == nil {
+		check.Status = StatusDegraded
+		check.Summary = "runtime database handle is not configured"
+		return check, false, nil
 	}
 
 	var (
@@ -606,19 +621,32 @@ func (service Service) runtimeReady(ctx context.Context) (bool, error) {
 	`, "primary").Scan(&status, &lastHeartbeatAt)
 	switch err {
 	case nil:
-		if status != "ready" {
-			return false, nil
-		}
-		parsed, err := time.Parse(time.RFC3339Nano, lastHeartbeatAt)
-		if err != nil {
-			return false, err
-		}
-		return !parsed.Before(now.Add(-config.RuntimeHeartbeatTTL)), nil
 	case sql.ErrNoRows:
-		return false, nil
+		return Check{}, false, nil
 	default:
-		return false, err
+		return Check{}, false, err
 	}
+
+	check.Details = map[string]string{
+		"status":            status,
+		"last_heartbeat_at": lastHeartbeatAt,
+	}
+	if status != "ready" {
+		check.Status = StatusDegraded
+		check.Summary = "runtime status is not ready"
+		return check, false, nil
+	}
+
+	parsed, err := time.Parse(time.RFC3339Nano, lastHeartbeatAt)
+	if err != nil {
+		return Check{}, false, err
+	}
+	if parsed.Before(now.Add(-config.RuntimeHeartbeatTTL)) {
+		check.Status = StatusDegraded
+		check.Summary = "runtime heartbeat is stale"
+		return check, false, nil
+	}
+	return check, true, nil
 }
 
 func (service Service) resolvedConfig() Config {

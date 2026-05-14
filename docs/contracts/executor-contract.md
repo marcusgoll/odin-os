@@ -63,6 +63,18 @@ Requirements may express:
 - route selection may prefer headless lanes, but runtime execution must fail explicitly when no configured headless driver satisfies the route
 - API and broker executors remain distinct classes; they are not substitutes for a required harness-driver lane
 
+## Codex live-driver readiness
+
+`codex_headless` readiness is earned by the configured driver health contract,
+not by the existence of an executable file. When `ODIN_CODEX_DRIVER` is set,
+`Health` must invoke the driver with a JSON health request and accept only a
+valid health response status. Missing commands, failed commands, invalid JSON,
+invalid health statuses, timeouts, or unavailable health responses make the lane
+unavailable for `doctor`, `status`, `/readyz`, and dispatch readiness.
+
+Legacy run-only drivers may still be used by explicit manual run paths while
+compatibility remains, but they must not make the live worker lane healthy.
+
 ## Worker environment allowlist
 
 Worker and harness-driver subprocesses must build their environment through
