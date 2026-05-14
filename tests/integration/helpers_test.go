@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"odin-os/internal/core/projects"
+	"odin-os/internal/migration/extractor"
 	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tools/catalog"
@@ -478,7 +479,10 @@ func legacyOrchestratorSourceRoot(t *testing.T) string {
 
 	const legacyRoot = "/home/orchestrator/odin-orchestrator"
 	if _, err := os.Stat(legacyRoot); err == nil {
-		return legacyRoot
+		candidates, scanErr := extractor.Scan(legacyRoot)
+		if scanErr == nil && len(candidates) > 0 {
+			return legacyRoot
+		}
 	}
 
 	root := t.TempDir()
