@@ -199,14 +199,32 @@ rsync -a --delete --exclude .git --exclude .odin --exclude .worktrees ./ "$relea
 Preserve the rollback target before repointing:
 
 ```bash
-previous_target="$(readlink -f "$HOME/odin-os-live" || true)"
-printf '%s\n' "$previous_target" > "$HOME/.local/state/odin-os/last-release-target.txt"
+live_target="$HOME/odin-os-live"
+previous_target="$(readlink -f "$live_target" || true)"
+previous_target_kind="missing"
+if [ -L "$live_target" ]; then
+  previous_target_kind="symlink"
+elif [ -e "$live_target" ]; then
+  previous_target_kind="directory"
+fi
+test -n "$previous_target"
+test "$previous_target_kind" != "missing"
+test -x "$previous_target/bin/odin"
 ```
 
 Repoint only after backup verification and operator approval:
 
 ```bash
-ln -sfn "$release_dir" "$HOME/odin-os-live"
+backup_dir="${backup_dir:?run and verify backup in this shell before cutover}"
+if [ "$previous_target_kind" = "directory" ]; then
+  preserved_target="$backup_dir/odin-os-live.previous"
+  test ! -e "$preserved_target"
+  mv "$live_target" "$preserved_target"
+  previous_target="$preserved_target"
+fi
+printf '%s\n' "$previous_target" > "$HOME/.local/state/odin-os/last-release-target.txt"
+ln -sfnT "$release_dir" "$live_target"
+test "$(readlink -f "$live_target")" = "$release_dir"
 systemctl --user restart odin-os.service
 ```
 
@@ -305,7 +323,7 @@ Rollback uses the preserved previous symlink target and the verified backup.
 ```bash
 previous_target="$(cat "$HOME/.local/state/odin-os/last-release-target.txt")"
 systemctl --user stop odin-os.service
-ln -sfn "$previous_target" "$HOME/odin-os-live"
+ln -sfnT "$previous_target" "$HOME/odin-os-live"
 systemctl --user start odin-os.service
 ODIN_ENV_FILE=~/.config/odin/odin-os.env scripts/healthcheck.sh
 ```

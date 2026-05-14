@@ -7,6 +7,7 @@ cd "${repo_root}"
 release_sha="$(git rev-parse --short=12 HEAD)"
 release_root="${ODIN_DRY_RUN_RELEASE_ROOT:-$HOME/.local/share/odin-os/releases/${release_sha}}"
 live_link="${ODIN_LIVE_LINK:-$HOME/odin-os-live}"
+backup_root="${ODIN_DRY_RUN_BACKUP_ROOT:-$HOME/.local/state/odin-os/backups/<timestamp>}"
 service_name="${ODIN_SERVICE_NAME:-odin-os.service}"
 proof_tmp="$(mktemp -d)"
 cleanup() {
@@ -67,7 +68,11 @@ ODIN_CONFIG_HOME="${proof_tmp}/config" scripts/install-service.sh --dry-run --st
 echo "== update dry-run =="
 quote_command mkdir -p "${release_root}"
 quote_command rsync -a --delete --exclude .git --exclude .odin --exclude .worktrees "${repo_root}/" "${release_root}/"
-quote_command ln -sfn "${release_root}" "${live_link}"
+if [[ -e "${live_link}" && ! -L "${live_link}" ]]; then
+  quote_command mkdir -p "${backup_root}"
+  quote_command mv "${live_link}" "${backup_root}/odin-os-live.previous"
+fi
+quote_command ln -sfnT "${release_root}" "${live_link}"
 quote_command systemctl --user restart "${service_name}"
 
 echo "== release gates on isolated runtime =="
