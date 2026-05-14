@@ -177,6 +177,25 @@ printf '{"status":"completed","adapter_kind":"huginn_live"}'
 	}
 }
 
+func TestLiveAdapterRejectsArgsWhenOnlyExecutableIsAllowlisted(t *testing.T) {
+	sentinel := filepath.Join(t.TempDir(), "executed")
+	script := writeHuginnBrowserFixture(t, `#!/usr/bin/env bash
+touch "$1"
+cat >/dev/null
+printf '{"status":"completed","adapter_kind":"huginn_live"}'
+`)
+	response, err := LiveAdapter{Command: script + " " + sentinel, Timeout: time.Second, AllowedCommands: []string{script}}.Run(context.Background(), validRequest())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if response.Status != "failed" || response.ErrorCode != "command_not_allowed" {
+		t.Fatalf("response = %+v, want command_not_allowed failure", response)
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("sentinel stat error = %v, want arg-bearing command not executed without exact allowlist entry", err)
+	}
+}
+
 func TestLiveAdapterEmptyAllowlistBlocksExecution(t *testing.T) {
 	sentinel := filepath.Join(t.TempDir(), "executed")
 	script := writeHuginnBrowserFixture(t, `#!/usr/bin/env bash

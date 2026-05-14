@@ -336,8 +336,15 @@ func trimAllowedCommands(commands []string) []string {
 func commandAllowed(command string, executable string, allowedCommands []string) bool {
 	command = strings.TrimSpace(command)
 	executable = strings.TrimSpace(executable)
+	commandHasArgs := command != executable
 	for _, allowed := range trimAllowedCommands(allowedCommands) {
-		if allowed == command || allowed == executable {
+		if commandHasArgs {
+			if allowed == command {
+				return true
+			}
+			continue
+		}
+		if allowed == executable {
 			return true
 		}
 	}
