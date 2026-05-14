@@ -280,7 +280,7 @@ func runServeOnceForFollowUpTest(t *testing.T, root string) error {
 
 	originalListen := serveListen
 	serveListen = func(string, string) (net.Listener, error) {
-		return errTestListener{}, nil
+		return followUpTestListener{root: root}, nil
 	}
 	defer func() {
 		serveListen = originalListen
@@ -291,8 +291,30 @@ func runServeOnceForFollowUpTest(t *testing.T, root string) error {
 	return err
 }
 
-type errTestListener struct{}
+type followUpTestListener struct {
+	root string
+}
 
-func (errTestListener) Accept() (net.Conn, error) { return nil, errors.New("listener exploded") }
-func (errTestListener) Close() error              { return nil }
-func (errTestListener) Addr() net.Addr            { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
+func (listener followUpTestListener) Accept() (net.Conn, error) {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		store, err := sqlite.Open(filepath.Join(listener.root, "data", "odin.db"))
+		if err == nil {
+			var eventCount int
+			err = store.DB().QueryRowContext(context.Background(), `
+				SELECT COUNT(*)
+				FROM events
+				WHERE event_type IN ('follow_up.materialized', 'follow_up.paused')
+			`).Scan(&eventCount)
+			_ = store.Close()
+			if err == nil && eventCount > 0 {
+				return nil, errors.New("listener exploded")
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return nil, errors.New("listener exploded: timed out waiting for follow-up startup event")
+}
+
+func (followUpTestListener) Close() error   { return nil }
+func (followUpTestListener) Addr() net.Addr { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
