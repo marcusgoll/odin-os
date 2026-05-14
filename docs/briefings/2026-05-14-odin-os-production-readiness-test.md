@@ -117,6 +117,23 @@ live runtime state.
 | `family-ops` | 1 | Plaid zero transactions after transport fix and Robinhood account correlation | `4` | Treat as a finance-data correctness follow-up requiring read-only evidence first. |
 | `odin-core` | 1 | Production readiness trigger materialized work without acceptance criteria on the installed release | `45` | Should be re-proven only after the merged trigger acceptance-criteria fix is installed. |
 
+## Provider Readiness Envelope
+
+Provider readiness is explicitly de-scoped beyond the current healthy
+`codex_headless` lane. This envelope was produced from `config/executors.yaml`,
+`docs/contracts/real-world-readiness.md`, and `./bin/odin doctor --json`.
+
+| Executor key | Config class | Current doctor state | Readiness credit | Required before crediting |
+| --- | --- | --- | --- | --- |
+| `codex_headless` | `plan_backed_cli` | Healthy | Credited for bounded alpha only | Keep proving dispatch through real `odin` runtime state after live release cutover. |
+| `claude_code_headless` | `plan_backed_cli` | Unhealthy | Not credited | Implement and prove a real runtime `RunTask` path plus fail-closed command/credential handling. |
+| `gemini_cli_headless` | `plan_backed_cli` | Unhealthy | Not credited | Implement and prove a real runtime `RunTask` path plus fail-closed command/credential handling. |
+| `openai_api` | `api_executor` | Unhealthy | Not credited | Implement and prove provider-backed execution, secret-safe config, runtime dispatch evidence, and fail-closed missing-credential behavior. |
+| `anthropic_api` | `api_executor` | Unhealthy | Not credited | Implement and prove provider-backed execution, secret-safe config, runtime dispatch evidence, and fail-closed missing-credential behavior. |
+| `google_api` | `api_executor` | Unhealthy | Not credited | Implement and prove provider-backed execution, secret-safe config, runtime dispatch evidence, and fail-closed missing-credential behavior. |
+| `xai_api` | `api_executor` | Unhealthy | Not credited | Implement and prove provider-backed execution, secret-safe config, runtime dispatch evidence, and fail-closed missing-credential behavior. |
+| `openrouter_api` | `broker_executor` | Unhealthy | Not credited | Implement and prove broker-backed execution, secret-safe config, runtime dispatch evidence, and fail-closed missing-credential behavior. |
+
 ## Reuse Plan
 
 - Keep installed `odin` as the live operator proof path and repo-local
