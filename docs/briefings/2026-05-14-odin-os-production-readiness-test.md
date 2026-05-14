@@ -100,6 +100,23 @@ doctor output now names the healthy and unhealthy executor keys.
 - Provider breadth is limited. Current readiness depends on one live executor
   lane, not all configured executors.
 
+## Follow-Up Obligation Classification
+
+The 45 active follow-up obligations are intentionally classified, not resolved.
+This classification was produced from `./bin/odin followup list --json` on the
+live runtime state.
+
+| Project | Count | Failure family | Obligation IDs | Disposition |
+| --- | ---: | --- | --- | --- |
+| `pbs` | 29 | GitHub event review failures for push, pull request opened, synchronize, edited, closed, ready-for-review, and review-submitted events | `5`, `12`-`39` | Batch triage in the PBS repo; likely consolidate duplicate event-review failures before executing individual retries. |
+| `pbs` | 7 | Python dependency/update CI failures from `pip` update tasks | `6`-`9`, `40`-`42` | Treat as one PBS dependency/CI lane before clearing duplicates. |
+| `pbs` | 4 | Docker update CI failures | `10`, `11`, `43`, `44` | Treat as one PBS Docker build lane before clearing duplicates. |
+| `pbs` | 1 | Pilot SSH intake smoke failure | `1` | Inspect separately because it is an older smoke/intake proof, not part of the May CI cluster. |
+| `family-ops` | 1 | Family Ops shadow smoke failure | `2` | Verify whether the shadow smoke is still a valid production-readiness gate before retry. |
+| `family-ops` | 1 | Plaid transactions unknown `account_id` field triage | `3` | Treat as a schema/ingest compatibility follow-up. |
+| `family-ops` | 1 | Plaid zero transactions after transport fix and Robinhood account correlation | `4` | Treat as a finance-data correctness follow-up requiring read-only evidence first. |
+| `odin-core` | 1 | Production readiness trigger materialized work without acceptance criteria on the installed release | `45` | Should be re-proven only after the merged trigger acceptance-criteria fix is installed. |
+
 ## Reuse Plan
 
 - Keep installed `odin` as the live operator proof path and repo-local
@@ -170,6 +187,10 @@ Commands run from `/home/orchestrator/odin-os` on 2026-05-14:
 | Live overview after conversion | `./bin/odin overview --json` | `actual_use.status=action_required`, `action_required_count=45`, `review_queue_count=0`, `blocked_work_item_count=45`, `failed_work_item_count=0`, `follow_up_obligation_count=45`, `due_follow_up_obligation_count=45`, trigger `materialized_count=1`. |
 | Live follow-up project triage | `./bin/odin followup list --json | jq '{count:(.obligations|length), by_project:([.obligations[].target_project_key] | group_by(.) | map({project:.[0], count:length}))}'` | 45 obligations grouped by project: `pbs=41`, `family-ops=3`, `odin-core=1`. |
 | Provider readiness detail | `./bin/odin doctor --json` | Overall `healthy`; executor check names `codex_headless` as healthy and seven unhealthy executor keys. |
+| Public PWA ingress allowed routes | `curl -sk -o /tmp/odin-route-body -w '%{http_code} %{content_type} %{redirect_url}\n' https://odin.marcusgoll.com/ https://odin.marcusgoll.com/app/ https://odin.marcusgoll.com/app/app.js https://odin.marcusgoll.com/app/manifest.webmanifest` | `/` returned `302` to `/app/`; `/app/` returned `200 text/html`; `/app/app.js` returned `200 text/javascript`; `/app/manifest.webmanifest` returned `200 application/manifest+json`. |
+| Public mobile API auth gate | `curl -sk -o /tmp/odin-route-body -w '%{http_code} %{content_type}\n' https://odin.marcusgoll.com/mobile/status https://odin.marcusgoll.com/mobile/overview https://odin.marcusgoll.com/mobile/review-queue https://odin.marcusgoll.com/mobile/browser/status https://odin.marcusgoll.com/mobile/devices/register https://odin.marcusgoll.com/mobile/` | Concrete mobile endpoints returned `401 application/json` with `admin_auth_required`; `GET /mobile/devices/register` returned `405 Method Not Allowed`; `/mobile/` returned `404` because there is no registered root endpoint. |
+| Public health/readiness ingress | `curl -sk -o /tmp/odin-route-body -w '%{http_code} %{content_type}\n' https://odin.marcusgoll.com/healthz https://odin.marcusgoll.com/readyz` | `/healthz` returned `200 application/json`; `/readyz` returned `503 application/json`, which is fail-closed readiness. Source tests intentionally allow a healthy doctor report body with HTTP 503 when runtime readiness is not established. |
+| Public denied route gate | `curl -sk -o /tmp/odin-route-body -w '%{http_code} %{content_type}\n' https://odin.marcusgoll.com/metrics https://odin.marcusgoll.com/api/v1/status https://odin.marcusgoll.com/api/v1/overview https://odin.marcusgoll.com/api/health https://odin.marcusgoll.com/admin` | All denied operator/API/metrics paths returned `404 text/html` at the nginx public path gate. |
 | Homelab release dry-run | `make homelab-release-dry-run` | Passed. It built the repo-local binaries, checked backup/restore/verify/serve help, ran installer dry-run in a temp config root, printed release update commands, and proved fail-closed readiness against an isolated runtime without repointing or restarting production. |
 | Stub browser proof | isolated `./bin/odin browser run --worker-mode browser --url https://example.com ...` | Recorded `adapter_kind=stub_local`, `browser_proof_kind=stub_contract_only`, `real_browser_evidence=false`, and action log containing `no_live_browser_launched`. |
 | Live browser proof | isolated `ODIN_BROWSER_ADAPTER=live ODIN_HUGINN_BROWSER_COMMAND=/home/orchestrator/odin-os/bin/huginn-browser-worker ODIN_HUGINN_BROWSER_ALLOWED_COMMANDS=/home/orchestrator/odin-os/bin/huginn-browser-worker ./bin/odin browser run --goal-id <id> --url https://example.com --allowed-domain example.com --worker-mode browser --evidence-required --json` | Passed with `adapter_kind=huginn_live`, `browser_proof_kind=live_browser_readonly`, `real_browser_evidence=true`, one screenshot, page title `Example Domain`, and action log containing `browser_mode_selected`, `opened_start_url`, `captured_read_only_evidence`, and `screenshot_captured`. |
@@ -200,6 +221,9 @@ Commands run from `/home/orchestrator/odin-os` on 2026-05-14:
 - The trigger acceptance-criteria fix is repo-local only until a reviewed
   release is installed. The installed release may still create non-dispatchable
   automation-trigger work before deployment.
+- Public ingress is path-gated correctly for the tested route matrix, but live
+  `/readyz` still returns HTTP `503` until the public runtime proves readiness
+  after a reviewed release cutover.
 - Authenticated browser sessions, reusable profile attach, and real login
   handoff remain partial/future by contract. The current behavior is correctly
   fail-closed, not ready.

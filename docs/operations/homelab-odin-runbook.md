@@ -61,7 +61,8 @@ Allowed public paths:
 
 - `/` redirects to `/app/`
 - `/app/` serves the PWA shell and assets
-- `/mobile/` serves the authenticated mobile/PWA API
+- `/mobile/*` serves concrete authenticated mobile/PWA API endpoints; the
+  `/mobile/` root may return `404` when no root endpoint is registered
 - `/healthz` and `/readyz` expose health and fail-closed readiness
 
 All other public paths, including `/metrics` and legacy `/api/v1/*` routes, must
