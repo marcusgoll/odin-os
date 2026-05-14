@@ -28,7 +28,10 @@ Proof expectations follow [docs/contracts/verification-model.md](/home/orchestra
 - Any external project used in alpha is explicitly registered and kept in `shadow` mode unless an audited transition says otherwise.
 - Any project allowed to mutate is in `cutover` or an explicitly allowlisted `limited_action` state.
 - Mutating task runs use leased task-owned branches and worktrees.
-- Only the `codex_headless` lane is relied on for live execution in this alpha. Other executor adapters remain contract-level or fallback-only until promoted later.
+- Only the `codex_headless` lane is relied on for live execution in this alpha.
+  Other configured executor adapters remain contract-level, fallback-only, or
+  explicitly de-scoped until they satisfy the provider promotion requirements in
+  [docs/contracts/real-world-readiness.md](/home/orchestrator/odin-os/docs/contracts/real-world-readiness.md).
 
 ## Explicit deferrals
 

@@ -19,6 +19,46 @@ Rules:
 - The lane must produce real task output, not a placeholder marker, canned completion string, or deferred stub.
 - The lane must be observable through the runtime so health and readiness checks can distinguish it from contract-only wiring.
 
+## Provider readiness envelope
+
+Executor configuration is not provider readiness. A lane may appear in
+`config/executors.yaml` for routing and future promotion work without being
+credited as production-ready.
+
+Current credited lane:
+
+- `codex_headless` is the only lane credited for bounded alpha execution when
+  `odin doctor --json` reports it healthy and live task dispatch proves it can
+  execute through the shared runtime router.
+
+Explicitly de-scoped lanes until promoted:
+
+- `claude_code_headless`
+- `gemini_cli_headless`
+- `openai_api`
+- `anthropic_api`
+- `google_api`
+- `xai_api`
+- `openrouter_api`
+
+These lanes must not be used to widen readiness claims while `doctor` reports
+them unhealthy, stale, missing, or contract-only.
+
+Promotion requirements for any additional lane:
+
+- A repo-owned adapter implements `RunTask` without returning
+  `contract.ErrNotImplemented`, placeholder output, or stub-only evidence.
+- Runtime configuration supplies the required credentials, command, or provider
+  endpoint without exposing secrets in config, logs, events, PRs, or evidence
+  payloads.
+- `odin doctor --json` reports the lane healthy by key.
+- A real `odin` task dispatch routes to that lane and records an auditable run
+  result through the shared runtime state, not a one-off script.
+- Failure mode proof shows the lane fails closed when credentials, commands,
+  allowlists, or provider health are missing.
+- The readiness briefing names the lane, command evidence, and remaining
+  provider-specific risks before it is credited.
+
 ## Fresh runtime readiness
 
 - A fresh runtime without a configured driver is not ready.
