@@ -91,6 +91,7 @@ var (
 	serveSelfHealLoopInterval = 30 * time.Second
 	serveMetricsLoopInterval  = 1 * time.Minute
 	serveOperationTimeout     = 30 * time.Second
+	serveInitialHealthRetry   = 1 * time.Second
 	serveHealthConfig         = healthsvc.DefaultConfig()
 	serveListen               = net.Listen
 	runTUI                    = tui.Run
@@ -6202,7 +6203,9 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 			logBackgroundError(logger, "media_supervisor", err)
 		}
 	}
-	runHealthCycle(operationCtx, healthDeps, logger)
+	healthCtx, cancelHealth := serveOperationContext(operationCtx)
+	runHealthCycle(healthCtx, healthDeps, logger)
+	cancelHealth()
 	if err := attemptDispatchIfReady(operationCtx, healthService, healthDeps.RegistryHealthy, jobService); err != nil {
 		logBackgroundError(logger, "task_runner", err)
 	}
@@ -6476,17 +6479,22 @@ func runLeaseLoop(ctx context.Context, operationCtx context.Context, wg *sync.Wa
 func runHealthLoop(ctx context.Context, operationCtx context.Context, wg *sync.WaitGroup, deps healthLoopDeps, logger *logs.Logger, interval time.Duration) {
 	defer wg.Done()
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	firstInterval := interval
+	if serveInitialHealthRetry > 0 && serveInitialHealthRetry < firstInterval {
+		firstInterval = serveInitialHealthRetry
+	}
+	timer := time.NewTimer(firstInterval)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			healthCtx, cancel := serveOperationContext(operationCtx)
 			runHealthCycle(healthCtx, deps, logger)
 			cancel()
+			timer.Reset(interval)
 		}
 	}
 }
