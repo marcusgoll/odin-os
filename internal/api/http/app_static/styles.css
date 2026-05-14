@@ -60,6 +60,13 @@ body {
   gap: 12px;
 }
 
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .capture-panel,
 .operator-section,
 .confirmation-panel {
@@ -134,6 +141,55 @@ h3,
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+}
+
+.capture-panel details {
+  display: grid;
+  gap: 12px;
+}
+
+.capture-panel summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.capture-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.capture-panel summary span:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.summary-action {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 10px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.capture-panel details[open] .summary-action {
+  color: var(--primary);
+}
+
+.capture-panel details[open] .summary-action::before {
+  content: "Close ";
+}
+
+.capture-panel details:not([open]) .summary-action::before {
+  content: "Open ";
+}
+
+.capture-panel form {
+  margin-top: 12px;
 }
 
 .capture-tabs label,
@@ -223,6 +279,13 @@ textarea {
   color: var(--text);
 }
 
+.ghost-button.registered {
+  color: var(--primary);
+  border-color: var(--primary);
+  cursor: default;
+  opacity: 1;
+}
+
 .danger-button {
   background: var(--danger);
   border-color: var(--danger);
@@ -265,6 +328,7 @@ textarea {
   border-radius: 8px;
   padding: 10px;
   background: var(--panel-soft);
+  min-width: 0;
 }
 
 .status-card.urgent,
@@ -301,8 +365,21 @@ textarea {
   align-items: flex-start;
 }
 
+.card-row h3,
+.card-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .card-body {
   margin-top: 7px;
+  overflow-wrap: anywhere;
+}
+
+.badge {
+  max-width: 48%;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 
 .confirmation-panel {
@@ -344,11 +421,20 @@ textarea {
 
 @media (max-width: 560px) {
   .shell {
-    padding: 10px 10px 84px;
+    padding: 10px 10px 18px;
   }
 
   .hero {
     padding: 14px;
+    display: grid;
+  }
+
+  .hero-actions {
+    justify-content: stretch;
+  }
+
+  .hero-actions button {
+    flex: 1;
   }
 
   .section-heading,
@@ -368,9 +454,21 @@ textarea {
   }
 
   .capture-fab {
-    left: 16px;
-    right: 16px;
+    position: static;
+    display: block;
     width: auto;
+    margin: 4px 16px 16px;
+  }
+
+  .card-row {
+    display: grid;
+    gap: 6px;
+  }
+
+  .badge {
+    max-width: 100%;
+    width: fit-content;
+    text-align: left;
   }
 }
 

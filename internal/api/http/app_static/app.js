@@ -8,10 +8,13 @@ const failedList = document.querySelector('#failed-uploads');
 const dashboardError = document.querySelector('#dashboard-error');
 const offlineState = document.querySelector('#offline-state');
 const homeSummary = document.querySelector('#home-summary');
+const registerButton = document.querySelector('#register-device');
+const captureDetails = document.querySelector('#capture-details');
 let voiceBlob = null;
 let recorder = null;
 let chunks = [];
 let pendingApprovalDecision = null;
+let registeredSession = false;
 
 function csrfToken() {
   return sessionStorage.getItem(csrfKey) || '';
@@ -34,6 +37,17 @@ function setStatus(message) {
   statusEl.textContent = message;
 }
 
+function setRegisteredState(authenticated) {
+  registeredSession = authenticated;
+  registerButton.disabled = authenticated;
+  registerButton.classList.toggle('registered', authenticated);
+  registerButton.textContent = authenticated ? 'Registered' : 'Register';
+  registerButton.setAttribute(
+    'aria-label',
+    authenticated ? 'Mobile device registered for this browser session' : 'Register this mobile device',
+  );
+}
+
 function showError(message) {
   dashboardError.hidden = !message;
   dashboardError.textContent = message || '';
@@ -46,6 +60,13 @@ function setCount(id, value) {
 
 function clearNode(node) {
   node.textContent = '';
+}
+
+function humanizeToken(value) {
+  return String(value || '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function emptyCard(message, detail) {
@@ -197,11 +218,13 @@ function registrationFailureMessage(error) {
 async function refreshDashboard() {
   showError('');
   const authenticated = await hasRegisteredSession();
+  setRegisteredState(authenticated);
   if (!authenticated) {
     renderAuthRequired();
     setStatus('Register this device to load Odin projections.');
     return;
   }
+  renderLoading();
   try {
     const [status, overview, reviewQueue, approvals, browser, notifications] = await Promise.all([
       mobileFetch('/mobile/status'),
@@ -215,6 +238,7 @@ async function refreshDashboard() {
   } catch (error) {
     renderAuthRequired();
     if (error.code === 'admin_auth_required') {
+      setRegisteredState(false);
       setStatus('Register this device to load Odin projections.');
       showError('');
       return;
@@ -225,6 +249,12 @@ async function refreshDashboard() {
 
 function renderAuthRequired() {
   homeSummary.textContent = 'Register this device to load live projections.';
+  setCount('#action-count', 0);
+  setCount('#approvals-count', 0);
+  setCount('#failed-blocked-count', 0);
+  setCount('#inbox-count', 0);
+  setCount('#running-work-count', 0);
+  setCount('#browser-count', 0);
   for (const id of [
     '#action-required-list',
     '#approvals-list',
@@ -241,10 +271,36 @@ function renderAuthRequired() {
   }
 }
 
+function renderLoading() {
+  homeSummary.textContent = 'Loading live Odin projections...';
+  setStatus(registeredSession ? 'Device registered. Loading projections...' : 'Loading projections...');
+  setCount('#action-count', '...');
+  setCount('#approvals-count', '...');
+  setCount('#failed-blocked-count', '...');
+  setCount('#inbox-count', '...');
+  setCount('#running-work-count', '...');
+  setCount('#browser-count', '...');
+  for (const id of [
+    '#action-required-list',
+    '#approvals-list',
+    '#failed-blocked-list',
+    '#today-list',
+    '#inbox-list',
+    '#running-work-list',
+    '#browser-list',
+    '#quiet-list',
+  ]) {
+    const node = document.querySelector(id);
+    clearNode(node);
+    node.appendChild(emptyCard('Loading live projections', 'Odin is reading the current operator queues.'));
+  }
+}
+
 function renderDashboard({ status, overview, reviewQueue, approvals, browser, notifications }) {
   const reviewItems = reviewQueue.items || [];
   const approvalItems = approvals.items || [];
   const actionCount = overview.actual_use?.action_required_count ?? reviewItems.length;
+  setStatus('Device registered for this browser session.');
   homeSummary.textContent = actionCount > 0
     ? `${actionCount} action-required item${actionCount === 1 ? '' : 's'} from live projections.`
     : 'No action-required rows in current projections.';
@@ -264,11 +320,23 @@ function renderActionRequired(overview, reviewItems, browser) {
   clearNode(node);
   const items = [];
   for (const item of reviewItems.slice(0, 4)) {
-    items.push(projectionCard('urgent', item.title || item.object_key, item.source_type, item.reason || item.status));
+    items.push(projectionCard('urgent', item.title || item.object_key, humanizeToken(item.source_type), item.reason || item.status));
   }
   const loginNeeds = (browser.login_requests || []).filter((item) => item.status !== 'completed');
   for (const item of loginNeeds.slice(0, 2)) {
-    items.push(projectionCard('warn', `Browser login request ${item.id}`, item.status, `Session ${item.session_id} expires ${item.expires_at}`));
+    items.push(projectionCard('warn', `Browser login request ${item.id}`, humanizeToken(item.status), `Session ${item.session_id} expires ${item.expires_at}`));
+  }
+  if (items.length < 4) {
+    const blocked = overview.observability?.blocked_work || [];
+    for (const item of blocked.slice(0, 4 - items.length)) {
+      items.push(projectionCard('warn', item.work_item_key, humanizeToken(item.reason || item.source), `${item.project_key || 'workspace'} remains blocked.`));
+    }
+  }
+  if (items.length < 4) {
+    const recovery = overview.observability?.recovery_guidance || [];
+    for (const item of recovery.slice(0, 4 - items.length)) {
+      items.push(projectionCard('warn', item.work_item_key, humanizeToken(item.decision), item.recovery_recommendation || item.last_error || 'Inspect failed work before retry.'));
+    }
   }
   if (items.length === 0) {
     items.push(emptyCard('No action-required rows', 'Odin overview has no review, blocked, failed, or browser intervention rows right now.'));
@@ -288,7 +356,7 @@ function renderApprovals(items) {
   for (const item of items) {
     const actions = Array.isArray(item.actions) && item.actions.length ? item.actions : ['approve', 'deny'];
     const actionText = actions.join(', ');
-    const risk = item.risk_level || item.resolver_support || 'unknown';
+    const risk = humanizeToken(item.risk_level || item.resolver_support || 'unknown');
     const detail = item.requested_action || item.required_reason || 'governed work';
     const card = projectionCard('approval', item.title || item.task_key || `Approval ${item.approval_id}`, risk, `Action: ${detail}. Allowed decisions: ${actionText}.`);
     const row = document.createElement('div');
@@ -375,10 +443,10 @@ function renderFailedBlocked(overview, reviewItems) {
     node.appendChild(projectionCard('danger', item.title || item.object_key, 'failed work', `Allowed actions: ${(item.allowed_actions || []).join(', ') || 'inspect'}`));
   }
   for (const item of blocked.slice(0, 4)) {
-    node.appendChild(projectionCard('warn', item.work_item_key, item.reason || item.source, `${item.project_key || 'workspace'} remains blocked.`));
+    node.appendChild(projectionCard('warn', item.work_item_key, humanizeToken(item.reason || item.source), `${item.project_key || 'workspace'} remains blocked.`));
   }
   for (const item of recovery.slice(0, 4)) {
-    node.appendChild(projectionCard('warn', item.work_item_key, item.decision, item.recovery_recommendation || item.last_error || 'Inspect failed work before retry.'));
+    node.appendChild(projectionCard('warn', item.work_item_key, humanizeToken(item.decision), item.recovery_recommendation || item.last_error || 'Inspect failed work before retry.'));
   }
   if (!node.childElementCount) {
     node.appendChild(emptyCard('No failed or blocked rows', 'Failed work and blocked work stay visible here until runtime projections clear them.'));
@@ -424,10 +492,10 @@ function renderBrowser(browser) {
   const runners = (browser.runners || []).filter((item) => item.error_code || ['failed', 'expired'].includes(item.status));
   setCount('#browser-count', requests.length + runners.length);
   for (const item of requests) {
-    node.appendChild(projectionCard('warn', `Login request ${item.id}`, item.status, `Session ${item.session_id}; expires ${item.expires_at}`));
+    node.appendChild(projectionCard('warn', `Login request ${item.id}`, humanizeToken(item.status), `Session ${item.session_id}; expires ${item.expires_at}`));
   }
   for (const item of runners) {
-    node.appendChild(projectionCard('danger', `Browser runner ${item.id}`, item.status, item.error_message || item.error_code || 'Browser handoff needs inspection.'));
+    node.appendChild(projectionCard('danger', `Browser runner ${item.id}`, humanizeToken(item.status), item.error_message || item.error_code || 'Browser handoff needs inspection.'));
   }
   if (!node.childElementCount) {
     node.appendChild(emptyCard('No browser intervention rows', 'Login, MFA, CAPTCHA, and runner failures appear here from browser status projections.'));
@@ -493,6 +561,7 @@ imageInput.addEventListener('change', () => {
 });
 
 document.querySelector('#register-device').addEventListener('click', async () => {
+  if (registeredSession) return;
   const value = window.prompt('Current Odin admin token');
   const token = normalizeAdminTokenInput(value);
   if (value === null || token === '') {
@@ -523,6 +592,7 @@ document.querySelector('#register-device').addEventListener('click', async () =>
   }
   const payload = await response.json();
   sessionStorage.setItem(csrfKey, payload.csrf_token || '');
+  setRegisteredState(true);
   setStatus('Device registered for this browser session.');
   await refreshDashboard();
 });
@@ -530,8 +600,9 @@ document.querySelector('#register-device').addEventListener('click', async () =>
 document.querySelector('#refresh-dashboard').addEventListener('click', refreshDashboard);
 
 document.querySelector('#capture-fab').addEventListener('click', () => {
-  document.querySelector('#capture-body').focus();
+  captureDetails.open = true;
   document.querySelector('.capture-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.querySelector('#capture-body').focus({ preventScroll: true });
 });
 
 document.querySelector('#approval-cancel').addEventListener('click', () => {
