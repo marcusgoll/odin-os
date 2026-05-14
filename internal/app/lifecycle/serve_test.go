@@ -1962,6 +1962,9 @@ service:
 	if err := waitForServeHealthStatus(ctx, "http://"+addr, http.StatusServiceUnavailable, "degraded", "/readyz"); err != nil {
 		t.Fatal(err)
 	}
+	if err := waitForLifecycleStatus(ctx, store, "degraded"); err != nil {
+		t.Fatal(err)
+	}
 
 	cancel()
 
@@ -2661,6 +2664,37 @@ func lifecycleStatuses(store *sqlite.Store) ([]string, error) {
 		statuses = append(statuses, payload.Status)
 	}
 	return statuses, nil
+}
+
+func waitForLifecycleStatus(ctx context.Context, store *sqlite.Store, wantStatus string) error {
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for lifecycle status %q", wantStatus)
+		case <-deadline.C:
+			statuses, err := lifecycleStatuses(store)
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("timed out waiting for lifecycle status %q; statuses=%v", wantStatus, statuses)
+		case <-ticker.C:
+			statuses, err := lifecycleStatuses(store)
+			if err != nil {
+				return err
+			}
+			for _, status := range statuses {
+				if status == wantStatus {
+					return nil
+				}
+			}
+		}
+	}
 }
 
 func countServeGoalEvents(t *testing.T, store *sqlite.Store) map[string]int {
