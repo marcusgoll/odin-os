@@ -2,7 +2,7 @@
 title: Odin OS Live Readiness Release Approval Packet
 status: approval-required
 date: 2026-05-14
-minimum_code_release: 4ed7c370876bbb3dd51ea5eb9bd0d5c7f589682f
+minimum_code_release: 26ea86333ad4ec59d85ac913da40220ba3261cc2
 ---
 
 # Odin OS Live Readiness Release Approval Packet
@@ -15,7 +15,7 @@ the cutover window.
 ## Current Read-Only Findings
 
 - Minimum source release containing the merged readiness evidence and fixes:
-  `4ed7c370876bbb3dd51ea5eb9bd0d5c7f589682f`.
+  `26ea86333ad4ec59d85ac913da40220ba3261cc2`.
 - Installed host command: `/home/orchestrator/.local/bin/odin` resolves to
   `/home/orchestrator/odin-os/releases/current/bin/odin`.
 - Public origin container: `odin-overseer`, image `nginx:alpine`, serving
@@ -29,6 +29,15 @@ the cutover window.
   proxied; all other public paths return `404` at nginx.
 - Live `/readyz` currently fails closed with HTTP `503`; this is a required
   post-cutover proof point, not an ingress exposure issue.
+- A 2026-05-14 read-only probe found the Docker container config includes
+  `/home/orchestrator/.npm-global/bin` in `PATH`, but the live `odin serve`
+  process environment did not. `doctor --json` degraded with
+  `workspace_prerequisites.codex_missing=true` even though the Codex binary was
+  mounted and executable by absolute path. Treat launcher PATH preservation as a
+  pre-cutover gate.
+- PR #258 fixed a separate health-loop blocker where an unbounded periodic
+  health cycle could leave readiness stuck after a blocking executor health
+  probe or SQLite busy event. The cutover target must include that fix.
 
 ## Approval Scope
 
@@ -60,7 +69,7 @@ origin:
 ```bash
 git fetch origin main
 git switch --detach origin/main
-git merge-base --is-ancestor 4ed7c370876bbb3dd51ea5eb9bd0d5c7f589682f HEAD
+git merge-base --is-ancestor 26ea86333ad4ec59d85ac913da40220ba3261cc2 HEAD
 git status --short --branch
 make homelab-release-dry-run
 make odin-actual-use-e2e
@@ -70,6 +79,15 @@ make odin-pwa-e2e
 Stop if any command fails. `make homelab-release-dry-run` must remain
 non-mutating; it must not install, repoint, restart, or mutate the production
 runtime root.
+
+Before running the cutover commands, inspect the homelab launcher and stop if it
+starts Odin through a login shell that can reset `PATH`. The live Odin process
+must inherit `/home/orchestrator/.npm-global/bin` so `workspace_prerequisites`
+can find `codex`:
+
+```bash
+grep -n -- '--entrypoint /bin/sh\\|-lc\\|-c\\|PATH=' /home/orchestrator/.homelab-runtime/odin-pwa-proxy/run-container.sh
+```
 
 ## Backup And Rollback Handles
 
@@ -123,6 +141,8 @@ Run these before declaring the release installed:
 ```bash
 docker ps --filter name=odin-overseer --format '{{.Names}} {{.Status}} {{.Ports}}'
 docker exec odin-overseer sh -lc 'readlink -f /app; /app/bin/odin doctor --json'
+docker exec odin-overseer sh -lc 'pid="$(pgrep -f "/app/bin/odin serve" | head -1)"; test -n "$pid"; tr "\0" "\n" </proc/"$pid"/environ | grep "^PATH="'
+docker exec odin-overseer sh -lc 'pid="$(pgrep -f "/app/bin/odin serve" | head -1)"; test -n "$pid"; tr "\0" "\n" </proc/"$pid"/environ | grep "^PATH=" | grep -F "/home/orchestrator/.npm-global/bin"'
 docker exec odin-overseer sh -lc '/app/bin/odin healthcheck'
 curl -fsS http://127.0.0.1:5173/healthz
 curl -fsS http://127.0.0.1:5173/readyz
@@ -204,6 +224,9 @@ Stop or rollback if any of these occur:
 - `odin-overseer` does not restart cleanly;
 - `docker exec odin-overseer /app/bin/odin doctor --json` is degraded for an
   unexplained reason;
+- the live `odin serve` process environment does not include
+  `/home/orchestrator/.npm-global/bin` in `PATH`, or doctor reports
+  `workspace_prerequisites.codex_missing=true`;
 - `healthcheck`, `/healthz`, or `/readyz` fails after the container has started;
 - public denied routes no longer return `404`;
 - mobile routes bypass authentication;

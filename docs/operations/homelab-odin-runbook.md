@@ -85,6 +85,15 @@ ODIN_CODEX_DRIVER=/config/odin-codex-live-driver.sh
 ODIN_CORE_GIT_ROOT=/home/orchestrator/odin-os
 ```
 
+Verify the running `odin serve` process inherited those values; Docker config
+alone is not sufficient because a login shell entrypoint can reset `PATH` before
+launching Odin:
+
+```bash
+docker exec odin-overseer sh -lc 'pid="$(pgrep -f "/app/bin/odin serve" | head -1)"; test -n "$pid"; tr "\0" "\n" </proc/"$pid"/environ | grep "^PATH="'
+docker exec odin-overseer sh -lc 'pid="$(pgrep -f "/app/bin/odin serve" | head -1)"; test -n "$pid"; tr "\0" "\n" </proc/"$pid"/environ | grep "^PATH=" | grep -F "/home/orchestrator/.npm-global/bin"'
+```
+
 The active container must also mount the registered project git roots read-only
 so registry validation sees the same repositories the host sees:
 
