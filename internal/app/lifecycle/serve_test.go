@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
+	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/runtime/checkpoints"
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
@@ -1635,6 +1637,67 @@ func TestRunHealthCyclePreservesReadinessReasonWhileDraining(t *testing.T) {
 	}
 }
 
+func TestRunHealthLoopBoundsEachCycle(t *testing.T) {
+	root := createRuntimeRoot(t)
+	ctx := bootstrap.WithBootID(context.Background(), "boot-test")
+	app, err := bootstrap.Load(ctx, root, root)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	previousTimeout := serveOperationTimeout
+	serveOperationTimeout = 20 * time.Millisecond
+	t.Cleanup(func() {
+		serveOperationTimeout = previousTimeout
+	})
+
+	loopCtx, cancelLoop := context.WithCancel(context.Background())
+	defer cancelLoop()
+
+	var background sync.WaitGroup
+	background.Add(1)
+	go runHealthLoop(loopCtx, context.Background(), &background, healthLoopDeps{
+		Store:        app.Store,
+		RuntimeState: app.RuntimeState,
+		Health: healthsvc.Service{
+			DB:           app.Store.DB(),
+			Config:       healthsvc.DefaultConfig(),
+			ExecutorKeys: []string{"blocking_executor"},
+		},
+		Executors: map[string]contract.Executor{
+			"blocking_executor": blockingHealthExecutor{key: "blocking_executor"},
+		},
+		ExecutorConfig: executorrouter.Config{
+			Executors: []executorrouter.ExecutorConfig{
+				{
+					Key:     "blocking_executor",
+					Enabled: true,
+				},
+			},
+		},
+		RegistryHealthy:    len(app.RegistryDiagnostics) == 0,
+		ProjectionSurfaces: bootstrap.ServiceOwnedProjectionSurfaces(),
+		BootID:             "boot-test",
+		RuntimeRoot:        root,
+	}, nil, 5*time.Millisecond)
+
+	time.Sleep(60 * time.Millisecond)
+	cancelLoop()
+
+	done := make(chan struct{})
+	go func() {
+		background.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("runHealthLoop did not exit after loop context cancellation; health cycle likely used an unbounded operation context")
+	}
+}
+
 func TestRunServeHeartbeatsActiveWorktreeLeases(t *testing.T) {
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
@@ -2274,6 +2337,44 @@ func seedRuntimeState(t *testing.T, root string, status string, heartbeatAt time
 type countingLifecycleExecutor struct {
 	key   string
 	calls atomic.Int64
+}
+
+type blockingHealthExecutor struct {
+	key string
+}
+
+func (executor blockingHealthExecutor) Key() string { return executor.key }
+
+func (blockingHealthExecutor) Class() contract.ExecutorClass {
+	return contract.ExecutorClassPlanBackedCLI
+}
+
+func (blockingHealthExecutor) Health(ctx context.Context) (contract.HealthReport, error) {
+	<-ctx.Done()
+	return contract.HealthReport{Status: contract.HealthStatusUnavailable}, ctx.Err()
+}
+
+func (blockingHealthExecutor) Capabilities(context.Context) (contract.Capabilities, error) {
+	return contract.Capabilities{
+		ExecutorClass:        contract.ExecutorClassPlanBackedCLI,
+		SupportsHeadlessPlan: true,
+	}, nil
+}
+
+func (blockingHealthExecutor) RunTask(context.Context, contract.TaskSpec) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+
+func (blockingHealthExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
+	return contract.ExecutionResult{}, contract.ErrNotImplemented
+}
+
+func (blockingHealthExecutor) CancelTask(context.Context, contract.TaskHandle) error {
+	return contract.ErrNotImplemented
+}
+
+func (blockingHealthExecutor) EstimateCost(context.Context, contract.TaskSpec) (contract.CostEstimate, error) {
+	return contract.CostEstimate{}, contract.ErrNotImplemented
 }
 
 func (executor *countingLifecycleExecutor) Key() string { return executor.key }

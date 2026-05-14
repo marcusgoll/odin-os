@@ -6484,7 +6484,9 @@ func runHealthLoop(ctx context.Context, operationCtx context.Context, wg *sync.W
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			runHealthCycle(operationCtx, deps, logger)
+			healthCtx, cancel := serveOperationContext(operationCtx)
+			runHealthCycle(healthCtx, deps, logger)
+			cancel()
 		}
 	}
 }
