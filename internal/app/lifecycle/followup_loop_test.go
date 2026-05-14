@@ -293,6 +293,9 @@ func runServeOnceForFollowUpTest(t *testing.T, root string) error {
 
 type errTestListener struct{}
 
-func (errTestListener) Accept() (net.Conn, error) { return nil, errors.New("listener exploded") }
-func (errTestListener) Close() error              { return nil }
-func (errTestListener) Addr() net.Addr            { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
+func (errTestListener) Accept() (net.Conn, error) {
+	time.Sleep(200 * time.Millisecond)
+	return nil, errors.New("listener exploded")
+}
+func (errTestListener) Close() error   { return nil }
+func (errTestListener) Addr() net.Addr { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
