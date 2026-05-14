@@ -134,6 +134,26 @@ Provider readiness is explicitly de-scoped beyond the current healthy
 | `xai_api` | `api_executor` | Unhealthy | Not credited | Implement and prove provider-backed execution, secret-safe config, runtime dispatch evidence, and fail-closed missing-credential behavior. |
 | `openrouter_api` | `broker_executor` | Unhealthy | Not credited | Implement and prove broker-backed execution, secret-safe config, runtime dispatch evidence, and fail-closed missing-credential behavior. |
 
+## Authenticated Browser Readiness Envelope
+
+Authenticated browser readiness is fail-closed, not production-ready. The
+current implementation can prove public read-only browser evidence and safe
+session/profile foundations, but it must not claim reusable authenticated attach
+or login handoff execution yet.
+
+| Requirement | Current evidence | Readiness status |
+| --- | --- | --- |
+| Public read-only real browser task | Live adapter proof against `https://example.com` returned `adapter_kind=huginn_live`, `browser_proof_kind=live_browser_readonly`, and `real_browser_evidence=true`. | Proven for public read-only evidence only. |
+| Stub-vs-real evidence classification | Stub proof records `browser_proof_kind=stub_contract_only` and `real_browser_evidence=false`; operators must check these fields before crediting a run. | Proven classification boundary. |
+| Authenticated session attach | Temp-root CLI proof created and verified a session, then `./bin/odin browser run --session-id <id> ...` exited nonzero with `authenticated browser session attachment is not implemented`. Targeted tests also prove the adapter is not called. | Fail-closed by design; not ready. |
+| Allowed-domain enforcement | Temp-root CLI proof with `--allowed-domain example.com` and `https://evil.example.net/...` exited nonzero with `disallowed domain "evil.example.net"` before attach. | Proven fail-closed boundary. |
+| Credential safety | Targeted lifecycle tests assert logs and JSON do not expose password, TOTP, backup-code, cookie, profile-byte, plaintext, fixture-path, or key markers for profile preparation, encryption, materialization, revoke, and cleanup flows. | Proven for fixture/profile foundation paths. |
+| Empty profile preparation | `prepare-profile` tests create only an empty `0700` profile directory, keep `profile_storage_policy=encrypted_required`, and audit the preparation event. | Proven non-attach foundation only. |
+| Encrypted fixture artifact materialization | Tests encrypt caller-supplied fixture bytes, materialize only under `runtime/browser-profile-materializations/<safe-name>/`, preserve encrypted artifacts, and clean only the temporary materialization directory. | Proven fixture foundation only. |
+| Retention cleanup | Tests dry-run by default, clean only revoked/expired encrypted artifacts when `--apply` is set, preserve active artifacts, and avoid profile/cookie/credential paths. | Proven cleanup boundary for encrypted fixture artifacts. |
+| Login handoff execution | Contract and tests cover metadata, runner planning, fixture-safe process boundaries, and real-command gates. They do not provide Tailscale/private handoff service wiring or real login completion. | Future work; not ready. |
+| Authenticated attach open soak | No long-running authenticated profile attach, login handoff, cleanup-after-run, or allowed-domain soak has been executed because attach is intentionally unsupported. | Unproven until attach exists. |
+
 ## Reuse Plan
 
 - Keep installed `odin` as the live operator proof path and repo-local
@@ -212,6 +232,9 @@ Commands run from `/home/orchestrator/odin-os` on 2026-05-14:
 | Stub browser proof | isolated `./bin/odin browser run --worker-mode browser --url https://example.com ...` | Recorded `adapter_kind=stub_local`, `browser_proof_kind=stub_contract_only`, `real_browser_evidence=false`, and action log containing `no_live_browser_launched`. |
 | Live browser proof | isolated `ODIN_BROWSER_ADAPTER=live ODIN_HUGINN_BROWSER_COMMAND=/home/orchestrator/odin-os/bin/huginn-browser-worker ODIN_HUGINN_BROWSER_ALLOWED_COMMANDS=/home/orchestrator/odin-os/bin/huginn-browser-worker ./bin/odin browser run --goal-id <id> --url https://example.com --allowed-domain example.com --worker-mode browser --evidence-required --json` | Passed with `adapter_kind=huginn_live`, `browser_proof_kind=live_browser_readonly`, `real_browser_evidence=true`, one screenshot, page title `Example Domain`, and action log containing `browser_mode_selected`, `opened_start_url`, `captured_read_only_evidence`, and `screenshot_captured`. |
 | Authenticated attach boundary | isolated verified browser session followed by `./bin/odin browser run --session-id <id> ... --json` | Failed closed with exit code 1 and message `authenticated browser session attachment is not implemented; run without browser_session_id for public read-only evidence or complete the profile attach contract first`. |
+| Authenticated attach CLI reproof | temp `ODIN_ROOT` with `goal create`, `browser session create`, `browser session verify`, and `browser run --session-id <id> --url https://example.com/account --allowed-domain example.com --worker-mode browser --action read --json` | Failed closed with exit code 1 and the explicit unsupported attach message. |
+| Browser allowed-domain CLI proof | temp `ODIN_ROOT` with verified `example.com` session and `browser run --session-id <id> --url https://evil.example.net/account --allowed-domain example.com ...` | Failed closed with exit code 1 and `disallowed domain "evil.example.net"`. |
+| Browser fail-closed targeted tests | `go test ./internal/executors/browser ./internal/app/lifecycle -run 'Test(ReadOnlyServiceRejectsBrowserSessionUntilAttachIsImplemented|ReadOnlyServiceRejectsDisallowedDomain|RunBrowserRunRejectsBrowserSessionAttachUntilImplemented|RunBrowserSessionPrepareProfileCreatesEmptyDirectoryAndAudits|RunBrowserSessionProfileRetentionCleanupDryRunAndApply|RunBrowserSessionProfileArtifactMaterializeAndCleanup|RunBrowserSessionProfileArtifactStatusRevokeAndRetentionFlow)$' -count=1` | Passed. Covers unsupported attach without adapter call, disallowed domains, empty profile preparation, credential-safe logs/JSON, encrypted fixture materialization, materialization cleanup, revoke, and retention cleanup. |
 
 ## Prompt-To-Artifact Checklist
 
