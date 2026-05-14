@@ -108,28 +108,60 @@ binary only after confirming which binary owns the live runtime root.
 Preserve the rollback target before repointing:
 
 ```bash
-previous_target="$(readlink -f "$HOME/odin-os-live" || true)"
-printf '%s\n' "$previous_target" > "$HOME/.local/state/odin-os/last-release-target.txt"
+live_target="$HOME/odin-os-live"
+previous_target="$(readlink -f "$live_target" || true)"
+previous_target_kind="missing"
+if [ -L "$live_target" ]; then
+  previous_target_kind="symlink"
+elif [ -e "$live_target" ]; then
+  previous_target_kind="directory"
+fi
 test -n "$previous_target"
+test "$previous_target_kind" != "missing"
+test -x "$previous_target/bin/odin"
 ```
 
-If `previous_target` is empty or not executable as an Odin release, stop and
-record the active container mount state before proceeding.
+If `previous_target` is empty, the target kind is `missing`, or
+`$previous_target/bin/odin` is not executable, stop and record the active
+container mount state before proceeding. The current homelab target may be a
+real directory rather than a symlink; do not use plain `ln -sfn` over an
+existing directory because it can create a nested symlink instead of repointing
+the live target.
 
 ## Cutover Commands
 
 Run only after explicit approval and passing pre-cutover gates:
 
 ```bash
+backup_dir="${backup_dir:?run the backup section in this shell before cutover}"
+live_target="${live_target:-$HOME/odin-os-live}"
+previous_target="${previous_target:-$(readlink -f "$live_target" || true)}"
+previous_target_kind="${previous_target_kind:-missing}"
+if [ "$previous_target_kind" = "missing" ]; then
+  if [ -L "$live_target" ]; then
+    previous_target_kind="symlink"
+  elif [ -e "$live_target" ]; then
+    previous_target_kind="directory"
+  fi
+fi
+
 release_sha="$(git rev-parse HEAD)"
 release_dir="$HOME/.local/share/odin-os/releases/$release_sha"
 
 mkdir -p "$release_dir"
 rsync -a --delete --exclude .git --exclude .odin --exclude .worktrees ./ "$release_dir/"
 
-ln -sfn "$release_dir" "$HOME/odin-os-live"
-test "$(readlink -f "$HOME/odin-os-live")" = "$release_dir"
-grep -n 'healthCtx, cancel := serveOperationContext(operationCtx)' "$HOME/odin-os-live/internal/app/lifecycle/run.go"
+if [ "$previous_target_kind" = "directory" ]; then
+  preserved_target="$backup_dir/odin-os-live.previous"
+  test ! -e "$preserved_target"
+  mv "$live_target" "$preserved_target"
+  previous_target="$preserved_target"
+fi
+
+printf '%s\n' "$previous_target" > "$HOME/.local/state/odin-os/last-release-target.txt"
+ln -sfnT "$release_dir" "$live_target"
+test "$(readlink -f "$live_target")" = "$release_dir"
+grep -n 'healthCtx, cancel := serveOperationContext(operationCtx)' "$live_target/internal/app/lifecycle/run.go"
 /home/orchestrator/.homelab-runtime/odin-pwa-proxy/run-container.sh
 ```
 
@@ -207,7 +239,7 @@ condition is hit:
 ```bash
 previous_target="$(cat "$HOME/.local/state/odin-os/last-release-target.txt")"
 test -n "$previous_target"
-ln -sfn "$previous_target" "$HOME/odin-os-live"
+ln -sfnT "$previous_target" "$HOME/odin-os-live"
 /home/orchestrator/.homelab-runtime/odin-pwa-proxy/run-container.sh
 curl -fsS http://127.0.0.1:5173/healthz
 curl -fsS http://127.0.0.1:5173/readyz

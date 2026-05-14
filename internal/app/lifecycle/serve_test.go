@@ -1698,6 +1698,78 @@ func TestRunHealthLoopBoundsEachCycle(t *testing.T) {
 	}
 }
 
+func TestRunHealthLoopPerformsFastInitialRetry(t *testing.T) {
+	root := createRuntimeRoot(t)
+	ctx := bootstrap.WithBootID(context.Background(), "boot-test")
+	app, err := bootstrap.Load(ctx, root, root)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	previousInitialRetry := serveInitialHealthRetry
+	serveInitialHealthRetry = 10 * time.Millisecond
+	t.Cleanup(func() {
+		serveInitialHealthRetry = previousInitialRetry
+	})
+
+	loopCtx, cancelLoop := context.WithCancel(context.Background())
+	defer cancelLoop()
+
+	var background sync.WaitGroup
+	background.Add(1)
+	go runHealthLoop(loopCtx, context.Background(), &background, healthLoopDeps{
+		Store:        app.Store,
+		RuntimeState: app.RuntimeState,
+		Health: healthsvc.Service{
+			DB:           app.Store.DB(),
+			Config:       healthsvc.DefaultConfig(),
+			ExecutorKeys: []string{"fast_executor"},
+		},
+		Executors: map[string]contract.Executor{
+			"fast_executor": contract.NewStaticExecutor(
+				"fast_executor",
+				contract.ExecutorClassPlanBackedCLI,
+				contract.HealthReport{Status: contract.HealthStatusHealthy},
+				contract.Capabilities{SupportsHeadlessPlan: true},
+			),
+		},
+		ExecutorConfig: executorrouter.Config{
+			Executors: []executorrouter.ExecutorConfig{
+				{
+					Key:     "fast_executor",
+					Enabled: true,
+				},
+			},
+		},
+		RegistryHealthy:    len(app.RegistryDiagnostics) == 0,
+		ProjectionSurfaces: bootstrap.ServiceOwnedProjectionSurfaces(),
+		BootID:             "boot-test",
+		RuntimeRoot:        root,
+	}, nil, time.Hour)
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		var samples int
+		if err := app.Store.DB().QueryRowContext(context.Background(), `
+			SELECT COUNT(*)
+			FROM executor_health
+			WHERE executor = 'fast_executor'
+		`).Scan(&samples); err != nil {
+			t.Fatalf("count executor_health rows error = %v", err)
+		}
+		if samples > 0 {
+			cancelLoop()
+			background.Wait()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("health loop did not run before the full interval")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestRunServeHeartbeatsActiveWorktreeLeases(t *testing.T) {
 	root := createRuntimeRoot(t)
 	writeRuntimeConfig(t, root, `
