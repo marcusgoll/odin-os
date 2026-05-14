@@ -759,10 +759,21 @@ service:
 	ctx = withServeLoopConfig(ctx, serveLoopConfig{
 		goalInterval: time.Hour,
 	})
-	time.AfterFunc(150*time.Millisecond, cancel)
 
 	var stdout bytes.Buffer
-	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	}()
+
+	if err := waitForGoalRunning(ctx, store, goal.ID); err != nil {
+		cancel()
+		<-runErr
+		t.Fatal(err)
+	}
+
+	cancel()
+	err = <-runErr
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
 	}
@@ -2692,6 +2703,35 @@ func waitForLifecycleStatus(ctx context.Context, store *sqlite.Store, wantStatus
 				if status == wantStatus {
 					return nil
 				}
+			}
+		}
+	}
+}
+
+func waitForGoalRunning(ctx context.Context, store *sqlite.Store, goalID int64) error {
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for goal %d to run", goalID)
+		case <-deadline.C:
+			goal, err := store.GetGoal(context.Background(), goalID)
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("timed out waiting for goal %d to run; goal=%+v", goalID, goal)
+		case <-ticker.C:
+			goal, err := store.GetGoal(context.Background(), goalID)
+			if err != nil {
+				return err
+			}
+			if goal.Status == sqlite.GoalStatusRunning && goal.CurrentRunID != nil {
+				return nil
 			}
 		}
 	}
