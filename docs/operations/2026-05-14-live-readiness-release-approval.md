@@ -128,6 +128,8 @@ mkdir -p "$release_dir"
 rsync -a --delete --exclude .git --exclude .odin --exclude .worktrees ./ "$release_dir/"
 
 ln -sfn "$release_dir" "$HOME/odin-os-live"
+test "$(readlink -f "$HOME/odin-os-live")" = "$release_dir"
+grep -n 'healthCtx, cancel := serveOperationContext(operationCtx)' "$HOME/odin-os-live/internal/app/lifecycle/run.go"
 /home/orchestrator/.homelab-runtime/odin-pwa-proxy/run-container.sh
 ```
 
@@ -140,10 +142,10 @@ Run these before declaring the release installed:
 
 ```bash
 docker ps --filter name=odin-overseer --format '{{.Names}} {{.Status}} {{.Ports}}'
-docker exec odin-overseer sh -lc 'readlink -f /app; /app/bin/odin doctor --json'
-docker exec odin-overseer sh -lc 'pid="$(pgrep -f "/app/bin/odin serve" | head -1)"; test -n "$pid"; tr "\0" "\n" </proc/"$pid"/environ | grep "^PATH="'
-docker exec odin-overseer sh -lc 'pid="$(pgrep -f "/app/bin/odin serve" | head -1)"; test -n "$pid"; tr "\0" "\n" </proc/"$pid"/environ | grep "^PATH=" | grep -F "/home/orchestrator/.npm-global/bin"'
-docker exec odin-overseer sh -lc '/app/bin/odin healthcheck'
+docker exec odin-overseer /app/bin/odin doctor --json
+docker exec odin-overseer sh -c 'pid="$(pgrep -f "/app/bin/odin serve" | head -1)"; test -n "$pid"; tr "\0" "\n" </proc/"$pid"/environ | grep "^PATH="'
+docker exec odin-overseer sh -c 'pid="$(pgrep -f "/app/bin/odin serve" | head -1)"; test -n "$pid"; tr "\0" "\n" </proc/"$pid"/environ | grep "^PATH=" | grep -F "/home/orchestrator/.npm-global/bin"'
+docker exec odin-overseer /app/bin/odin healthcheck
 curl -fsS http://127.0.0.1:5173/healthz
 curl -fsS http://127.0.0.1:5173/readyz
 ```
