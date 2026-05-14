@@ -258,8 +258,10 @@ func (service Service) Readiness(ctx context.Context, registryHealthy bool) (Rep
 	if err != nil {
 		return Report{}, false, err
 	}
-	report.Checks = append(report.Checks, runtimeCheck)
-	report.Status = combineStatus(report.Status, runtimeCheck.Status)
+	if runtimeCheck.Name != "" {
+		report.Checks = append(report.Checks, runtimeCheck)
+		report.Status = combineStatus(report.Status, runtimeCheck.Status)
+	}
 	return report, safeToDispatch && runtimeReady, nil
 }
 
@@ -620,9 +622,7 @@ func (service Service) runtimeCheck(ctx context.Context, now time.Time, config C
 	switch err {
 	case nil:
 	case sql.ErrNoRows:
-		check.Status = StatusDegraded
-		check.Summary = "runtime state has not been recorded"
-		return check, false, nil
+		return Check{}, false, nil
 	default:
 		return Check{}, false, err
 	}
