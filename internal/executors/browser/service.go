@@ -141,6 +141,8 @@ type Result struct {
 	EvidenceType              string                      `json:"evidence_type"`
 	AdapterStatus             string                      `json:"adapter_status,omitempty"`
 	AdapterKind               string                      `json:"adapter_kind,omitempty"`
+	BrowserProofKind          string                      `json:"browser_proof_kind,omitempty"`
+	RealBrowserEvidence       bool                        `json:"real_browser_evidence"`
 	StartURLs                 []string                    `json:"start_urls"`
 	AllowedDomains            []string                    `json:"allowed_domains"`
 	MaxPages                  int                         `json:"max_pages"`
@@ -303,11 +305,14 @@ func (service Service) Run(ctx context.Context, task ReadOnlyTask) (Result, erro
 			ErrorMessage: err.Error(),
 		}, fmt.Errorf("browser adapter failed: %w", err)
 	}
+	browserProofKind, realBrowserEvidence := classifyBrowserProof(resolvedTask.WorkerMode, adapterResponse)
 	payload, err := json.Marshal(map[string]any{
-		"executor": "browser_readonly",
-		"status":   "adapter_response_recorded",
-		"task":     resolvedTask,
-		"adapter":  adapterResponse,
+		"executor":              "browser_readonly",
+		"status":                "adapter_response_recorded",
+		"browser_proof_kind":    browserProofKind,
+		"real_browser_evidence": realBrowserEvidence,
+		"task":                  resolvedTask,
+		"adapter":               adapterResponse,
 	})
 	if err != nil {
 		return Result{}, err
@@ -330,6 +335,8 @@ func (service Service) Run(ctx context.Context, task ReadOnlyTask) (Result, erro
 		EvidenceType:              evidence.EvidenceType,
 		AdapterStatus:             adapterResponse.Status,
 		AdapterKind:               adapterResponse.AdapterKind,
+		BrowserProofKind:          browserProofKind,
+		RealBrowserEvidence:       realBrowserEvidence,
 		StartURLs:                 append([]string{}, resolvedTask.StartURLs...),
 		AllowedDomains:            append([]string{}, resolvedTask.AllowedDomains...),
 		MaxPages:                  resolvedTask.MaxPages,
@@ -436,6 +443,8 @@ func (service Service) RunWorkEvidence(ctx context.Context, task WorkEvidenceTas
 		EvidenceType:              WorkEvidenceType,
 		AdapterStatus:             adapterResponse.Status,
 		AdapterKind:               adapterResponse.AdapterKind,
+		BrowserProofKind:          classifyBrowserProofKind(resolvedTask.WorkerMode, adapterResponse),
+		RealBrowserEvidence:       isRealBrowserEvidence(resolvedTask.WorkerMode, adapterResponse),
 		StartURLs:                 append([]string{}, resolvedTask.StartURLs...),
 		AllowedDomains:            append([]string{}, resolvedTask.AllowedDomains...),
 		MaxPages:                  resolvedTask.MaxPages,
@@ -572,8 +581,7 @@ func (service Service) resolveBrowserSession(ctx context.Context, task ReadOnlyT
 	if err := ensureBrowserSessionDomainMatchesTask(session, task); err != nil {
 		return nil, err
 	}
-	ref := browserSessionReference(session)
-	return &ref, nil
+	return nil, fmt.Errorf("authenticated browser session attachment is not implemented; run without browser_session_id for public read-only evidence or complete the profile attach contract first")
 }
 
 func ensureBrowserSessionDomainMatchesTask(session sqlite.BrowserSession, task ReadOnlyTask) error {
@@ -740,6 +748,7 @@ func (service Service) nextWorkEvidenceAttempt(ctx context.Context, taskID int64
 }
 
 func browserWorkEvidenceDetailsJSON(task WorkEvidenceTask, response huginnbrowser.Response) (string, error) {
+	browserProofKind, realBrowserEvidence := classifyBrowserProof(task.WorkerMode, response)
 	payload, err := json.Marshal(map[string]any{
 		"executor":                     WorkEvidenceExecutor,
 		"artifact_type":                WorkEvidenceType,
@@ -748,6 +757,8 @@ func browserWorkEvidenceDetailsJSON(task WorkEvidenceTask, response huginnbrowse
 		"start_urls":                   task.StartURLs,
 		"allowed_domains":              task.AllowedDomains,
 		"adapter_kind":                 response.AdapterKind,
+		"browser_proof_kind":           browserProofKind,
+		"real_browser_evidence":        realBrowserEvidence,
 		"visited_urls":                 response.VisitedURLs,
 		"page_results":                 response.PageResults,
 		"page_title":                   firstPageTitle(response.PageResults),
@@ -769,6 +780,55 @@ func browserWorkEvidenceDetailsJSON(task WorkEvidenceTask, response huginnbrowse
 		return "", err
 	}
 	return string(payload), nil
+}
+
+func classifyBrowserProofKind(workerMode string, response huginnbrowser.Response) string {
+	kind, _ := classifyBrowserProof(workerMode, response)
+	return kind
+}
+
+func isRealBrowserEvidence(workerMode string, response huginnbrowser.Response) bool {
+	_, real := classifyBrowserProof(workerMode, response)
+	return real
+}
+
+func classifyBrowserProof(workerMode string, response huginnbrowser.Response) (string, bool) {
+	adapterKind := strings.ToLower(strings.TrimSpace(response.AdapterKind))
+	status := strings.ToLower(strings.TrimSpace(response.Status))
+	if adapterKind != "huginn_live" {
+		if adapterKind == "stub_local" {
+			return "stub_contract_only", false
+		}
+		return "unknown_adapter", false
+	}
+	if browserEvidenceFailed(response) || status == "not_implemented" || actionLogContains(response.ActionLog, "no_live_browser_launched") {
+		return "live_adapter_not_ready", false
+	}
+	if strings.EqualFold(strings.TrimSpace(workerMode), "browser") || responseHasBrowserMode(response) {
+		if len(response.Screenshots) > 0 || actionLogContains(response.ActionLog, "browser_mode_selected") || actionLogContains(response.ActionLog, "screenshot_captured") {
+			return "live_browser_readonly", true
+		}
+		return "live_browser_unverified", false
+	}
+	return "live_fetch_readonly", false
+}
+
+func responseHasBrowserMode(response huginnbrowser.Response) bool {
+	for _, result := range response.PageResults {
+		if strings.EqualFold(strings.TrimSpace(result.Mode), "browser") {
+			return true
+		}
+	}
+	return false
+}
+
+func actionLogContains(actionLog []string, marker string) bool {
+	for _, action := range actionLog {
+		if strings.EqualFold(strings.TrimSpace(action), marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func browserEvidenceFailed(response huginnbrowser.Response) bool {

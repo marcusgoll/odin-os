@@ -381,6 +381,9 @@ func (service Service) aggregateExecutorCheck(ctx context.Context, now time.Time
 	healthy := 0
 	stale := 0
 	unhealthy := 0
+	healthyKeys := make([]string, 0)
+	staleKeys := make([]string, 0)
+	unhealthyKeys := make([]string, 0)
 	for rows.Next() {
 		var (
 			executor  string
@@ -397,13 +400,16 @@ func (service Service) aggregateExecutorCheck(ctx context.Context, now time.Time
 		}
 		if status != "healthy" {
 			unhealthy++
+			unhealthyKeys = append(unhealthyKeys, executor)
 		}
 		if parsed.Before(now.Add(-config.ExecutorFreshnessTTL)) {
 			stale++
+			staleKeys = append(staleKeys, executor)
 			continue
 		}
 		if status == "healthy" {
 			healthy++
+			healthyKeys = append(healthyKeys, executor)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -421,6 +427,15 @@ func (service Service) aggregateExecutorCheck(ctx context.Context, now time.Time
 			"stale_executors":     fmt.Sprintf("%d", stale),
 			"unhealthy_executors": fmt.Sprintf("%d", unhealthy),
 		},
+	}
+	if len(healthyKeys) > 0 {
+		check.Details["healthy_executor_keys"] = strings.Join(healthyKeys, ",")
+	}
+	if len(staleKeys) > 0 {
+		check.Details["stale_executor_keys"] = strings.Join(staleKeys, ",")
+	}
+	if len(unhealthyKeys) > 0 {
+		check.Details["unhealthy_executor_keys"] = strings.Join(unhealthyKeys, ",")
 	}
 	if total == 0 {
 		check.Status = StatusDegraded

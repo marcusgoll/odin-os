@@ -9661,18 +9661,21 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 	}
 	workKind := defaultString(strings.TrimSpace(params.WorkKind), "automation_trigger")
 	artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
+	acceptanceCriteria := NormalizeAcceptanceCriteria(automationTriggerAcceptanceCriteria(trigger, params))
+	acceptanceCriteriaJSON := EncodeAcceptanceCriteriaJSON(acceptanceCriteria)
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO tasks (
-			project_id, key, title, action_key, status, scope, requested_by, workspace_id, initiative_id,
+			project_id, key, title, acceptance_criteria_json, action_key, status, scope, requested_by, workspace_id, initiative_id,
 			companion_id, follow_up_obligation_id, follow_up_occurrence_key, work_kind, execution_intent,
 			execution_intent_source, current_run_id,
 			summary, terminal_reason, artifacts_json, created_at, updated_at
 		)
-		VALUES (?, ?, ?, '', 'queued', ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, NULL, '', '', ?, ?, ?)
+		VALUES (?, ?, ?, ?, '', 'queued', ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, NULL, '', '', ?, ?, ?)
 	`,
 		trigger.ProjectID,
 		taskKey,
 		title,
+		acceptanceCriteriaJSON,
 		project.Scope,
 		requestedBy,
 		workKind,
@@ -9694,6 +9697,7 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 		ProjectID:             trigger.ProjectID,
 		Key:                   taskKey,
 		Title:                 title,
+		AcceptanceCriteria:    acceptanceCriteria,
 		Status:                "queued",
 		Scope:                 project.Scope,
 		RequestedBy:           requestedBy,
@@ -9731,6 +9735,17 @@ func (store *Store) createAutomationTriggerTaskTx(ctx context.Context, tx *sql.T
 		return Task{}, err
 	}
 	return task, nil
+}
+
+func automationTriggerAcceptanceCriteria(trigger AutomationTrigger, params FireAutomationTriggerParams) []string {
+	summary := strings.TrimSpace(trigger.RuleSummary)
+	if summary == "" {
+		summary = "automation trigger " + trigger.Key
+	}
+	return []string{
+		fmt.Sprintf("Review the automation trigger materialization for %q and record the outcome.", summary),
+		"Preserve read-only/operator-safe behavior and do not mutate external systems unless the trigger intent and approval policy explicitly allow it.",
+	}
 }
 
 func (store *Store) createAutomationTriggerMaterializationTx(ctx context.Context, tx *sql.Tx, triggerID int64, materializationKey string, taskID int64, reason string, requestedBy string, now time.Time) (AutomationTriggerMaterialization, error) {

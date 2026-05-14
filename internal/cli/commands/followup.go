@@ -22,6 +22,8 @@ type FollowUpView struct {
 	InitiativeKey      string     `json:"initiative_key,omitempty"`
 	InitiativeID       *int64     `json:"initiative_id,omitempty"`
 	CompanionID        *int64     `json:"companion_id,omitempty"`
+	TargetProjectID    int64      `json:"target_project_id"`
+	TargetProjectKey   string     `json:"target_project_key,omitempty"`
 	Title              string     `json:"title"`
 	Status             string     `json:"status"`
 	Cadence            string     `json:"cadence"`

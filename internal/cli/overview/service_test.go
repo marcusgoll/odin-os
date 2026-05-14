@@ -314,6 +314,19 @@ func TestBuildSummarizesActualUseReadinessAndSourceAlignment(t *testing.T) {
 	ctx := context.Background()
 	env := newOverviewTestEnvironment(t)
 	seedOverviewReviewFixture(t, ctx, env)
+	nextDueAt := time.Date(2026, 4, 25, 9, 0, 0, 0, time.UTC)
+	if _, err := env.store.CreateFollowUpObligation(ctx, sqlite.CreateFollowUpObligationParams{
+		WorkspaceID:     env.workspaceID,
+		InitiativeID:    &env.initiativeID,
+		TargetProjectID: env.projectID,
+		Title:           "Resolve production-readiness follow-up",
+		Status:          "active",
+		CadenceJSON:     `{"mode":"once"}`,
+		NextDueAt:       nextDueAt,
+		PolicyJSON:      `{}`,
+	}); err != nil {
+		t.Fatalf("CreateFollowUpObligation() error = %v", err)
+	}
 	env.snapshot.Items = append(env.snapshot.Items, registry.Item{
 		Kind:  registry.KindWorkflow,
 		Key:   "delivery-profile-fixture",
@@ -341,6 +354,9 @@ func TestBuildSummarizesActualUseReadinessAndSourceAlignment(t *testing.T) {
 		HealthStatus:     "healthy",
 		BinaryPath:       "/tmp/odin/bin/odin",
 		SourceRoot:       "/tmp/odin",
+		Now: func() time.Time {
+			return nextDueAt.Add(time.Hour)
+		},
 	}).Build(ctx, scope.Resolution{})
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
@@ -354,6 +370,9 @@ func TestBuildSummarizesActualUseReadinessAndSourceAlignment(t *testing.T) {
 	}
 	if view.ActualUse.PendingApprovalCount != 1 || view.ActualUse.BlockedWorkItemCount != 1 || view.ActualUse.FailedWorkItemCount != 1 {
 		t.Fatalf("ActualUse = %+v, want pending approval, blocked work, and failed work counts", view.ActualUse)
+	}
+	if view.ActualUse.FollowUpObligationCount != 1 || view.ActualUse.DueFollowUpObligationCount != 1 {
+		t.Fatalf("ActualUse = %+v, want one due follow-up obligation surfaced for cleanup triage", view.ActualUse)
 	}
 	if view.ActualUse.WorkItemCount < view.ActualUse.OpenWorkItemCount+view.ActualUse.FailedWorkItemCount {
 		t.Fatalf("ActualUse = %+v, want work item count to include open and failed action-required work", view.ActualUse)

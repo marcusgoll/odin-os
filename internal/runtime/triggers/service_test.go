@@ -60,6 +60,9 @@ func TestEvaluateDueMaterializesEnabledScheduleTriggerOnce(t *testing.T) {
 	if task.Status != "queued" || task.RequestedBy != "automation_trigger:due-nightly" {
 		t.Fatalf("materialized task = %+v, want queued automation-trigger Work Item", task)
 	}
+	if len(task.AcceptanceCriteria) == 0 {
+		t.Fatalf("materialized task acceptance criteria = %#v, want dispatchable trigger work", task.AcceptanceCriteria)
+	}
 
 	result, err = service.EvaluateDue(ctx, now)
 	if err != nil {

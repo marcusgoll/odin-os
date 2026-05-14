@@ -4558,6 +4558,7 @@ func renderFollowUpView(ctx context.Context, store *sqlite.Store, obligation fol
 		ID:                 obligation.ID,
 		InitiativeID:       obligation.InitiativeID,
 		CompanionID:        obligation.CompanionID,
+		TargetProjectID:    obligation.TargetProjectID,
 		Title:              obligation.Title,
 		Status:             string(obligation.Status),
 		Cadence:            followupCadenceLabel(obligation.Cadence),
@@ -4571,6 +4572,13 @@ func renderFollowUpView(ctx context.Context, store *sqlite.Store, obligation fol
 			return commands.FollowUpView{}, err
 		}
 		view.InitiativeKey = initiative.Key
+	}
+	if obligation.TargetProjectID > 0 {
+		project, err := store.GetProject(ctx, obligation.TargetProjectID)
+		if err != nil {
+			return commands.FollowUpView{}, err
+		}
+		view.TargetProjectKey = project.Key
 	}
 	return view, nil
 }

@@ -62,11 +62,17 @@ func TestReadOnlyServiceRecordsGoalEvidenceAndAudit(t *testing.T) {
 	if result.AdapterStatus != "completed" || result.AdapterKind != "stub_local" || result.ExtractedTextSummary == "" {
 		t.Fatalf("result = %+v, want adapter response surfaced", result)
 	}
+	if result.RealBrowserEvidence || result.BrowserProofKind != "stub_contract_only" {
+		t.Fatalf("browser proof = real:%v kind:%q, want explicit stub-only proof classification", result.RealBrowserEvidence, result.BrowserProofKind)
+	}
 	if len(result.PageResults) != 1 || result.PageResults[0].Status != "visited" || result.PageResults[0].Title != "Docs" {
 		t.Fatalf("PageResults = %#v, want adapter page results surfaced", result.PageResults)
 	}
 	if !strings.Contains(result.Evidence.PayloadJSON, `"adapter_kind":"stub_local"`) || !strings.Contains(result.Evidence.PayloadJSON, `"visited_urls":["https://example.com/docs"]`) {
 		t.Fatalf("evidence payload = %s, want adapter response", result.Evidence.PayloadJSON)
+	}
+	if !strings.Contains(result.Evidence.PayloadJSON, `"browser_proof_kind":"stub_contract_only"`) || !strings.Contains(result.Evidence.PayloadJSON, `"real_browser_evidence":false`) {
+		t.Fatalf("evidence payload = %s, want explicit stub-only proof classification", result.Evidence.PayloadJSON)
 	}
 	if !strings.Contains(result.Evidence.PayloadJSON, `"page_results":[{"url":"https://example.com/docs","status":"visited","mode":"browser","title":"Docs","summary":"Stub summary for https://example.com/docs"}]`) {
 		t.Fatalf("evidence payload = %s, want adapter page results", result.Evidence.PayloadJSON)
@@ -92,6 +98,47 @@ func TestReadOnlyServiceRecordsGoalEvidenceAndAudit(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("events = %+v, want goal.evidence_recorded", events)
+	}
+}
+
+func TestReadOnlyServiceClassifiesLiveBrowserEvidenceAsRealBrowserProof(t *testing.T) {
+	store := openBrowserTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{Title: "Collect live browser evidence"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+
+	adapter := &recordingAdapter{response: huginnbrowser.Response{
+		Status:               "completed",
+		AdapterKind:          "huginn_live",
+		VisitedURLs:          []string{"https://example.com/docs"},
+		PageResults:          []huginnbrowser.PageResult{{URL: "https://example.com/docs", Status: "visited", Mode: "browser", Title: "Docs", Summary: "Live browser summary"}},
+		ExtractedTextSummary: "Live browser summary",
+		Screenshots:          []string{"/tmp/odin-browser-proof.png"},
+		ActionLog:            []string{"validated_read_only_request", "browser_mode_selected", "opened_start_url", "captured_read_only_evidence", "screenshot_captured"},
+	}}
+	result, err := Service{Store: store, Adapter: adapter}.Run(ctx, ReadOnlyTask{
+		GoalID:             goal.ID,
+		WorkerMode:         "browser",
+		Objective:          "Collect public documentation",
+		AllowedDomains:     []string{"example.com"},
+		StartURLs:          []string{"https://example.com/docs"},
+		MaxPages:           2,
+		MaxDurationSeconds: 30,
+		EvidenceRequired:   true,
+		Actions:            []string{"read"},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !result.RealBrowserEvidence || result.BrowserProofKind != "live_browser_readonly" {
+		t.Fatalf("browser proof = real:%v kind:%q, want live browser proof classification", result.RealBrowserEvidence, result.BrowserProofKind)
+	}
+	if !strings.Contains(result.Evidence.PayloadJSON, `"browser_proof_kind":"live_browser_readonly"`) || !strings.Contains(result.Evidence.PayloadJSON, `"real_browser_evidence":true`) {
+		t.Fatalf("evidence payload = %s, want live browser proof classification", result.Evidence.PayloadJSON)
 	}
 }
 
@@ -420,7 +467,7 @@ func TestReadOnlyServicePassesSiteProfilesToAdapter(t *testing.T) {
 	}
 }
 
-func TestReadOnlyServiceReferencesBrowserSessionWithoutSecrets(t *testing.T) {
+func TestReadOnlyServiceRejectsBrowserSessionUntilAttachIsImplemented(t *testing.T) {
 	store := openBrowserTestStore(t)
 	defer store.Close()
 
@@ -455,7 +502,7 @@ func TestReadOnlyServiceReferencesBrowserSessionWithoutSecrets(t *testing.T) {
 		ExtractedTextSummary: "Session referenced summary",
 		ActionLog:            []string{"validated_read_only_request"},
 	}}
-	result, err := Service{Store: store, Adapter: adapter}.Run(ctx, ReadOnlyTask{
+	_, err = Service{Store: store, Adapter: adapter}.Run(ctx, ReadOnlyTask{
 		GoalID:             goal.ID,
 		WorkerMode:         "browser",
 		Objective:          "Collect authenticated account evidence",
@@ -466,19 +513,11 @@ func TestReadOnlyServiceReferencesBrowserSessionWithoutSecrets(t *testing.T) {
 		BrowserSessionID:   session.ID,
 		Actions:            []string{"read"},
 	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "authenticated browser session attachment is not implemented") {
+		t.Fatalf("Run() error = %v, want fail-closed attach boundary", err)
 	}
-	if result.BrowserSession == nil || result.BrowserSession.ID != session.ID || result.BrowserSession.ProfilePath != session.ProfilePath {
-		t.Fatalf("result.BrowserSession = %+v, want safe session reference", result.BrowserSession)
-	}
-	if adapter.request.BrowserSession == nil || adapter.request.BrowserSession.ID != session.ID {
-		t.Fatalf("adapter request browser session = %+v, want safe session reference", adapter.request.BrowserSession)
-	}
-	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
-		if strings.Contains(strings.ToLower(result.Evidence.PayloadJSON), forbidden) {
-			t.Fatalf("evidence payload contains forbidden marker %q: %s", forbidden, result.Evidence.PayloadJSON)
-		}
+	if adapter.called {
+		t.Fatalf("adapter was called for unsupported authenticated browser session attach")
 	}
 }
 

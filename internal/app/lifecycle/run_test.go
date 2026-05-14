@@ -3438,6 +3438,14 @@ func TestRunReviewActFailedWorkFollowUpRequiresExplicitApproval(t *testing.T) {
 	if strings.Count(followUps, `"title": "Follow up on failed work: intake-review-1"`) != 1 || !strings.Contains(followUps, `"cadence": "once"`) {
 		t.Fatalf("followup list output = %s, want one persisted failed-work follow-up", followUps)
 	}
+	afterFollowUpReview := run("review", "list", "--json")
+	if strings.Contains(afterFollowUpReview, `"queue_id": "failed-work:1"`) {
+		t.Fatalf("review list after follow-up = %s, want failed work removed from review queue", afterFollowUpReview)
+	}
+	jobs := run("jobs", "--json")
+	if !strings.Contains(jobs, `"task_key": "intake-review-1"`) || !strings.Contains(jobs, `"status": "blocked"`) || !strings.Contains(jobs, `"blocked_reason": "failed_work_follow_up_created"`) {
+		t.Fatalf("jobs after follow-up = %s, want original task blocked behind follow-up", jobs)
+	}
 }
 
 func TestRunLogsIncludeProjectScopedIntakeEventsForOdinCoreScope(t *testing.T) {

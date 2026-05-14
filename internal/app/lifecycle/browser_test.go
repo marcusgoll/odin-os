@@ -36,6 +36,8 @@ func TestRunBrowserRunRecordsGoalEvidenceAndKeepsGoalStatus(t *testing.T) {
 		`"goal_id": 1`,
 		`"evidence_id": 1`,
 		`"adapter_kind": "stub_local"`,
+		`"browser_proof_kind": "stub_contract_only"`,
+		`"real_browser_evidence": false`,
 		`"page_results":`,
 		`"status": "visited"`,
 		`"no_live_browser_launched"`,
@@ -91,6 +93,8 @@ func TestRunBrowserRunTaskRecordsWorkEvidence(t *testing.T) {
 		`"task_id": 1`,
 		`"run_id": 1`,
 		`"run_artifact_id": 1`,
+		`"browser_proof_kind": "stub_contract_only"`,
+		`"real_browser_evidence": false`,
 		`"selected_links":`,
 		`"downloaded_files":`,
 		`"form_state_summary":`,
@@ -171,7 +175,7 @@ func TestRunBrowserRunRejectsUnsafeInputs(t *testing.T) {
 	}
 }
 
-func TestRunBrowserRunCanReferenceBrowserSession(t *testing.T) {
+func TestRunBrowserRunRejectsBrowserSessionAttachUntilImplemented(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
 
@@ -198,27 +202,15 @@ func TestRunBrowserRunCanReferenceBrowserSession(t *testing.T) {
 		t.Fatalf("verified.Status = %q, want verified", verified.Status)
 	}
 
-	browserRun := run("browser", "run", "--goal-id", int64String(goal.ID), "--url", "https://example.com/account", "--objective", "Collect account evidence", "--allowed-domain", "example.com", "--session-id", int64String(session.ID), "--worker-mode", "browser", "--json")
-	for _, want := range []string{
-		`"status": "recorded"`,
-		`"browser_session":`,
-		`"id": 1`,
-		`"domain": "example.com"`,
-		`"profile_path": "browser-sessions/profiles/google-main"`,
-	} {
-		if !strings.Contains(browserRun, want) {
-			t.Fatalf("browser run output = %s, want %s", browserRun, want)
-		}
+	var output bytes.Buffer
+	err := Run(context.Background(), root, []string{"browser", "run", "--goal-id", int64String(goal.ID), "--url", "https://example.com/account", "--objective", "Collect account evidence", "--allowed-domain", "example.com", "--session-id", int64String(session.ID), "--worker-mode", "browser", "--json"}, strings.NewReader(""), &output)
+	if err == nil || !strings.Contains(err.Error(), "authenticated browser session attachment is not implemented") {
+		t.Fatalf("Run(browser session attach) error = %v output=%s, want fail-closed attach boundary", err, output.String())
 	}
 
 	logs := run("logs", "--json")
-	if !strings.Contains(logs, `"type": "goal.evidence_recorded"`) || !strings.Contains(logs, `"browser_session"`) {
-		t.Fatalf("logs output = %s, want evidence event with safe browser session metadata", logs)
-	}
-	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
-		if strings.Contains(strings.ToLower(logs), forbidden) {
-			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
-		}
+	if strings.Contains(logs, `"type": "goal.evidence_recorded"`) {
+		t.Fatalf("logs output = %s, want no evidence event for unsupported browser session attach", logs)
 	}
 }
 

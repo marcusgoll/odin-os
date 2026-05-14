@@ -33,6 +33,8 @@ type browserRunView struct {
 	MutatingActions           []string                                 `json:"mutating_actions,omitempty"`
 	AdapterStatus             string                                   `json:"adapter_status,omitempty"`
 	AdapterKind               string                                   `json:"adapter_kind,omitempty"`
+	BrowserProofKind          string                                   `json:"browser_proof_kind,omitempty"`
+	RealBrowserEvidence       bool                                     `json:"real_browser_evidence"`
 	StartURLs                 []string                                 `json:"start_urls"`
 	AllowedDomains            []string                                 `json:"allowed_domains"`
 	MaxPages                  int                                      `json:"max_pages"`
@@ -271,6 +273,8 @@ func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io
 		EvidenceType:              result.EvidenceType,
 		AdapterStatus:             result.AdapterStatus,
 		AdapterKind:               result.AdapterKind,
+		BrowserProofKind:          result.BrowserProofKind,
+		RealBrowserEvidence:       result.RealBrowserEvidence,
 		StartURLs:                 result.StartURLs,
 		AllowedDomains:            result.AllowedDomains,
 		MaxPages:                  result.MaxPages,
@@ -358,6 +362,8 @@ func runBrowserTask(ctx context.Context, app bootstrap.App, command commands.Bro
 		EvidenceType:              result.EvidenceType,
 		AdapterStatus:             result.AdapterStatus,
 		AdapterKind:               result.AdapterKind,
+		BrowserProofKind:          result.BrowserProofKind,
+		RealBrowserEvidence:       result.RealBrowserEvidence,
 		StartURLs:                 result.StartURLs,
 		AllowedDomains:            result.AllowedDomains,
 		MaxPages:                  result.MaxPages,

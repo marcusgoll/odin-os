@@ -369,6 +369,10 @@ func TestDoctorReportIsHealthyWhenAnyExecutorLatestSampleIsHealthy(t *testing.T)
 	if report.Status != StatusHealthy {
 		t.Fatalf("Status = %q, want %q", report.Status, StatusHealthy)
 	}
+	executorCheck := findHealthCheck(t, report, "executor")
+	if executorCheck.Details["healthy_executor_keys"] != "codex_headless" || executorCheck.Details["unhealthy_executor_keys"] != "claude_code_headless" {
+		t.Fatalf("executor details = %#v, want explicit healthy and unhealthy executor keys", executorCheck.Details)
+	}
 }
 
 func TestDoctorReportIsDegradedWhenExecutorScopeIsExplicitlyEmpty(t *testing.T) {
@@ -508,4 +512,16 @@ func openStore(t *testing.T) *sqlite.Store {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	return store
+}
+
+func findHealthCheck(t *testing.T, report Report, name string) Check {
+	t.Helper()
+
+	for _, check := range report.Checks {
+		if check.Name == name {
+			return check
+		}
+	}
+	t.Fatalf("health check %q not found in %#v", name, report.Checks)
+	return Check{}
 }
