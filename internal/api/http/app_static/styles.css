@@ -194,7 +194,8 @@ h3,
 
 .capture-tabs label,
 button,
-.file-button {
+.file-button,
+.link-button {
   min-height: 44px;
   border: 1px solid #aeb9b7;
   border-radius: 8px;
@@ -203,6 +204,13 @@ button,
   color: var(--text);
   font: inherit;
   font-weight: 700;
+}
+
+.link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
 }
 
 .capture-tabs label {
@@ -351,6 +359,11 @@ textarea {
   border-color: #b9d4e4;
 }
 
+.status-card.action-card {
+  display: grid;
+  gap: 9px;
+}
+
 .status-card.quiet,
 .operator-section.quiet {
   background: var(--quiet-soft);
@@ -376,6 +389,38 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.fact-grid {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(86px, max-content) minmax(0, 1fr);
+  gap: 5px 10px;
+  font-size: 0.82rem;
+}
+
+.fact-grid dt {
+  color: var(--muted);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.fact-grid dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.action-row {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.action-row .small,
+.button-row .small {
+  width: auto;
+  flex: 1 1 118px;
+}
+
 .badge {
   max-width: 48%;
   overflow-wrap: anywhere;
@@ -385,6 +430,11 @@ textarea {
 .confirmation-panel {
   border-color: #c94d3f;
   background: var(--danger-soft);
+}
+
+.confirmation-panel.review-panel {
+  border-color: #8ebbd2;
+  background: var(--info-soft);
 }
 
 .failed-list {
@@ -443,6 +493,10 @@ textarea {
     align-items: stretch;
   }
 
+  .button-row {
+    display: grid;
+  }
+
   .media-row,
   .field-grid {
     display: grid;
@@ -469,6 +523,11 @@ textarea {
     max-width: 100%;
     width: fit-content;
     text-align: left;
+  }
+
+  .fact-grid {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 }
 

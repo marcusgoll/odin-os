@@ -88,6 +88,35 @@ Returns run summary projections from `internal/runtime/projections.ListRunSummar
 
 Returns a mobile review queue projection derived from current reviewable intake items, pending approvals, and failed work. This is read-only and must not replace `odin review` as the canonical decision queue.
 
+### POST `/mobile/review-queue/{queue_id}/decision`
+
+Applies only the review actions that already have a narrow mobile-safe
+continuation:
+
+- `intake-review:<id>` supports `reject`, `clarify`, and `archive`; `accept`
+  remains in `odin review` because it may promote work or require policy
+  approval.
+- `browser-login:<id>` supports `complete` after an operator manually performs
+  the attended login handoff. This records an operator attestation and verifies
+  the browser session metadata; it does not collect credentials.
+- `approval:<id>` decisions must use `/mobile/approvals/{approval_id}/decision`.
+- failed work, recovery, and browser evidence rows remain inspect-only until
+  their existing runtime services expose a mobile-safe mutation contract.
+
+Body:
+
+```json
+{
+  "action": "clarify",
+  "reason": "Need current screenshot evidence",
+  "actor": "odin-pwa"
+}
+```
+
+The route uses the same mobile authentication and CSRF policy as other mobile
+mutations and fails closed with `409 mobile_review_action_unsupported` for
+unsupported queue sources or actions.
+
 ### GET `/mobile/approvals`
 
 Returns pending approval projections from `internal/runtime/projections.ListPendingApprovalViews` plus resolver support from `internal/runtime/approvals.Service.Detail` when available.
@@ -106,7 +135,7 @@ Body:
 
 Rules:
 
-- `action` is `approve` or `deny`.
+- `action` is `approve`, `deny`, or `clarify`.
 - `reason` is required.
 - The route calls `approvals.Service.Resolve`.
 - The canonical approval service emits approval audit events through the store.

@@ -107,6 +107,13 @@ func TestMobileSessionRequiresCSRFForCookieMutations(t *testing.T) {
 		body, _ := io.ReadAll(response.Body)
 		t.Fatalf("cookie mutation without csrf status = %d body=%s, want %d", response.StatusCode, string(body), http.StatusForbidden)
 	}
+
+	reviewResponse := postJSON(t, server.URL+"/mobile/review-queue/intake-review:1/decision", sessionCookie.String(), "", `{"action":"clarify","reason":"csrf missing"}`)
+	defer reviewResponse.Body.Close()
+	if reviewResponse.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(reviewResponse.Body)
+		t.Fatalf("review mutation without csrf status = %d body=%s, want %d", reviewResponse.StatusCode, string(body), http.StatusForbidden)
+	}
 }
 
 func TestMobileIntakeRejectsOversizeUploadForAuthenticatedSession(t *testing.T) {
