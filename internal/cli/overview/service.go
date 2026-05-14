@@ -100,6 +100,8 @@ type ActualUseLane struct {
 	IntakeReviewCount             int    `json:"intake_review_count"`
 	AutomationTriggerCount        int    `json:"automation_trigger_count"`
 	EnabledAutomationTriggerCount int    `json:"enabled_automation_trigger_count"`
+	FollowUpObligationCount       int    `json:"follow_up_obligation_count"`
+	DueFollowUpObligationCount    int    `json:"due_follow_up_obligation_count"`
 	DeliveryProfileCount          int    `json:"delivery_profile_count"`
 	ExplicitIntentWorkItemCount   int    `json:"explicit_intent_work_item_count"`
 	FallbackIntentWorkItemCount   int    `json:"fallback_intent_work_item_count"`
@@ -1597,6 +1599,18 @@ func executionIntentLane(workItems []WorkItemSummary) ExecutionIntentLane {
 }
 
 func actualUseLane(view View) ActualUseLane {
+	followUpObligationCount := 0
+	dueFollowUpObligationCount := 0
+	for _, trigger := range view.AutomationTriggers.Items {
+		if trigger.Source != "follow_up_obligation" {
+			continue
+		}
+		followUpObligationCount++
+		switch trigger.DueStatus {
+		case "due", "overdue":
+			dueFollowUpObligationCount++
+		}
+	}
 	lane := ActualUseLane{
 		Wiring:                        WiringLive,
 		WorkItemCount:                 len(view.WorkItems) + len(view.Observability.RecoveryGuidance),
@@ -1610,6 +1624,8 @@ func actualUseLane(view View) ActualUseLane {
 		IntakeReviewCount:             view.ReviewQueue.IntakeCount,
 		AutomationTriggerCount:        view.AutomationTriggers.TriggerCount,
 		EnabledAutomationTriggerCount: view.AutomationTriggers.EnabledCount,
+		FollowUpObligationCount:       followUpObligationCount,
+		DueFollowUpObligationCount:    dueFollowUpObligationCount,
 		DeliveryProfileCount:          view.DeliveryProfiles.ProfileCount,
 		ExplicitIntentWorkItemCount:   view.ExecutionIntent.ExplicitWorkItemCount,
 		FallbackIntentWorkItemCount:   view.ExecutionIntent.FallbackWorkItemCount,

@@ -2634,6 +2634,12 @@ func runFailedWorkReviewFollowUp(ctx context.Context, app bootstrap.App, taskID 
 		if err != nil {
 			return err
 		}
+		if _, err := app.Store.BlockTask(ctx, sqlite.BlockTaskParams{
+			TaskID: task.ID,
+			Reason: "failed_work_follow_up_created",
+		}); err != nil {
+			return err
+		}
 		view.Created = true
 		view.FollowUp = &followUpView
 	}

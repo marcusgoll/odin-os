@@ -64,6 +64,7 @@ func TestFollowupAcceptance(t *testing.T) {
 				Status     string    `json:"status"`
 				NextDueAt  time.Time `json:"next_due_at"`
 				Initiative string    `json:"initiative_key"`
+				Project    string    `json:"target_project_key"`
 			} `json:"obligations"`
 		}
 		if err := json.Unmarshal([]byte(listOutput), &followupsView); err != nil {
@@ -73,8 +74,8 @@ func TestFollowupAcceptance(t *testing.T) {
 			t.Fatalf("followup list obligations len = %d, want 1", len(followupsView.Obligations))
 		}
 		followup := followupsView.Obligations[0]
-		if followup.Initiative != "life-admin" || followup.Status != "active" {
-			t.Fatalf("followup list obligation = %+v, want active life-admin obligation", followup)
+		if followup.Initiative != "life-admin" || followup.Project != "odin-core" || followup.Status != "active" {
+			t.Fatalf("followup list obligation = %+v, want active life-admin obligation targeting odin-core", followup)
 		}
 
 		fakeNow := followup.NextDueAt.Add(time.Hour).UTC().Format(time.RFC3339)

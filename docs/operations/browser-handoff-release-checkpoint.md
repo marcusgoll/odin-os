@@ -19,7 +19,9 @@ Use this checkpoint before treating the browser handoff runner as homelab operat
 
 - Profile persistence and encrypted profile storage.
 - Cookie, browser storage state, and credential storage.
-- Authenticated session attachment to browser runs or goal evidence.
+- Authenticated session attachment to browser runs or goal evidence. Until the
+  attach contract is implemented, `odin browser run --session-id <id>` must
+  fail closed before adapter execution and must not record browser evidence.
 - Automatic login, form fill, credential entry, MFA handling, passkey handling, or consent clicking.
 - Tailscale service creation, public viewer exposure, or automatic private routing setup.
 - Browser args, custom browser environment, working directory, or profile path reuse.

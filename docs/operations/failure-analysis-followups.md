@@ -39,6 +39,17 @@ After approval, inspect the persisted obligation:
 odin followup list --json
 ```
 
+The JSON output includes `target_project_id` and `target_project_key` so the
+operator can group failed-work follow-ups by owning project before deciding
+whether to complete, snooze, or plan a repair slice.
+
+For a production-readiness backlog check:
+
+```bash
+odin overview --json | jq '.actual_use'
+odin followup list --json | jq '{count:(.obligations|length), by_project:([.obligations[].target_project_key] | group_by(.) | map({project:.[0], count:length}))}'
+```
+
 Use `retry` separately when retry policy allows it:
 
 ```bash
