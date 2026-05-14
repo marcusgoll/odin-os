@@ -126,10 +126,26 @@ async function mobileFetch(path, options = {}) {
   if (csrf) headers['X-Odin-CSRF'] = csrf;
   const response = await fetch(path, { ...options, headers, credentials: 'same-origin' });
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `HTTP ${response.status}`);
+    throw await responseError(response);
   }
   return response.json();
+}
+
+async function responseError(response) {
+  const text = await response.text();
+  let code = '';
+  let message = text || `HTTP ${response.status}`;
+  try {
+    const payload = JSON.parse(text);
+    code = payload?.error?.code || '';
+    message = payload?.error?.message || message;
+  } catch {
+    // Plain-text responses such as 405 still use the raw body as the message.
+  }
+  const error = new Error(message);
+  error.code = code;
+  error.status = response.status;
+  return error;
 }
 
 async function sendCapture(payload, attachment) {
@@ -147,8 +163,45 @@ async function sendCapture(payload, attachment) {
   return mobileFetch('/mobile/intake/raw', { method: 'POST', headers, body });
 }
 
+async function hasRegisteredSession() {
+  try {
+    const response = await fetch('/app/session', { credentials: 'same-origin' });
+    if (!response.ok) return true;
+    const payload = await response.json();
+    return Boolean(payload.authenticated);
+  } catch {
+    return true;
+  }
+}
+
+function normalizeAdminTokenInput(value) {
+  let token = String(value || '').trim();
+  const assignment = token.match(/^ODIN_ADMIN_TOKEN\s*=\s*(.*)$/);
+  if (assignment) token = assignment[1].trim();
+  if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+    token = token.slice(1, -1).trim();
+  }
+  return token.replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\s+/g, '');
+}
+
+function registrationFailureMessage(error) {
+  if (error.code === 'admin_disabled') {
+    return 'Odin admin token is not configured on this server.';
+  }
+  if (error.code === 'admin_auth_failed') {
+    return 'Admin token did not match this Odin server. Run odin mobile token on the server and paste that value.';
+  }
+  return error.message;
+}
+
 async function refreshDashboard() {
   showError('');
+  const authenticated = await hasRegisteredSession();
+  if (!authenticated) {
+    renderAuthRequired();
+    setStatus('Register this device to load Odin projections.');
+    return;
+  }
   try {
     const [status, overview, reviewQueue, approvals, browser, notifications] = await Promise.all([
       mobileFetch('/mobile/status'),
@@ -161,6 +214,11 @@ async function refreshDashboard() {
     renderDashboard({ status, overview, reviewQueue, approvals, browser, notifications });
   } catch (error) {
     renderAuthRequired();
+    if (error.code === 'admin_auth_required') {
+      setStatus('Register this device to load Odin projections.');
+      showError('');
+      return;
+    }
     showError(`Could not load Odin projections: ${error.message}`);
   }
 }
@@ -435,21 +493,32 @@ imageInput.addEventListener('change', () => {
 });
 
 document.querySelector('#register-device').addEventListener('click', async () => {
-  const value = window.prompt('One-time Odin admin token');
-  if (value === null || value.trim() === '') {
+  const value = window.prompt('Current Odin admin token');
+  const token = normalizeAdminTokenInput(value);
+  if (value === null || token === '') {
     return;
   }
-  const response = await fetch('/mobile/devices/register', {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: {
-      Authorization: `Bearer ${value.trim()}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ device_name: navigator.userAgent || 'mobile browser' }),
-  });
+  let response;
+  try {
+    response = await fetch('/mobile/devices/register', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ device_name: navigator.userAgent || 'mobile browser' }),
+    });
+  } catch (error) {
+    setStatus(`Device registration failed: ${error.message}`);
+    showError(`Device registration failed: ${error.message}`);
+    return;
+  }
   if (!response.ok) {
-    setStatus('Device registration failed.');
+    const error = await responseError(response);
+    const detail = registrationFailureMessage(error);
+    setStatus(`Device registration failed: ${detail}`);
+    showError(`Device registration failed: ${detail}`);
     return;
   }
   const payload = await response.json();

@@ -93,6 +93,7 @@ func TestOperationalHandlerServesMobileCapturePWAShell(t *testing.T) {
 	html := getURLText(t, server.URL+"/app/")
 	for _, want := range []string{
 		`<link rel="manifest" href="/app/manifest.webmanifest">`,
+		`<link rel="icon" href="/app/icons/icon-192.svg" type="image/svg+xml">`,
 		`What needs me now?`,
 		`Action Required`,
 		`Approvals`,
@@ -136,6 +137,7 @@ func TestOperationalHandlerServesMobileCapturePWAShell(t *testing.T) {
 	appJS := getURLText(t, server.URL+"/app/app.js")
 	for _, want := range []string{
 		`navigator.serviceWorker.register('/app/service-worker.js')`,
+		`/app/session`,
 		`/mobile/devices/register`,
 		`/mobile/status`,
 		`/mobile/overview`,
@@ -144,6 +146,7 @@ func TestOperationalHandlerServesMobileCapturePWAShell(t *testing.T) {
 		`/mobile/browser/status`,
 		`/mobile/notifications/preferences`,
 		`/mobile/approvals/${item.approval_id}/decision`,
+		`Odin admin token is not configured on this server.`,
 		`No production mock data is shown.`,
 		`No action-required rows in current projections.`,
 		`Approval reason is required.`,
@@ -168,6 +171,20 @@ func TestOperationalHandlerServesMobileCapturePWAShell(t *testing.T) {
 		if !strings.Contains(styles, want) {
 			t.Fatalf("/app/styles.css missing visual smoke marker %q:\n%s", want, styles)
 		}
+	}
+
+	session := getURLText(t, server.URL+"/app/session")
+	if !strings.Contains(session, `"authenticated":false`) {
+		t.Fatalf("/app/session = %s, want unauthenticated public session status", session)
+	}
+
+	faviconResponse, err := http.Get(server.URL + "/favicon.ico")
+	if err != nil {
+		t.Fatalf("GET /favicon.ico error = %v", err)
+	}
+	defer faviconResponse.Body.Close()
+	if faviconResponse.StatusCode != http.StatusOK {
+		t.Fatalf("GET /favicon.ico status = %d, want redirected icon success", faviconResponse.StatusCode)
 	}
 }
 

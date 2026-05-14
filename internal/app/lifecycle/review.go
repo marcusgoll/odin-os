@@ -22,6 +22,7 @@ import (
 	"odin-os/internal/runtime/memoryproposal"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/recovery"
+	"odin-os/internal/runtime/reviewqueue"
 	"odin-os/internal/skills"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tools/invocation"
@@ -125,38 +126,7 @@ type failedWorkFollowUpOutcomeView struct {
 	FollowUp           *commands.FollowUpView        `json:"follow_up,omitempty"`
 }
 
-type reviewQueueEntry struct {
-	ReviewID               string   `json:"review_id,omitempty"`
-	QueueID                string   `json:"queue_id"`
-	Type                   string   `json:"type,omitempty"`
-	SourceType             string   `json:"source_type"`
-	SourceID               int64    `json:"source_id,omitempty"`
-	ObjectID               int64    `json:"object_id"`
-	ObjectKey              string   `json:"object_key"`
-	GoalID                 int64    `json:"goal_id,omitempty"`
-	Status                 string   `json:"status"`
-	Reason                 string   `json:"reason,omitempty"`
-	Title                  string   `json:"title,omitempty"`
-	CreatedAt              string   `json:"created_at,omitempty"`
-	UpdatedAt              string   `json:"updated_at,omitempty"`
-	ProjectScope           string   `json:"project_scope,omitempty"`
-	Summary                string   `json:"summary,omitempty"`
-	TaskID                 int64    `json:"task_id,omitempty"`
-	TaskKey                string   `json:"task_key,omitempty"`
-	TaskStatus             string   `json:"task_status,omitempty"`
-	WorkKind               string   `json:"work_kind,omitempty"`
-	Source                 string   `json:"source,omitempty"`
-	Risk                   string   `json:"risk,omitempty"`
-	Severity               string   `json:"severity,omitempty"`
-	Decision               string   `json:"decision,omitempty"`
-	RecommendedAction      string   `json:"recommended_action,omitempty"`
-	OperatorNextStep       string   `json:"operator_next_step,omitempty"`
-	RetryEligible          *bool    `json:"retry_eligible,omitempty"`
-	RetryBlockReason       string   `json:"retry_block_reason,omitempty"`
-	RecoveryRecommendation string   `json:"recovery_recommendation,omitempty"`
-	BrowserEvidenceCount   int      `json:"browser_evidence_count,omitempty"`
-	AllowedActions         []string `json:"allowed_actions"`
-}
+type reviewQueueEntry = reviewqueue.Entry
 
 type reviewQueueRef struct {
 	Kind string

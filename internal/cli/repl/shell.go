@@ -35,6 +35,7 @@ import (
 	healthsvc "odin-os/internal/runtime/health"
 	jobsvc "odin-os/internal/runtime/jobs"
 	"odin-os/internal/runtime/projections"
+	"odin-os/internal/runtime/reviewqueue"
 	runsvc "odin-os/internal/runtime/runs"
 	"odin-os/internal/runtime/socialcopilot"
 	transfersvc "odin-os/internal/runtime/transfers"
@@ -48,19 +49,20 @@ import (
 )
 
 type Environment struct {
-	Store               *sqlite.Store
-	Registry            projects.Registry
-	RegistrySnapshot    registry.Snapshot
-	RegistryDiagnostics []projects.Diagnostic
-	SessionStore        SessionStore
-	CapabilityGateway   capabilityGateway
-	CapabilityService   *capabilities.Service
-	CommandService      CommandExecutor
-	ExecutorConfig      executorrouter.Config
-	Executors           map[string]contract.Executor
-	TransferInvocation  invocation.Service
-	Leases              leases.Manager
-	Now                 func() time.Time
+	Store                 *sqlite.Store
+	Registry              projects.Registry
+	RegistrySnapshot      registry.Snapshot
+	RegistryDiagnostics   []projects.Diagnostic
+	SessionStore          SessionStore
+	CapabilityGateway     capabilityGateway
+	CapabilityService     *capabilities.Service
+	CommandService        CommandExecutor
+	ExecutorConfig        executorrouter.Config
+	Executors             map[string]contract.Executor
+	ReviewQueueProjection func(context.Context) (reviewqueue.Projection, error)
+	TransferInvocation    invocation.Service
+	Leases                leases.Manager
+	Now                   func() time.Time
 }
 
 type CommandExecutor interface {
@@ -1367,10 +1369,11 @@ func (shell *Shell) handleJobs(ctx context.Context, output io.Writer) error {
 
 func (shell *Shell) handleOverview(ctx context.Context, output io.Writer) error {
 	view, err := clioverview.Service{
-		Store:            shell.env.Store,
-		Registry:         shell.env.Registry,
-		RegistrySnapshot: shell.registrySnapshot(),
-		Now:              shell.now,
+		Store:                 shell.env.Store,
+		Registry:              shell.env.Registry,
+		RegistrySnapshot:      shell.registrySnapshot(),
+		Now:                   shell.now,
+		ReviewQueueProjection: shell.env.ReviewQueueProjection,
 	}.Build(ctx, shell.state.Scope)
 	if err != nil {
 		return err

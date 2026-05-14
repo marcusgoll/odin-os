@@ -55,8 +55,10 @@ import (
 	"odin-os/internal/runtime/jobs"
 	mediasvc "odin-os/internal/runtime/media"
 	runtimenotifications "odin-os/internal/runtime/notifications"
+	runtimeoverview "odin-os/internal/runtime/overview"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/recovery"
+	"odin-os/internal/runtime/reviewqueue"
 	"odin-os/internal/runtime/runs"
 	"odin-os/internal/runtime/socialcopilot"
 	runtimestate "odin-os/internal/runtime/state"
@@ -73,13 +75,14 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal browser task initiative companion profile followup trigger scheduler transition skills design e2e\n\nRun detail: odin runs show <id>"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal mobile browser task initiative companion profile followup trigger scheduler transition skills design e2e\n\nRun detail: odin runs show <id>"
 
 const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<true|false>] [--dry-run|dry_run=<true|false>] [--json]"
 const capabilitiesUsage = "usage: odin capabilities list [--kind agent|skill|workflow|command|tool] [--scope <scope>] [--json]\n       odin capabilities show <id> [--version <version>] [--json]"
 const capabilityCommandSource = "capability_gateway"
 const capabilityPluginModel = "plugins_are_packages_not_runtime_kind"
 const serveUsage = "usage: odin serve"
+const mobileUsage = "usage: odin mobile token"
 const backupUsage = "usage: odin backup <archive-path>"
 const restoreUsage = "usage: odin restore <archive-path> <destination-root>"
 const verifyBackupUsage = "usage: odin verify-backup <archive-path>"
@@ -264,6 +267,9 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		_, err := fmt.Fprintln(stdout, serveUsage)
 		return err
 	}
+	if len(args) > 0 && args[0] == "mobile" {
+		return runMobilePreflight(cfg, args[1:], stdout)
+	}
 	if len(args) > 0 && isOperationalHelpCommand(args[0]) && isHelpArgs(args[1:]) {
 		_, err := fmt.Fprintln(stdout, operationalHelpUsage(args[0]))
 		return err
@@ -361,6 +367,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return commands.RunMemory(ctx, app.Store, args[1:], stdout)
 	case "goal":
 		return runGoal(ctx, app, args[1:], stdout)
+	case "mobile":
+		return runMobilePreflight(cfg, args[1:], stdout)
 	case "browser":
 		return runBrowser(ctx, app, args[1:], stdout)
 	case "transition":
@@ -433,6 +441,26 @@ func operationalHelpUsage(command string) string {
 	}
 }
 
+func runMobilePreflight(cfg appconfig.Config, args []string, stdout io.Writer) error {
+	if len(args) == 0 || isHelpArgs(args) {
+		_, err := fmt.Fprintln(stdout, mobileUsage)
+		return err
+	}
+	if len(args) != 1 || args[0] != "token" {
+		return fmt.Errorf(mobileUsage)
+	}
+	tokenEnv := strings.TrimSpace(cfg.Service.AdminTokenEnv)
+	if tokenEnv == "" {
+		tokenEnv = "ODIN_ADMIN_TOKEN"
+	}
+	token := strings.TrimSpace(cfg.AdminToken)
+	if token == "" {
+		return fmt.Errorf("%s is not configured for mobile device registration", tokenEnv)
+	}
+	_, err := fmt.Fprintf(stdout, "%s=%s\n", tokenEnv, token)
+	return err
+}
+
 func runRepl(ctx context.Context, app bootstrap.App, stdin io.Reader, stdout io.Writer, now func() time.Time) error {
 	shell, err := newShell(app, now)
 	if err != nil {
@@ -468,6 +496,9 @@ func runOverview(ctx context.Context, app bootstrap.App, args []string, stdout i
 		HealthStatus:     healthStatus,
 		BinaryPath:       binaryPath,
 		SourceRoot:       app.RepoRoot,
+		ReviewQueueProjection: func(ctx context.Context) (reviewqueue.Projection, error) {
+			return readReviewQueueProjection(ctx, app)
+		},
 	}.Build(ctx, state.Scope)
 	if err != nil {
 		return err
@@ -3301,7 +3332,7 @@ func runLogsShow(ctx context.Context, store *sqlite.Store, records []runtimeeven
 		if record.ID != eventID {
 			continue
 		}
-		items, err := clioverview.BuildActivityEventSummaries(ctx, store, []runtimeevents.Record{record}, true)
+		items, err := runtimeoverview.BuildActivityEventSummaries(ctx, store, []runtimeevents.Record{record}, true)
 		if err != nil {
 			return err
 		}
@@ -3310,7 +3341,7 @@ func runLogsShow(ctx context.Context, store *sqlite.Store, records []runtimeeven
 		}
 		if jsonOutput {
 			return commands.WriteJSON(stdout, struct {
-				Event clioverview.ActivityEventSummary `json:"event"`
+				Event runtimeoverview.ActivityEventSummary `json:"event"`
 			}{Event: items[0]})
 		}
 		return writeActivityEventDetail(stdout, items[0])
@@ -3354,13 +3385,13 @@ func runLogsTrail(ctx context.Context, store *sqlite.Store, records []runtimeeve
 	default:
 		return fmt.Errorf(logsUsage)
 	}
-	items, err := clioverview.BuildActivityEventSummaries(ctx, store, filtered, jsonOutput)
+	items, err := runtimeoverview.BuildActivityEventSummaries(ctx, store, filtered, jsonOutput)
 	if err != nil {
 		return err
 	}
 	if jsonOutput {
 		return commands.WriteJSON(stdout, struct {
-			Items []clioverview.ActivityEventSummary `json:"items"`
+			Items []runtimeoverview.ActivityEventSummary `json:"items"`
 		}{Items: items})
 	}
 	return writeActivityEventTrail(stdout, items)
@@ -3513,7 +3544,7 @@ func parsePositiveInt64Arg(raw, label string) (int64, error) {
 	return id, nil
 }
 
-func writeActivityEventDetail(stdout io.Writer, item clioverview.ActivityEventSummary) error {
+func writeActivityEventDetail(stdout io.Writer, item runtimeoverview.ActivityEventSummary) error {
 	if _, err := fmt.Fprintln(stdout, activityEventLine(item)); err != nil {
 		return err
 	}
@@ -3524,7 +3555,7 @@ func writeActivityEventDetail(stdout io.Writer, item clioverview.ActivityEventSu
 	return err
 }
 
-func writeActivityEventTrail(stdout io.Writer, items []clioverview.ActivityEventSummary) error {
+func writeActivityEventTrail(stdout io.Writer, items []runtimeoverview.ActivityEventSummary) error {
 	if len(items) == 0 {
 		_, err := fmt.Fprintln(stdout, "no logs")
 		return err
@@ -3537,7 +3568,7 @@ func writeActivityEventTrail(stdout io.Writer, items []clioverview.ActivityEvent
 	return nil
 }
 
-func activityEventLine(item clioverview.ActivityEventSummary) string {
+func activityEventLine(item runtimeoverview.ActivityEventSummary) string {
 	return fmt.Sprintf(
 		"event=%d type=%s scope=%s project=%s work_item=%s run=%s approval=%s summary=%s",
 		item.EventID,
@@ -5364,6 +5395,9 @@ func newShell(app bootstrap.App, nowOverride ...func() time.Time) (*repl.Shell, 
 		CommandService:      servedCommandService{app: app},
 		ExecutorConfig:      app.ExecutorConfig,
 		Executors:           app.Executors,
+		ReviewQueueProjection: func(ctx context.Context) (reviewqueue.Projection, error) {
+			return readReviewQueueProjection(ctx, app)
+		},
 		Leases: leases.Manager{
 			Store:        app.Store,
 			Git:          gitadapter.Adapter{},
@@ -6191,24 +6225,32 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		background.Wait()
 	}()
 
-	if _, err := runFollowUpCycle(operationCtx, followUpService, now()); err != nil {
-		logBackgroundError(logger, "follow_up", err)
+	runStartupHealthSynchronously := ctx.Err() != nil
+	if runStartupHealthSynchronously {
+		runHealthCycle(operationCtx, healthDeps, logger)
 	}
-	runGoalTickCycle(operationCtx, goalService, logger)
-	if _, err := recoveryService.RunCycle(operationCtx); err != nil {
-		logBackgroundError(logger, "self_heal", err)
-	}
-	if mediaService != nil {
-		if _, err := mediaService.RunCycle(operationCtx); err != nil {
-			logBackgroundError(logger, "media_supervisor", err)
+	go func() {
+		startupCtx, cancel := serveStartupContext(operationCtx)
+		defer cancel()
+		if !runStartupHealthSynchronously {
+			runHealthCycle(startupCtx, healthDeps, logger)
 		}
-	}
-	healthCtx, cancelHealth := serveOperationContext(operationCtx)
-	runHealthCycle(healthCtx, healthDeps, logger)
-	cancelHealth()
-	if err := attemptDispatchIfReady(operationCtx, healthService, healthDeps.RegistryHealthy, jobService); err != nil {
-		logBackgroundError(logger, "task_runner", err)
-	}
+		if _, err := runFollowUpCycle(startupCtx, followUpService, now()); err != nil {
+			logBackgroundError(logger, "follow_up", err)
+		}
+		runGoalTickCycle(startupCtx, goalService, logger)
+		if _, err := recoveryService.RunCycle(startupCtx); err != nil {
+			logBackgroundError(logger, "self_heal", err)
+		}
+		if mediaService != nil {
+			if _, err := mediaService.RunCycle(startupCtx); err != nil {
+				logBackgroundError(logger, "media_supervisor", err)
+			}
+		}
+		if err := attemptDispatchIfReady(startupCtx, healthService, healthDeps.RegistryHealthy, jobService); err != nil {
+			logBackgroundError(logger, "task_runner", err)
+		}
+	}()
 
 	shutdownControlCtx, cancelShutdown := context.WithCancel(context.Background())
 	shutdownDone := make(chan struct{})

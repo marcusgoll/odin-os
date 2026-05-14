@@ -53,6 +53,7 @@ func OperatorHelp(binary string) string {
   %[1]s profile          Show runtime profile details
   %[1]s project          Manage enrolled projects
   %[1]s workspace        Manage project Codex workspaces
+  %[1]s mobile token     Show the current mobile device registration token
   %[1]s runs [--json]    List run attempts
   %[1]s runs show <id>   Show run detail and failure-analysis evidence
   %[1]s leases cleanup   Preview or confirm task-owned worktree cleanup

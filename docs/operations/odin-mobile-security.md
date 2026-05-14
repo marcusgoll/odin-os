@@ -26,7 +26,8 @@ internet product.
 ## Auth And Sessions
 
 - Device registration is `POST /mobile/devices/register`.
-- Registration requires the configured Odin admin bearer token.
+- Registration requires the configured Odin admin bearer token. Operators should
+  read the current PWA registration credential with `odin mobile token`.
 - The admin token is a one-time registration credential for the PWA. It must not
   be stored in frontend state.
 - Registration creates a durable `mobile_device` row and a short-lived

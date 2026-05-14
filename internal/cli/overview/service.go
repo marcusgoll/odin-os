@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -21,30 +20,38 @@ import (
 	approvalsvc "odin-os/internal/runtime/approvals"
 	runtimeevents "odin-os/internal/runtime/events"
 	runtimeknowledge "odin-os/internal/runtime/knowledge"
+	runtimeoverview "odin-os/internal/runtime/overview"
 	"odin-os/internal/runtime/projections"
 	"odin-os/internal/runtime/recovery"
+	"odin-os/internal/runtime/reviewqueue"
 	"odin-os/internal/store/sqlite"
 	toolcatalog "odin-os/internal/tools/catalog"
 )
 
-type Wiring string
+type Wiring = runtimeoverview.Wiring
 
 const (
-	WiringLive          Wiring = "live"
-	WiringCatalogBacked Wiring = "catalog_backed"
-	WiringNotYetWired   Wiring = "not_yet_wired"
+	WiringLive          = runtimeoverview.WiringLive
+	WiringCatalogBacked = runtimeoverview.WiringCatalogBacked
+	WiringNotYetWired   = runtimeoverview.WiringNotYetWired
 )
 
 type Service struct {
-	Store            *sqlite.Store
-	Registry         coreprojects.Registry
-	RegistrySnapshot registry.Snapshot
-	Now              func() time.Time
-	ReadinessStatus  string
-	HealthStatus     string
-	BinaryPath       string
-	SourceRoot       string
+	Store                 *sqlite.Store
+	Registry              coreprojects.Registry
+	RegistrySnapshot      registry.Snapshot
+	Now                   func() time.Time
+	ReadinessStatus       string
+	HealthStatus          string
+	BinaryPath            string
+	SourceRoot            string
+	ReviewQueueProjection func(context.Context) (reviewqueue.Projection, error)
 }
+
+const (
+	overviewIncidentLimit = 50
+	overviewRecoveryLimit = 50
+)
 
 type taskScopeContext struct {
 	projectKey    string
@@ -77,55 +84,11 @@ type View struct {
 	BinarySource          BinarySourceLane         `json:"binary_source"`
 }
 
-type ReadinessLane struct {
-	Wiring       Wiring `json:"wiring"`
-	Status       string `json:"status"`
-	HealthStatus string `json:"health_status"`
-	Ready        bool   `json:"ready"`
-	Note         string `json:"note,omitempty"`
-}
-
-type ActualUseLane struct {
-	Wiring                        Wiring `json:"wiring"`
-	Status                        string `json:"status"`
-	ActionRequiredCount           int    `json:"action_required_count"`
-	WorkItemCount                 int    `json:"work_item_count"`
-	OpenWorkItemCount             int    `json:"open_work_item_count"`
-	ActiveRunCount                int    `json:"active_run_count"`
-	PendingApprovalCount          int    `json:"pending_approval_count"`
-	ReviewQueueCount              int    `json:"review_queue_count"`
-	BlockedWorkItemCount          int    `json:"blocked_work_item_count"`
-	FailedWorkItemCount           int    `json:"failed_work_item_count"`
-	RecoveryRecommendationCount   int    `json:"recovery_recommendation_count"`
-	IntakeReviewCount             int    `json:"intake_review_count"`
-	AutomationTriggerCount        int    `json:"automation_trigger_count"`
-	EnabledAutomationTriggerCount int    `json:"enabled_automation_trigger_count"`
-	FollowUpObligationCount       int    `json:"follow_up_obligation_count"`
-	DueFollowUpObligationCount    int    `json:"due_follow_up_obligation_count"`
-	DeliveryProfileCount          int    `json:"delivery_profile_count"`
-	ExplicitIntentWorkItemCount   int    `json:"explicit_intent_work_item_count"`
-	FallbackIntentWorkItemCount   int    `json:"fallback_intent_work_item_count"`
-}
-
-type DeliveryProfileLane struct {
-	Wiring       Wiring   `json:"wiring"`
-	ProfileCount int      `json:"profile_count"`
-	Keys         []string `json:"keys"`
-}
-
-type ExecutionIntentLane struct {
-	Wiring                Wiring `json:"wiring"`
-	ExplicitWorkItemCount int    `json:"explicit_work_item_count"`
-	FallbackWorkItemCount int    `json:"fallback_work_item_count"`
-}
-
-type BinarySourceLane struct {
-	Wiring     Wiring `json:"wiring"`
-	Status     string `json:"status"`
-	BinaryPath string `json:"binary_path,omitempty"`
-	SourceRoot string `json:"source_root,omitempty"`
-	Note       string `json:"note,omitempty"`
-}
+type ReadinessLane = runtimeoverview.ReadinessLane
+type ActualUseLane = runtimeoverview.ActualUseLane
+type DeliveryProfileLane = runtimeoverview.DeliveryProfileLane
+type ExecutionIntentLane = runtimeoverview.ExecutionIntentLane
+type BinarySourceLane = runtimeoverview.BinarySourceLane
 
 type WorkspaceLane struct {
 	Wiring               Wiring `json:"wiring"`
@@ -193,38 +156,9 @@ type CompanionSummary struct {
 	BlockedWorkItemCount int    `json:"blocked_work_item_count"`
 }
 
-type CapabilityCatalogLane struct {
-	Wiring               Wiring `json:"wiring"`
-	AgentDefinitionCount int    `json:"agent_definition_count"`
-	SkillCount           int    `json:"skill_count"`
-	WorkflowCount        int    `json:"workflow_count"`
-	CommandCount         int    `json:"command_count"`
-	ToolCount            int    `json:"tool_count"`
-}
-
-type CapabilityTruthLane struct {
-	Wiring              Wiring                   `json:"wiring"`
-	AuthoredInventory   CapabilityCatalogLane    `json:"authored_inventory"`
-	AuthoredAssetCount  int                      `json:"authored_asset_count"`
-	RuntimeProvenCount  int                      `json:"runtime_proven_count"`
-	PartialCount        int                      `json:"partial_count"`
-	AdvisoryCount       int                      `json:"advisory_count"`
-	UnknownCount        int                      `json:"unknown_count"`
-	HighRiskFamilyCount int                      `json:"high_risk_family_count"`
-	Notes               []string                 `json:"notes,omitempty"`
-	Items               []CapabilityTruthSummary `json:"items"`
-}
-
-type CapabilityTruthSummary struct {
-	Kind                string   `json:"kind"`
-	Key                 string   `json:"key"`
-	Title               string   `json:"title,omitempty"`
-	TruthLevel          string   `json:"truth_level"`
-	CountsAsImplemented bool     `json:"counts_as_implemented"`
-	HighRisk            bool     `json:"high_risk,omitempty"`
-	RiskLabel           string   `json:"risk_label,omitempty"`
-	Proof               []string `json:"proof,omitempty"`
-}
+type CapabilityCatalogLane = runtimeoverview.CapabilityCatalogLane
+type CapabilityTruthLane = runtimeoverview.CapabilityTruthLane
+type CapabilityTruthSummary = runtimeoverview.CapabilityTruthSummary
 
 type SkillActivityLane struct {
 	Wiring                         Wiring                 `json:"wiring"`
@@ -254,15 +188,7 @@ type SkillActivitySummary struct {
 	OccurredAt       string   `json:"occurred_at"`
 }
 
-type ReviewQueueLane struct {
-	Wiring             Wiring `json:"wiring"`
-	TotalCount         int    `json:"total_count"`
-	IntakeCount        int    `json:"intake_count"`
-	ApprovalCount      int    `json:"approval_count"`
-	KnowledgeCount     int    `json:"knowledge_count"`
-	SkillArtifactCount int    `json:"skill_artifact_count"`
-	FailedWorkCount    int    `json:"failed_work_count"`
-}
+type ReviewQueueLane = runtimeoverview.ReviewQueueLane
 
 type KnowledgeContextPackLane struct {
 	Wiring              Wiring                        `json:"wiring"`
@@ -315,22 +241,7 @@ type ObservabilityLane struct {
 	Freshness        []FreshnessSummary             `json:"freshness"`
 }
 
-type ActivityEventSummary struct {
-	EventID     int64           `json:"event_id"`
-	StreamType  string          `json:"stream_type"`
-	StreamID    int64           `json:"stream_id"`
-	EventType   string          `json:"event_type"`
-	Scope       string          `json:"scope"`
-	ProjectID   *int64          `json:"project_id,omitempty"`
-	ProjectKey  string          `json:"project_key,omitempty"`
-	TaskID      *int64          `json:"task_id,omitempty"`
-	WorkItemKey string          `json:"work_item_key,omitempty"`
-	RunID       *int64          `json:"run_id,omitempty"`
-	ApprovalID  *int64          `json:"approval_id,omitempty"`
-	OccurredAt  string          `json:"occurred_at"`
-	Summary     string          `json:"summary"`
-	Payload     json.RawMessage `json:"payload,omitempty"`
-}
+type ActivityEventSummary = runtimeoverview.ActivityEventSummary
 
 type RunAttemptSummary struct {
 	RunID         int64   `json:"run_id"`
@@ -374,35 +285,8 @@ type RetryRecoveryGuidanceSummary struct {
 	RecoveryRecommendation string  `json:"recovery_recommendation"`
 }
 
-type BrowserEvidenceSummary struct {
-	ArtifactID    int64                 `json:"artifact_id"`
-	RunID         int64                 `json:"run_id"`
-	TaskID        int64                 `json:"task_id"`
-	WorkItemKey   string                `json:"work_item_key"`
-	ProjectKey    string                `json:"project_key"`
-	Status        string                `json:"status,omitempty"`
-	EvidenceType  string                `json:"evidence_type,omitempty"`
-	AdapterStatus string                `json:"adapter_status,omitempty"`
-	InitiativeKey *string               `json:"initiative_key,omitempty"`
-	CompanionKey  *string               `json:"companion_key,omitempty"`
-	RunStatus     string                `json:"run_status,omitempty"`
-	RunAttempt    int                   `json:"run_attempt,omitempty"`
-	Executor      string                `json:"executor,omitempty"`
-	Summary       string                `json:"summary"`
-	URI           string                `json:"uri,omitempty"`
-	PageTitle     string                `json:"page_title,omitempty"`
-	URL           string                `json:"url,omitempty"`
-	SelectedLinks []BrowserEvidenceLink `json:"selected_links,omitempty"`
-	Confidence    string                `json:"confidence,omitempty"`
-	Limitations   []string              `json:"limitations,omitempty"`
-	CreatedAt     string                `json:"created_at"`
-}
-
-type BrowserEvidenceLink struct {
-	Text   string `json:"text,omitempty"`
-	URL    string `json:"url"`
-	Reason string `json:"reason,omitempty"`
-}
+type BrowserEvidenceSummary = runtimeoverview.BrowserEvidenceSummary
+type BrowserEvidenceLink = runtimeoverview.BrowserEvidenceLink
 
 type IncidentSummary struct {
 	IncidentID   int64   `json:"incident_id"`
@@ -502,20 +386,7 @@ type IntakeInboxLane struct {
 	Items                       []IntakeEvidenceSummary `json:"items"`
 }
 
-type RawIntakeSummary struct {
-	ID          int64  `json:"id"`
-	Key         string `json:"key"`
-	ProjectKey  string `json:"project_key,omitempty"`
-	Source      string `json:"source"`
-	IntakeType  string `json:"intake_type"`
-	DedupKey    string `json:"dedup_key"`
-	RequestedBy string `json:"requested_by,omitempty"`
-	Title       string `json:"title"`
-	Status      string `json:"status"`
-	Summary     string `json:"summary,omitempty"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
-}
+type RawIntakeSummary = runtimeoverview.RawIntakeSummary
 
 type IntakeEvidenceSummary struct {
 	IntakeID       int64   `json:"intake_id"`
@@ -575,7 +446,10 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	}
 
 	view := View{
-		Readiness: readinessLane(service),
+		Readiness: runtimeoverview.BuildReadiness(runtimeoverview.ReadinessInput{
+			Status:       service.ReadinessStatus,
+			HealthStatus: service.HealthStatus,
+		}),
 		ActualUse: ActualUseLane{
 			Wiring: WiringLive,
 			Status: "unknown",
@@ -625,11 +499,14 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		Notifications: NotificationLane{
 			Wiring: WiringLive,
 		},
-		DeliveryProfiles: deliveryProfileLane(service.RegistrySnapshot),
+		DeliveryProfiles: runtimeoverview.BuildDeliveryProfiles(service.RegistrySnapshot),
 		ExecutionIntent: ExecutionIntentLane{
 			Wiring: WiringLive,
 		},
-		BinarySource: binarySourceLane(service),
+		BinarySource: runtimeoverview.BuildBinarySource(runtimeoverview.BinarySourceInput{
+			BinaryPath: service.BinaryPath,
+			SourceRoot: service.SourceRoot,
+		}),
 	}
 
 	workspaceView, err := projections.GetWorkspaceOverviewView(ctx, service.Store.DB(), workspaces.DefaultWorkspaceKey)
@@ -958,6 +835,8 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 	incidentProjectIndex := make(map[int64]string)
 	for _, incident := range incidentViews {
 		incidentProjectIndex[incident.IncidentID] = incident.ProjectKey
+	}
+	for _, incident := range tailIncidentViews(incidentViews, overviewIncidentLimit) {
 		if !matchesProjectScope(incident.ProjectKey, resolved) {
 			continue
 		}
@@ -1055,7 +934,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		return View{}, err
 	}
 	runTaskIDCache := make(map[int64]int64)
-	for _, recovery := range recoveryViews {
+	for _, recovery := range tailRecoveryViews(recoveryViews, overviewRecoveryLimit) {
 		recoveryProjectKey := ""
 		if recovery.RunID != 0 {
 			taskID, ok := runTaskIDCache[recovery.RunID]
@@ -1161,7 +1040,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		if status != "received" {
 			view.IntakeInbox.RawProcessedCount++
 		}
-		if isReviewableIntakeStatus(status) {
+		if runtimeoverview.IsReviewableIntakeStatus(status) {
 			view.IntakeInbox.ReviewQueueCount++
 		}
 		switch status {
@@ -1182,13 +1061,17 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		case "approval_denied":
 			view.IntakeInbox.ApprovalDeniedCount++
 		}
-		view.IntakeInbox.RawItems = append(view.IntakeInbox.RawItems, rawIntakeSummary(item))
+		view.IntakeInbox.RawItems = append(view.IntakeInbox.RawItems, runtimeoverview.RawIntakeSummaryFromItem(item))
 	}
 	if len(rawIntakeItems) > 0 {
 		if len(view.IntakeInbox.Items) > 0 {
 			view.IntakeInbox.Source = "intake_items_and_task_intakes"
 		}
-		view.IntakeInbox.Status = intakeLaneStatus(view.IntakeInbox)
+		view.IntakeInbox.Status = runtimeoverview.IntakeLaneStatus(runtimeoverview.IntakeStatusInput{
+			IntakeApprovalRequiredCount: view.IntakeInbox.IntakeApprovalRequiredCount,
+			ReviewQueueCount:            view.IntakeInbox.ReviewQueueCount,
+			RawProcessedCount:           view.IntakeInbox.RawProcessedCount,
+		})
 		view.IntakeInbox.Note = "governed intake lifecycle is live; raw, review, approval, and accepted states are counted before task execution"
 	} else if len(view.IntakeInbox.Items) > 0 {
 		view.IntakeInbox.Source = "task_intakes"
@@ -1296,7 +1179,7 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 			view.CapabilityCatalog.CommandCount++
 		}
 	}
-	view.CapabilityTruth = capabilityTruthLane(view.CapabilityCatalog, service.RegistrySnapshot, toolcatalog.BuiltinDefinitions())
+	view.CapabilityTruth = runtimeoverview.BuildCapabilityTruth(view.CapabilityCatalog, service.RegistrySnapshot, toolcatalog.BuiltinDefinitions())
 
 	skillActivity, err := service.skillActivity(ctx, resolved)
 	if err != nil {
@@ -1309,139 +1192,32 @@ func (service Service) Build(ctx context.Context, resolved scope.Resolution) (Vi
 		return View{}, err
 	}
 	view.KnowledgeContextPacks = knowledgeContextPacks
-	view.ReviewQueue = reviewQueueLane(view)
-	view.DeliveryProfiles = deliveryProfileLane(service.RegistrySnapshot)
+	if service.ReviewQueueProjection != nil {
+		projection, err := service.ReviewQueueProjection(ctx)
+		if err != nil {
+			return View{}, err
+		}
+		view.ReviewQueue = runtimeoverview.BuildReviewQueue(projection)
+	}
+	view.DeliveryProfiles = runtimeoverview.BuildDeliveryProfiles(service.RegistrySnapshot)
 	view.ExecutionIntent = executionIntentLane(view.WorkItems)
 	view.ActualUse = actualUseLane(view)
 
 	return view, nil
 }
 
-func capabilityTruthLane(catalog CapabilityCatalogLane, snapshot registry.Snapshot, tools map[string]toolcatalog.ToolDefinition) CapabilityTruthLane {
-	lane := CapabilityTruthLane{
-		Wiring:            WiringLive,
-		AuthoredInventory: catalog,
-		AuthoredAssetCount: catalog.AgentDefinitionCount +
-			catalog.SkillCount +
-			catalog.WorkflowCount +
-			catalog.CommandCount +
-			catalog.ToolCount,
-		Notes: []string{
-			"Registry prompts are authored assets until runtime invocation, persistence/output, policy, and audit evidence exist.",
-		},
+func tailIncidentViews(views []projections.IncidentView, limit int) []projections.IncidentView {
+	if limit <= 0 || len(views) <= limit {
+		return views
 	}
-
-	for _, item := range snapshot.Items {
-		summary := capabilityTruthFromRegistryItem(item)
-		lane.appendTruthSummary(summary)
-	}
-
-	toolKeys := make([]string, 0, len(tools))
-	for key := range tools {
-		toolKeys = append(toolKeys, key)
-	}
-	sort.Strings(toolKeys)
-	for _, key := range toolKeys {
-		summary := capabilityTruthFromBuiltinTool(tools[key])
-		lane.appendTruthSummary(summary)
-	}
-
-	sort.SliceStable(lane.Items, func(i int, j int) bool {
-		if lane.Items[i].Kind != lane.Items[j].Kind {
-			return lane.Items[i].Kind < lane.Items[j].Kind
-		}
-		return lane.Items[i].Key < lane.Items[j].Key
-	})
-
-	return lane
+	return views[len(views)-limit:]
 }
 
-func (lane *CapabilityTruthLane) appendTruthSummary(summary CapabilityTruthSummary) {
-	if summary.Key == "" {
-		return
+func tailRecoveryViews(views []projections.RecoveryView, limit int) []projections.RecoveryView {
+	if limit <= 0 || len(views) <= limit {
+		return views
 	}
-
-	lane.Items = append(lane.Items, summary)
-	if summary.HighRisk {
-		lane.HighRiskFamilyCount++
-	}
-
-	switch summary.TruthLevel {
-	case "runtime_proven":
-		lane.RuntimeProvenCount++
-	case "partial":
-		lane.PartialCount++
-	case "authored_asset", "approval_required", "read_only", "unsupported":
-		lane.AdvisoryCount++
-	default:
-		lane.UnknownCount++
-	}
-}
-
-func capabilityTruthFromRegistryItem(item registry.Item) CapabilityTruthSummary {
-	summary := CapabilityTruthSummary{
-		Kind:       string(item.Kind),
-		Key:        item.Key,
-		Title:      item.Title,
-		TruthLevel: "authored_asset",
-		Proof:      []string{registrySourceProof(item)},
-	}
-
-	switch item.Kind {
-	case registry.KindAgent:
-		if item.Delegation.Enabled && normalizeOperatorSurface(item.Delegation.OperatorSurface) == "companion_delegate" {
-			summary.TruthLevel = "runtime_proven"
-			summary.CountsAsImplemented = true
-			summary.Proof = []string{"odin companion delegate", "jobs", "runs", "delegations", "logs"}
-		}
-	case registry.KindSkill:
-		summary.TruthLevel = "partial"
-		summary.Proof = append(summary.Proof, "skill registry")
-	case registry.KindWorkflow:
-		summary.Proof = append(summary.Proof, "workflow registry")
-	case registry.KindCommand:
-		summary.Proof = append(summary.Proof, "command registry")
-	case registry.KindTool:
-		summary.TruthLevel = "partial"
-		summary.Proof = append(summary.Proof, "tool registry")
-	}
-
-	if highRisk, label := capabilityRiskLabel(summary.Key, item.Title, item.Tags, item.Permissions); highRisk {
-		summary.HighRisk = true
-		summary.RiskLabel = label
-	}
-
-	return summary
-}
-
-func capabilityTruthFromBuiltinTool(definition toolcatalog.ToolDefinition) CapabilityTruthSummary {
-	summary := CapabilityTruthSummary{
-		Kind:       string(registry.KindTool),
-		Key:        definition.Key,
-		Title:      definition.Title,
-		TruthLevel: "partial",
-		Proof:      []string{"builtin tool catalog", "capability gateway"},
-	}
-	if definition.Invoke != nil {
-		summary.Proof = append(summary.Proof, "invoke function registered")
-	}
-
-	if highRisk, label := capabilityRiskLabel(definition.Key, definition.Title, definition.Tags, definition.Scopes); highRisk {
-		summary.HighRisk = true
-		summary.RiskLabel = label
-		if label == "approval_required" && !definition.RequiresApproval {
-			summary.TruthLevel = "approval_required"
-			summary.Proof = append(summary.Proof, "approval required")
-		}
-	}
-	if definition.RequiresApproval {
-		summary.HighRisk = true
-		summary.RiskLabel = "approval_required"
-		summary.TruthLevel = "approval_required"
-		summary.Proof = append(summary.Proof, "approval required")
-	}
-
-	return summary
+	return views[len(views)-limit:]
 }
 
 func (service Service) browserEvidenceSummaries(ctx context.Context, resolved scope.Resolution, resolveTaskContext func(int64) (taskScopeContext, error)) ([]BrowserEvidenceSummary, error) {
@@ -1475,127 +1251,18 @@ func (service Service) browserEvidenceSummaries(ctx context.Context, resolved sc
 		}
 		item.InitiativeKey = taskContext.initiativeKey
 		item.CompanionKey = taskContext.companionKey
-		applyBrowserEvidenceOverviewDetails(&item, details)
+		runtimeoverview.ApplyBrowserEvidenceDetails(&item, details)
 		items = append(items, item)
 	}
 	return items, rows.Err()
 }
 
-func applyBrowserEvidenceOverviewDetails(item *BrowserEvidenceSummary, details string) {
-	if item == nil || strings.TrimSpace(details) == "" {
-		return
-	}
-	var payload struct {
-		PageTitle     string                `json:"page_title"`
-		URL           string                `json:"url"`
-		SelectedLinks []BrowserEvidenceLink `json:"selected_links"`
-		Confidence    string                `json:"confidence"`
-		Limitations   []string              `json:"limitations"`
-	}
-	if err := json.Unmarshal([]byte(details), &payload); err != nil {
-		return
-	}
-	item.PageTitle = payload.PageTitle
-	item.URL = payload.URL
-	item.SelectedLinks = payload.SelectedLinks
-	item.Confidence = payload.Confidence
-	item.Limitations = payload.Limitations
-}
-
-func registrySourceProof(item registry.Item) string {
-	if item.Source.RelativePath != "" {
-		return item.Source.RelativePath
-	}
-	if item.Kind != "" {
-		return "registry/" + string(item.Kind)
-	}
-	return "registry"
-}
-
-func normalizeOperatorSurface(value string) string {
-	normalized := strings.TrimSpace(strings.ToLower(value))
-	normalized = strings.ReplaceAll(normalized, " ", "_")
-	normalized = strings.ReplaceAll(normalized, "-", "_")
-	return normalized
-}
-
-func capabilityRiskLabel(key, title string, tags, permissions []string) (bool, string) {
-	haystack := []string{key, title}
-	haystack = append(haystack, tags...)
-	haystack = append(haystack, permissions...)
-	joined := strings.ToLower(strings.Join(haystack, " "))
-
-	switch {
-	case strings.Contains(joined, "visible_evidence"), strings.Contains(joined, "evidence bundle"), strings.Contains(joined, "evidence_bundle"):
-		return true, "read_only"
-	case strings.Contains(joined, "publish"), strings.Contains(joined, "post"), strings.Contains(joined, "send"):
-		return true, "approval_required"
-	case strings.Contains(joined, "delete"), strings.Contains(joined, "deploy"), strings.Contains(joined, "production"), strings.Contains(joined, "permission"):
-		return true, "approval_required"
-	case strings.Contains(joined, "calendar"), strings.Contains(joined, "email"), strings.Contains(joined, "finance"), strings.Contains(joined, "github"), strings.Contains(joined, "browser"):
-		return true, "read_only"
-	default:
-		return false, ""
-	}
-}
-
-func reviewQueueLane(view View) ReviewQueueLane {
-	lane := ReviewQueueLane{
-		Wiring:             WiringLive,
-		IntakeCount:        view.IntakeInbox.ReviewQueueCount,
-		ApprovalCount:      len(view.Approvals),
-		KnowledgeCount:     view.KnowledgeContextPacks.ReviewRequiredCount,
-		SkillArtifactCount: view.SkillActivity.ReviewRequiredArtifactCount,
-		FailedWorkCount:    len(view.Observability.RecoveryGuidance),
-	}
-	lane.TotalCount = lane.IntakeCount + lane.ApprovalCount + lane.KnowledgeCount + lane.SkillArtifactCount + lane.FailedWorkCount
-	return lane
-}
-
-func readinessLane(service Service) ReadinessLane {
-	status := strings.ToLower(strings.TrimSpace(service.ReadinessStatus))
-	health := strings.ToLower(strings.TrimSpace(service.HealthStatus))
-	lane := ReadinessLane{
-		Wiring:       WiringLive,
-		Status:       status,
-		HealthStatus: health,
-	}
-	if lane.Status == "" {
-		lane.Status = "unknown"
-	}
-	if lane.HealthStatus == "" {
-		lane.HealthStatus = "unknown"
-	}
-	lane.Ready = lane.Status == "ready" && lane.HealthStatus == "healthy"
-	if lane.Status == "unknown" || lane.HealthStatus == "unknown" {
-		lane.Note = "readiness or health was not provided by the caller; unknown is not treated as healthy"
-	}
-	return lane
-}
-
-func deliveryProfileLane(snapshot registry.Snapshot) DeliveryProfileLane {
-	lane := DeliveryProfileLane{Wiring: WiringCatalogBacked}
-	for _, item := range snapshot.Items {
-		if item.Kind != registry.KindWorkflow || !hasRegistryTag(item, "delivery_profile") {
-			continue
-		}
-		lane.ProfileCount++
-		lane.Keys = append(lane.Keys, item.Key)
-	}
-	sort.Strings(lane.Keys)
-	return lane
-}
-
 func executionIntentLane(workItems []WorkItemSummary) ExecutionIntentLane {
-	lane := ExecutionIntentLane{Wiring: WiringLive}
+	items := make([]runtimeoverview.ExecutionIntentInput, 0, len(workItems))
 	for _, item := range workItems {
-		if strings.TrimSpace(item.ExecutionIntent) == "" {
-			lane.FallbackWorkItemCount++
-			continue
-		}
-		lane.ExplicitWorkItemCount++
+		items = append(items, runtimeoverview.ExecutionIntentInput{ExecutionIntent: item.ExecutionIntent})
 	}
-	return lane
+	return runtimeoverview.BuildExecutionIntent(items)
 }
 
 func actualUseLane(view View) ActualUseLane {
@@ -1611,8 +1278,7 @@ func actualUseLane(view View) ActualUseLane {
 			dueFollowUpObligationCount++
 		}
 	}
-	lane := ActualUseLane{
-		Wiring:                        WiringLive,
+	return runtimeoverview.BuildActualUse(runtimeoverview.ActualUseInput{
 		WorkItemCount:                 len(view.WorkItems) + len(view.Observability.RecoveryGuidance),
 		OpenWorkItemCount:             len(view.WorkItems),
 		ActiveRunCount:                len(view.Observability.ActiveRuns),
@@ -1629,45 +1295,7 @@ func actualUseLane(view View) ActualUseLane {
 		DeliveryProfileCount:          view.DeliveryProfiles.ProfileCount,
 		ExplicitIntentWorkItemCount:   view.ExecutionIntent.ExplicitWorkItemCount,
 		FallbackIntentWorkItemCount:   view.ExecutionIntent.FallbackWorkItemCount,
-	}
-	lane.ActionRequiredCount = lane.ReviewQueueCount + lane.BlockedWorkItemCount
-	if lane.ActionRequiredCount > 0 {
-		lane.Status = "action_required"
-	} else {
-		lane.Status = "clear"
-	}
-	return lane
-}
-
-func binarySourceLane(service Service) BinarySourceLane {
-	binaryPath := strings.TrimSpace(service.BinaryPath)
-	sourceRoot := strings.TrimSpace(service.SourceRoot)
-	lane := BinarySourceLane{
-		Wiring:     WiringLive,
-		Status:     "unknown",
-		BinaryPath: binaryPath,
-		SourceRoot: sourceRoot,
-	}
-	if binaryPath == "" || sourceRoot == "" {
-		lane.Note = "binary path or source root was not provided by the caller"
-		return lane
-	}
-	rel, err := filepath.Rel(filepath.Clean(sourceRoot), filepath.Clean(binaryPath))
-	if err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
-		lane.Status = "aligned"
-		return lane
-	}
-	lane.Status = "external_binary"
-	return lane
-}
-
-func hasRegistryTag(item registry.Item, tag string) bool {
-	for _, candidate := range item.Tags {
-		if strings.EqualFold(strings.TrimSpace(candidate), tag) {
-			return true
-		}
-	}
-	return false
+	})
 }
 
 func (service Service) knowledgeContextPacks(ctx context.Context, resolved scope.Resolution) (KnowledgeContextPackLane, error) {
@@ -1869,117 +1497,7 @@ func (service Service) activityLog(ctx context.Context, resolved scope.Resolutio
 	if len(filtered) > activityLogLimit {
 		filtered = filtered[len(filtered)-activityLogLimit:]
 	}
-	return BuildActivityEventSummaries(ctx, service.Store, filtered, false)
-}
-
-func BuildActivityEventSummaries(ctx context.Context, store *sqlite.Store, records []runtimeevents.Record, includePayload bool) ([]ActivityEventSummary, error) {
-	taskCache := make(map[int64]sqlite.Task)
-	taskMissing := make(map[int64]struct{})
-	projectCache := make(map[int64]string)
-	projectMissing := make(map[int64]struct{})
-
-	summaries := make([]ActivityEventSummary, 0, len(records))
-	for _, record := range records {
-		payload := decodeEventPayloadMap(record.Payload)
-		taskID := cloneInt64Ptr(record.TaskID)
-		if taskID == nil {
-			if id, ok := payloadInt64(payload, "task_id"); ok {
-				taskID = &id
-			}
-		}
-		runID := cloneInt64Ptr(record.RunID)
-		if runID == nil {
-			if id, ok := payloadInt64(payload, "run_id"); ok {
-				runID = &id
-			}
-		}
-
-		var workItemKey string
-		projectID := cloneInt64Ptr(record.ProjectID)
-		if taskID != nil {
-			task, ok, err := cachedActivityTask(ctx, store, taskCache, taskMissing, *taskID)
-			if err != nil {
-				return nil, err
-			}
-			if ok {
-				workItemKey = task.Key
-				if projectID == nil {
-					id := task.ProjectID
-					projectID = &id
-				}
-			}
-		}
-
-		projectKey := ""
-		if projectID != nil {
-			key, ok, err := cachedActivityProjectKey(ctx, store, projectCache, projectMissing, *projectID)
-			if err != nil {
-				return nil, err
-			}
-			if ok {
-				projectKey = key
-			}
-		}
-
-		item := ActivityEventSummary{
-			EventID:     record.ID,
-			StreamType:  string(record.StreamType),
-			StreamID:    record.StreamID,
-			EventType:   string(record.Type),
-			Scope:       record.Scope,
-			ProjectID:   projectID,
-			ProjectKey:  projectKey,
-			TaskID:      taskID,
-			WorkItemKey: workItemKey,
-			RunID:       runID,
-			ApprovalID:  activityApprovalID(record),
-			OccurredAt:  record.OccurredAt.UTC().Format(time.RFC3339),
-			Summary:     summarizeActivityEvent(record, payload, workItemKey, projectKey),
-		}
-		if includePayload && len(record.Payload) > 0 {
-			item.Payload = append(json.RawMessage(nil), record.Payload...)
-		}
-		summaries = append(summaries, item)
-	}
-	return summaries, nil
-}
-
-func cachedActivityTask(ctx context.Context, store *sqlite.Store, cache map[int64]sqlite.Task, missing map[int64]struct{}, taskID int64) (sqlite.Task, bool, error) {
-	if task, ok := cache[taskID]; ok {
-		return task, true, nil
-	}
-	if _, ok := missing[taskID]; ok {
-		return sqlite.Task{}, false, nil
-	}
-	task, err := store.GetTask(ctx, taskID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			missing[taskID] = struct{}{}
-			return sqlite.Task{}, false, nil
-		}
-		return sqlite.Task{}, false, err
-	}
-	cache[taskID] = task
-	return task, true, nil
-}
-
-func cachedActivityProjectKey(ctx context.Context, store *sqlite.Store, cache map[int64]string, missing map[int64]struct{}, projectID int64) (string, bool, error) {
-	if key, ok := cache[projectID]; ok {
-		return key, true, nil
-	}
-	if _, ok := missing[projectID]; ok {
-		return "", false, nil
-	}
-	project, err := store.GetProject(ctx, projectID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			missing[projectID] = struct{}{}
-			return "", false, nil
-		}
-		return "", false, err
-	}
-	cache[projectID] = project.Key
-	return project.Key, true, nil
+	return runtimeoverview.BuildActivityEventSummaries(ctx, service.Store, filtered, false)
 }
 
 func matchesActivityEventScope(record runtimeevents.Record, resolved scope.Resolution, projectID *int64) bool {
@@ -2002,186 +1520,6 @@ func sameOptionalID(left, right *int64) bool {
 		return true
 	}
 	return left != nil && *left == *right
-}
-
-func activityApprovalID(record runtimeevents.Record) *int64 {
-	if record.StreamType != runtimeevents.StreamApproval || record.StreamID <= 0 {
-		return nil
-	}
-	id := record.StreamID
-	return &id
-}
-
-func summarizeActivityEvent(record runtimeevents.Record, payload map[string]any, workItemKey, projectKey string) string {
-	switch record.Type {
-	case runtimeevents.EventTaskCreated:
-		parts := []string{"created work item"}
-		if workItemKey != "" {
-			parts = append(parts, workItemKey)
-		}
-		appendPayloadPart(&parts, payload, "status", "status")
-		appendPayloadPart(&parts, payload, "requested_by", "requested_by")
-		appendPayloadPart(&parts, payload, "execution_intent", "intent")
-		return strings.Join(parts, " ")
-	case runtimeevents.EventTaskDispatchRequested:
-		parts := []string{"dispatch requested"}
-		appendPayloadPart(&parts, payload, "executor", "executor")
-		appendPayloadPart(&parts, payload, "attempt", "attempt")
-		appendPayloadPart(&parts, payload, "status", "status")
-		return strings.Join(parts, " ")
-	case runtimeevents.EventTaskStatusChanged:
-		return transitionSummary("work item status", payload, "previous_status", "status")
-	case runtimeevents.EventTaskQueueStateChanged:
-		parts := []string{transitionSummary("queue state", payload, "previous_status", "status")}
-		appendPayloadPart(&parts, payload, "blocked_reason", "blocked_reason")
-		appendPayloadPart(&parts, payload, "retry_count", "retry_count")
-		return strings.Join(parts, " ")
-	case runtimeevents.EventRunStarted:
-		parts := []string{"run started"}
-		appendPayloadPart(&parts, payload, "executor", "executor")
-		appendPayloadPart(&parts, payload, "attempt", "attempt")
-		appendPayloadPart(&parts, payload, "status", "status")
-		return strings.Join(parts, " ")
-	case runtimeevents.EventRunStatusChanged:
-		return transitionSummary("run status", payload, "previous_status", "status")
-	case runtimeevents.EventRunFinished:
-		parts := []string{"run finished"}
-		appendPayloadPart(&parts, payload, "status", "status")
-		appendPayloadPart(&parts, payload, "terminal_reason", "terminal_reason")
-		appendPayloadPart(&parts, payload, "summary", "summary")
-		return strings.Join(parts, " ")
-	case runtimeevents.EventApprovalRequested:
-		parts := []string{"approval requested"}
-		appendPayloadPart(&parts, payload, "status", "status")
-		appendPayloadPart(&parts, payload, "requested_by", "requested_by")
-		return strings.Join(parts, " ")
-	case runtimeevents.EventApprovalResolved:
-		parts := []string{"approval resolved"}
-		appendPayloadPart(&parts, payload, "status", "status")
-		appendPayloadPart(&parts, payload, "decision_by", "decision_by")
-		appendPayloadPart(&parts, payload, "reason", "reason")
-		return strings.Join(parts, " ")
-	case runtimeevents.EventContextPacketCreated:
-		parts := []string{"context packet created"}
-		appendPayloadPart(&parts, payload, "packet_kind", "kind")
-		appendPayloadPart(&parts, payload, "trigger", "trigger")
-		appendPayloadPart(&parts, payload, "status", "status")
-		appendPayloadPart(&parts, payload, "summary", "summary")
-		return strings.Join(parts, " ")
-	case runtimeevents.EventIntakeItemCreated, runtimeevents.EventIntakeProcessed, runtimeevents.EventIntakeReviewAccepted:
-		parts := []string{strings.TrimPrefix(string(record.Type), "intake.")}
-		appendPayloadPart(&parts, payload, "status", "status")
-		appendPayloadPart(&parts, payload, "dedupe_key", "dedup_key")
-		appendPayloadPart(&parts, payload, "requested_by", "requested_by")
-		return strings.Join(parts, " ")
-	case runtimeevents.EventAutomationTriggerCreated, runtimeevents.EventAutomationTriggerEvaluated, runtimeevents.EventAutomationTriggerMaterialized:
-		parts := []string{strings.TrimPrefix(string(record.Type), "automation_trigger.")}
-		appendPayloadPart(&parts, payload, "status", "status")
-		appendPayloadPart(&parts, payload, "title", "title")
-		return strings.Join(parts, " ")
-	default:
-		parts := []string{fmt.Sprintf("event %s", record.Type)}
-		if workItemKey != "" {
-			parts = append(parts, "work_item="+workItemKey)
-		}
-		if projectKey != "" {
-			parts = append(parts, "project="+projectKey)
-		}
-		return strings.Join(parts, " ")
-	}
-}
-
-func transitionSummary(label string, payload map[string]any, previousKey, statusKey string) string {
-	previous := payloadString(payload, previousKey)
-	status := payloadString(payload, statusKey)
-	if previous != "" && status != "" {
-		return fmt.Sprintf("%s %s -> %s", label, previous, status)
-	}
-	if status != "" {
-		return fmt.Sprintf("%s status=%s", label, status)
-	}
-	return label
-}
-
-func appendPayloadPart(parts *[]string, payload map[string]any, key, label string) {
-	value := payloadString(payload, key)
-	if value == "" {
-		return
-	}
-	*parts = append(*parts, fmt.Sprintf("%s=%s", label, value))
-}
-
-func decodeEventPayloadMap(raw json.RawMessage) map[string]any {
-	if len(raw) == 0 {
-		return map[string]any{}
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return map[string]any{}
-	}
-	return payload
-}
-
-func payloadString(payload map[string]any, key string) string {
-	value, ok := payload[key]
-	if !ok || value == nil {
-		return ""
-	}
-	switch typed := value.(type) {
-	case string:
-		return strings.TrimSpace(typed)
-	case float64:
-		return formatPayloadFloat(typed)
-	case bool:
-		if typed {
-			return "true"
-		}
-		return "false"
-	default:
-		return strings.TrimSpace(fmt.Sprint(typed))
-	}
-}
-
-func payloadInt64(payload map[string]any, key string) (int64, bool) {
-	value, ok := payload[key]
-	if !ok || value == nil {
-		return 0, false
-	}
-	switch typed := value.(type) {
-	case float64:
-		return int64(typed), typed > 0
-	case int64:
-		return typed, typed > 0
-	case int:
-		return int64(typed), typed > 0
-	case string:
-		trimmed := strings.TrimSpace(typed)
-		if trimmed == "" {
-			return 0, false
-		}
-		var parsed int64
-		if _, err := fmt.Sscan(trimmed, &parsed); err != nil || parsed <= 0 {
-			return 0, false
-		}
-		return parsed, true
-	default:
-		return 0, false
-	}
-}
-
-func formatPayloadFloat(value float64) string {
-	if value == float64(int64(value)) {
-		return fmt.Sprintf("%d", int64(value))
-	}
-	return fmt.Sprintf("%g", value)
-}
-
-func cloneInt64Ptr(value *int64) *int64 {
-	if value == nil {
-		return nil
-	}
-	clone := *value
-	return &clone
 }
 
 type skillsOperation string
@@ -2488,62 +1826,4 @@ func recoveryWorkKindForTask(workKind string, lastError string) string {
 		return "browser_evidence"
 	}
 	return workKind
-}
-
-func isReviewableIntakeStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "review_required", "needs_clarification", "duplicate_linked_or_suppressed", "approval_required":
-		return true
-	default:
-		return false
-	}
-}
-
-func rawIntakeSummary(item sqlite.IntakeItem) RawIntakeSummary {
-	return RawIntakeSummary{
-		ID:          item.ID,
-		Key:         fmt.Sprintf("intake-%d", item.ID),
-		ProjectKey:  rawIntakeProjectKey(item),
-		Source:      item.SourceFamily,
-		IntakeType:  item.EventKind,
-		DedupKey:    item.DedupeKey,
-		RequestedBy: rawIntakeRequestedBy(item.SourceFactsJSON),
-		Title:       item.Subject,
-		Status:      item.Status,
-		Summary:     item.Summary,
-		CreatedAt:   item.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:   item.UpdatedAt.UTC().Format(time.RFC3339),
-	}
-}
-
-func rawIntakeProjectKey(item sqlite.IntakeItem) string {
-	switch strings.TrimSpace(item.Scope) {
-	case "project", "odin-core":
-		return strings.TrimSpace(item.ScopeKey)
-	default:
-		return ""
-	}
-}
-
-func rawIntakeRequestedBy(sourceFactsJSON string) string {
-	var facts struct {
-		RequestedBy string `json:"requested_by"`
-	}
-	if err := json.Unmarshal([]byte(sourceFactsJSON), &facts); err != nil {
-		return ""
-	}
-	return facts.RequestedBy
-}
-
-func intakeLaneStatus(lane IntakeInboxLane) string {
-	switch {
-	case lane.IntakeApprovalRequiredCount > 0:
-		return "approval_pending"
-	case lane.ReviewQueueCount > 0:
-		return "review_pending"
-	case lane.RawProcessedCount > 0:
-		return "processed"
-	default:
-		return "received"
-	}
 }

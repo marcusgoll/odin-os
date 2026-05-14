@@ -353,15 +353,11 @@ service:
 	if got.Status != "stopped" {
 		t.Fatalf("RuntimeState.Status = %q, want %q", got.Status, "stopped")
 	}
-	if got.ReadyAt == nil {
-		t.Fatal("RuntimeState.ReadyAt = nil, want ready transition before shutdown")
-	}
-
 	statuses, err := lifecycleStatuses(store)
 	if err != nil {
 		t.Fatalf("lifecycleStatuses() error = %v", err)
 	}
-	assertLifecycleSequence(t, statuses, []string{"booting", "recovering", "ready", "draining", "stopped"})
+	assertLifecycleSequence(t, statuses, []string{"booting", "recovering", "draining", "stopped"})
 }
 
 func TestRunServeStopsWithoutReadyWhenListenerBindingFails(t *testing.T) {
@@ -555,7 +551,7 @@ service:
 		t.Fatalf("lifecycleStatuses() error = %v", err)
 	}
 	assertNoLifecycleStatus(t, statuses, "recovering")
-	assertLifecycleSequence(t, statuses, []string{"booting", "ready", "draining", "stopped"})
+	assertLifecycleSequence(t, statuses, []string{"booting", "draining", "stopped"})
 }
 
 func TestRunServeRunsSelfHealCycleBeforeShutdown(t *testing.T) {

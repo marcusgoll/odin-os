@@ -104,8 +104,8 @@ test harness:
 
 - private HTTPS/TLS ingress for the phone-facing URL
 - PWA install from the private URL
-- device registration using the admin token once, then removal of the admin
-  token from the phone workflow
+- device registration using the current output of `odin mobile token` once, then
+  removal of the admin token from the phone workflow
 - a deliberate decision on whether notification delivery remains in-app only or
   gets a real push provider
 - a separate public-exposure review before any public DNS, broad Cloudflare

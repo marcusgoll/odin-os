@@ -217,6 +217,48 @@ func TestRunLeasesCleanupDryRunUsesCanonicalCommandPath(t *testing.T) {
 	}
 }
 
+func TestRunMobileTokenPrintsConfiguredRegistrationToken(t *testing.T) {
+	root := testRepoRoot(t)
+	envFile := filepath.Join(t.TempDir(), "odin-os.env")
+	if err := os.WriteFile(envFile, []byte("ODIN_ADMIN_TOKEN=phone-secret\nODIN_ROOT=/should/not/bootstrap\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(env) error = %v", err)
+	}
+	t.Setenv("ODIN_ENV_FILE", envFile)
+	t.Setenv("ODIN_ADMIN_TOKEN", "")
+	t.Setenv("ODIN_ROOT", "")
+
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"mobile", "token"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(mobile token) error = %v", err)
+	}
+	if got, want := stdout.String(), "ODIN_ADMIN_TOKEN=phone-secret\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestRunMobileTokenFailsClosedWhenAdminTokenMissing(t *testing.T) {
+	root := testRepoRoot(t)
+	envFile := filepath.Join(t.TempDir(), "odin-os.env")
+	if err := os.WriteFile(envFile, []byte("ODIN_ROOT=/should/not/bootstrap\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(env) error = %v", err)
+	}
+	t.Setenv("ODIN_ENV_FILE", envFile)
+	t.Setenv("ODIN_ADMIN_TOKEN", "")
+	t.Setenv("ODIN_ROOT", "")
+
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"mobile", "token"}, strings.NewReader(""), &stdout)
+	if err == nil || !strings.Contains(err.Error(), "ODIN_ADMIN_TOKEN is not configured") {
+		t.Fatalf("Run(mobile token) error = %v, want missing token", err)
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want empty output on missing token", stdout.String())
+	}
+}
+
 func TestRunStatusJSON(t *testing.T) {
 	t.Parallel()
 
@@ -3738,6 +3780,9 @@ func TestRunHelpIncludesOverviewCommand(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "scheduler") {
 		t.Fatalf("help output = %q, want scheduler command", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "mobile") {
+		t.Fatalf("help output = %q, want mobile command", stdout.String())
 	}
 }
 

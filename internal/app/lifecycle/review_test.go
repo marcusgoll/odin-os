@@ -13,6 +13,7 @@ import (
 	"odin-os/internal/app/bootstrap"
 	"odin-os/internal/core/workspaces"
 	runtimeknowledge "odin-os/internal/runtime/knowledge"
+	"odin-os/internal/runtime/reviewqueue"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -125,6 +126,58 @@ func TestReviewListJSONIncludesOperatorFieldsAndFilters(t *testing.T) {
 		if text, ok := value.(string); ok && text == "" {
 			t.Fatalf("filtered review item field %q is empty: %#v", field, item)
 		}
+	}
+}
+
+func TestReviewListAndOverviewJSONShareReviewQueueProjection(t *testing.T) {
+	ctx := context.Background()
+	app := newLifecycleReviewTestApp(t, ctx)
+	seedReviewQueueSourceFixture(t, ctx, app)
+
+	var reviewOut bytes.Buffer
+	if err := runReview(ctx, app, []string{"list", "--json"}, &reviewOut); err != nil {
+		t.Fatalf("runReview(list --json) error = %v", err)
+	}
+	var reviewPayload struct {
+		Items []reviewQueueEntry `json:"items"`
+	}
+	if err := json.Unmarshal(reviewOut.Bytes(), &reviewPayload); err != nil {
+		t.Fatalf("Unmarshal(review list JSON) error = %v\n%s", err, reviewOut.String())
+	}
+	projection := reviewqueue.Project(reviewPayload.Items)
+
+	var overviewOut bytes.Buffer
+	if err := runOverview(ctx, app, []string{"--json"}, &overviewOut); err != nil {
+		t.Fatalf("runOverview(--json) error = %v", err)
+	}
+	var overviewPayload struct {
+		ReviewQueue struct {
+			TotalCount          int `json:"total_count"`
+			IntakeCount         int `json:"intake_count"`
+			GoalCount           int `json:"goal_count"`
+			ApprovalCount       int `json:"approval_count"`
+			KnowledgeCount      int `json:"knowledge_count"`
+			SkillArtifactCount  int `json:"skill_artifact_count"`
+			MemoryProposalCount int `json:"memory_proposal_count"`
+			RecoveryCount       int `json:"recovery_count"`
+			FailedWorkCount     int `json:"failed_work_count"`
+		} `json:"review_queue"`
+	}
+	if err := json.Unmarshal(overviewOut.Bytes(), &overviewPayload); err != nil {
+		t.Fatalf("Unmarshal(overview JSON) error = %v\n%s", err, overviewOut.String())
+	}
+
+	got := overviewPayload.ReviewQueue
+	if got.TotalCount != projection.TotalCount ||
+		got.IntakeCount != projection.IntakeCount ||
+		got.GoalCount != projection.GoalCount ||
+		got.ApprovalCount != projection.ApprovalCount ||
+		got.KnowledgeCount != projection.KnowledgeCount ||
+		got.SkillArtifactCount != projection.SkillArtifactCount ||
+		got.MemoryProposalCount != projection.MemoryProposalCount ||
+		got.RecoveryCount != projection.RecoveryCount ||
+		got.FailedWorkCount != projection.FailedWorkCount {
+		t.Fatalf("overview review_queue = %+v, want shared projection %+v", got, projection)
 	}
 }
 

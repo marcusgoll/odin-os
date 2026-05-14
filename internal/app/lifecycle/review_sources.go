@@ -8,6 +8,7 @@ import (
 	"odin-os/internal/core/workspaces"
 	runtimeknowledge "odin-os/internal/runtime/knowledge"
 	"odin-os/internal/runtime/projections"
+	"odin-os/internal/runtime/reviewqueue"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -38,17 +39,25 @@ func defaultReviewQueueSources() []reviewQueueSource {
 }
 
 func listReviewQueueEntries(ctx context.Context, app bootstrap.App) ([]reviewQueueEntry, error) {
+	projection, err := readReviewQueueProjection(ctx, app)
+	if err != nil {
+		return nil, err
+	}
+	return projection.Items, nil
+}
+
+func readReviewQueueProjection(ctx context.Context, app bootstrap.App) (reviewqueue.Projection, error) {
 	state := newReviewQueueSourceState()
 	entries := make([]reviewQueueEntry, 0)
 	for _, source := range defaultReviewQueueSources() {
 		sourceEntries, err := source.ListReviewQueueEntries(ctx, app, state)
 		if err != nil {
-			return nil, err
+			return reviewqueue.Projection{}, err
 		}
 		entries = append(entries, sourceEntries...)
 	}
 	normalizeReviewQueueEntries(entries)
-	return entries, nil
+	return reviewqueue.Project(entries), nil
 }
 
 func normalizeReviewQueueEntries(entries []reviewQueueEntry) {

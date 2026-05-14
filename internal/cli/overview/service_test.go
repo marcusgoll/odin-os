@@ -15,6 +15,7 @@ import (
 	knowledgememory "odin-os/internal/memory/knowledge"
 	"odin-os/internal/registry"
 	runtimeknowledge "odin-os/internal/runtime/knowledge"
+	"odin-os/internal/runtime/reviewqueue"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -280,8 +281,9 @@ func TestOverviewShowsUnifiedReviewAndDecisionCounts(t *testing.T) {
 	seedOverviewReviewFixture(t, ctx, env)
 
 	view, err := Service{
-		Store:            env.store,
-		RegistrySnapshot: env.snapshot,
+		Store:                 env.store,
+		RegistrySnapshot:      env.snapshot,
+		ReviewQueueProjection: overviewReviewQueueProjectionFixture,
 	}.Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
@@ -302,12 +304,26 @@ func TestOverviewShowsUnifiedReviewAndDecisionCounts(t *testing.T) {
 	if view.ReviewQueue.SkillArtifactCount != 1 {
 		t.Fatalf("ReviewQueue.SkillArtifactCount = %d, want 1", view.ReviewQueue.SkillArtifactCount)
 	}
+	if view.ReviewQueue.GoalCount != 0 || view.ReviewQueue.MemoryProposalCount != 0 || view.ReviewQueue.RecoveryCount != 0 {
+		t.Fatalf("ReviewQueue governed-source extension counts = %+v, want zero for fixture without those sources", view.ReviewQueue)
+	}
 	if view.ReviewQueue.FailedWorkCount != 1 {
 		t.Fatalf("ReviewQueue.FailedWorkCount = %d, want 1", view.ReviewQueue.FailedWorkCount)
 	}
 	if view.ReviewQueue.TotalCount != 6 {
 		t.Fatalf("ReviewQueue.TotalCount = %d, want 6", view.ReviewQueue.TotalCount)
 	}
+}
+
+func overviewReviewQueueProjectionFixture(context.Context) (reviewqueue.Projection, error) {
+	return reviewqueue.Project([]reviewqueue.Entry{
+		{SourceType: "intake_review"},
+		{SourceType: "intake_approval"},
+		{SourceType: "task_approval"},
+		{SourceType: "context_pack"},
+		{SourceType: "skill_artifact"},
+		{SourceType: "failed_work"},
+	}), nil
 }
 
 func TestBuildSummarizesActualUseReadinessAndSourceAlignment(t *testing.T) {
@@ -850,6 +866,55 @@ func TestBuildIncludesCompanionSwarmAndIncidentAttention(t *testing.T) {
 	}
 	if view.CompanionSwarms[0].ActiveChildRunCount != 1 {
 		t.Fatalf("Companion swarm active child runs = %d, want 1", view.CompanionSwarms[0].ActiveChildRunCount)
+	}
+}
+
+func TestBuildBoundsIncidentAndRecoveryHistory(t *testing.T) {
+	ctx := context.Background()
+	env := newOverviewTestEnvironment(t)
+
+	const total = overviewIncidentLimit + 12
+	for index := 0; index < total; index++ {
+		incident, err := env.store.OpenIncident(ctx, sqlite.OpenIncidentParams{
+			RunID:       &env.runID,
+			Severity:    "warning",
+			Status:      "open",
+			Summary:     "historical incident",
+			DetailsJSON: "{}",
+		})
+		if err != nil {
+			t.Fatalf("OpenIncident(%d) error = %v", index, err)
+		}
+		if _, err := env.store.StartRecovery(ctx, sqlite.StartRecoveryParams{
+			IncidentID:  &incident.ID,
+			RunID:       &env.runID,
+			Status:      "completed",
+			Strategy:    "self_heal",
+			DetailsJSON: "{}",
+		}); err != nil {
+			t.Fatalf("StartRecovery(%d) error = %v", index, err)
+		}
+	}
+
+	view, err := Service{
+		Store:            env.store,
+		RegistrySnapshot: env.snapshot,
+	}.Build(ctx, scope.Resolution{Kind: scope.ScopeGlobal})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if len(view.Observability.Incidents) != overviewIncidentLimit {
+		t.Fatalf("Incidents len = %d, want bounded %d", len(view.Observability.Incidents), overviewIncidentLimit)
+	}
+	if len(view.Observability.Recoveries) != overviewRecoveryLimit {
+		t.Fatalf("Recoveries len = %d, want bounded %d", len(view.Observability.Recoveries), overviewRecoveryLimit)
+	}
+	if view.Observability.Incidents[0].IncidentID <= 1 {
+		t.Fatalf("first bounded incident id = %d, want older incidents dropped", view.Observability.Incidents[0].IncidentID)
+	}
+	if view.Observability.Recoveries[0].RecoveryID <= 1 {
+		t.Fatalf("first bounded recovery id = %d, want older recoveries dropped", view.Observability.Recoveries[0].RecoveryID)
 	}
 }
 

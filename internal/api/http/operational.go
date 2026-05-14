@@ -250,6 +250,9 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 	mux.HandleFunc("GET /manifest.webmanifest", func(writer http.ResponseWriter, request *http.Request) {
 		handlePWAManifest(writer, request)
 	})
+	mux.HandleFunc("GET /favicon.ico", func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, "/app/icons/icon-192.svg", http.StatusMovedPermanently)
+	})
 	mux.HandleFunc("GET /service-worker.js", func(writer http.ResponseWriter, request *http.Request) {
 		handlePWAServiceWorker(writer, request)
 	})
@@ -419,7 +422,7 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		writeJSON(writer, http.StatusOK, view)
 	})
 	registerMobileRoutes(mux, deps, now)
-	registerPWAHandlers(mux)
+	registerPWAHandlers(mux, deps)
 	return withOperationalSecurity(mux)
 }
 
@@ -429,7 +432,7 @@ func withOperationalSecurity(next http.Handler) http.Handler {
 		writer.Header().Set("X-Frame-Options", "DENY")
 		writer.Header().Set("Referrer-Policy", "no-referrer")
 		writer.Header().Set("Permissions-Policy", "camera=(self), microphone=(self), geolocation=()")
-		writer.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; script-src 'self'; style-src 'self'; manifest-src 'self'; base-uri 'self'; frame-ancestors 'none'")
+		writer.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' https://cloudflareinsights.com; img-src 'self' blob: data:; media-src 'self' blob:; script-src 'self' https://static.cloudflareinsights.com; style-src 'self'; manifest-src 'self'; base-uri 'self'; frame-ancestors 'none'")
 		applyLockedDownCORS(writer, request)
 		if request.Method == http.MethodOptions {
 			if request.Header.Get("Access-Control-Request-Method") != "" {

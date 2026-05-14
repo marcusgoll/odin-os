@@ -11,7 +11,7 @@ import (
 //go:embed app_static
 var pwaStatic embed.FS
 
-func registerPWAHandlers(mux *http.ServeMux) {
+func registerPWAHandlers(mux *http.ServeMux, deps Dependencies) {
 	subtree, err := fs.Sub(pwaStatic, "app_static")
 	if err != nil {
 		panic(err)
@@ -22,6 +22,12 @@ func registerPWAHandlers(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("GET /app/share", func(writer http.ResponseWriter, request *http.Request) {
 		writePWASharePage(writer, nil)
+	})
+	mux.HandleFunc("GET /app/session", func(writer http.ResponseWriter, request *http.Request) {
+		_, _, _, _, ok := authorizeMobileRequest(request, deps)
+		writeMobileJSON(writer, http.StatusOK, map[string]any{
+			"authenticated": ok,
+		})
 	})
 	mux.HandleFunc("POST /app/share", handlePWASharePost)
 	mux.HandleFunc("GET /app/", func(writer http.ResponseWriter, request *http.Request) {
@@ -41,6 +47,10 @@ func registerPWAHandlers(mux *http.ServeMux) {
 
 func setPWAContentType(writer http.ResponseWriter, assetPath string) {
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	switch assetPath {
+	case "index.html", "app.js", "styles.css", "manifest.webmanifest", "service-worker.js", "offline.html":
+		writer.Header().Set("Cache-Control", "no-store")
+	}
 	switch path.Ext(assetPath) {
 	case ".webmanifest":
 		writer.Header().Set("Content-Type", "application/manifest+json")
