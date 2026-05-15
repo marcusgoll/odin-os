@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"odin-os/internal/executors/contract"
 )
@@ -170,6 +171,15 @@ func TestHeadlessRunTaskUsesDriverScript(t *testing.T) {
 	}
 	if result.Metadata["driver"] != "codex_headless_script" {
 		t.Fatalf("driver metadata = %q, want codex_headless_script", result.Metadata["driver"])
+	}
+}
+
+func TestDriverRunTimeoutAllowsRealCodexSessions(t *testing.T) {
+	if got := driverTimeout("run"); got < 30*time.Minute {
+		t.Fatalf("driverTimeout(run) = %s, want at least 30m for live codex sessions", got)
+	}
+	if got := driverTimeout("health"); got >= driverTimeout("run") {
+		t.Fatalf("driverTimeout(health) = %s, want shorter than run timeout %s", got, driverTimeout("run"))
 	}
 }
 
