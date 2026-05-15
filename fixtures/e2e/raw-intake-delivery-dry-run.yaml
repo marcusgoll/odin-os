@@ -1,0 +1,68 @@
+name: raw-intake-delivery-dry-run
+description: Fixture-backed raw prompt intake chain through worker, review handoff, approval, and verified dry-run merge without external mutation.
+github:
+  mode: fixture
+codex:
+  mode: disabled
+steps:
+  - name: create_raw_intake
+    issue_title: Implement autonomous raw intake delivery proof
+    expect:
+      source: codex-cli
+      external_object_id: raw-intake-e2e-001
+      intake_type: prompt
+      dedup_key: raw-intake:e2e-autonomous-loop
+      requested_by: operator
+      intake_status: received
+
+  - name: process_raw_intake_to_work_item
+    expect:
+      intake_status: routed
+      work_item_key: raw-intake-1
+
+  - name: dispatch_to_isolated_worktree
+    expect:
+      branch_prefix: odin/
+      inside_workspace_root: true
+
+  - name: execute_deterministic_stub
+    expect:
+      tests_recorded: true
+      review_artifact: true
+
+  - name: start_workspace_session
+    expect:
+      session_state: live
+
+  - name: attach_workspace_session
+    expect:
+      session_attached_count: 1
+
+  - name: stop_workspace_session
+    expect:
+      session_state: stopped
+
+  - name: handoff_to_specialist_subagents
+    expect:
+      changed_files:
+        - internal/e2e/run.go
+        - shims/codex-worker
+      expected_review_roles:
+        - reviewer
+        - qa
+        - security
+      handoff_review_state: review_selected
+
+  - name: require_pr_approval
+    expect:
+      approval_required: true
+      github_writes: 0
+
+  - name: resolve_pr_approval
+    expect:
+      approval_status: approved
+      task_status: queued
+
+  - name: merge_verified_dry_run
+    expect:
+      task_status: completed
