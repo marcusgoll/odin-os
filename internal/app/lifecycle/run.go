@@ -5118,14 +5118,6 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 		return fmt.Errorf("usage: odin status [--json]")
 	}
 
-	snapshot, err := conversationsvc.Service{
-		DB:             app.Store.DB(),
-		StalledTimeout: 30 * time.Minute,
-	}.Snapshot(ctx)
-	if err != nil {
-		return err
-	}
-
 	summary, err := newHealthService(app, healthsvc.DefaultConfig(), cfg).Summary(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
@@ -5143,6 +5135,14 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 		return err
 	}
 	workerDispatch := healthsvc.NewWorkerDispatchStatus(ready, runtimeStatus, readinessReport.Status)
+
+	snapshot, err := conversationsvc.Service{
+		DB:             app.Store.DB(),
+		StalledTimeout: 30 * time.Minute,
+	}.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
 
 	if jsonOutput {
 		companionSwarmCounts := struct {
