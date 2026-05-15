@@ -479,6 +479,73 @@ func TestReadinessFailsClosedWhenImmediateNotReadyFlagIsSet(t *testing.T) {
 	}
 }
 
+func TestReadinessReportIsDegradedWhenRuntimeIsNotReady(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	store := openStore(t)
+	defer store.Close()
+
+	if _, err := store.RecordExecutorHealth(context.Background(), sqlite.RecordExecutorHealthParams{
+		Executor:    "codex_headless",
+		Status:      "healthy",
+		LatencyMS:   10,
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth() error = %v", err)
+	}
+	if _, err := store.RecordRegistryVersion(context.Background(), sqlite.RecordRegistryVersionParams{
+		Source:      "registry",
+		VersionHash: "abc123",
+		Notes:       "fresh compile",
+	}); err != nil {
+		t.Fatalf("RecordRegistryVersion() error = %v", err)
+	}
+	if _, err := store.RecordProjectionFreshness(context.Background(), sqlite.RecordProjectionFreshnessParams{
+		Surface:     "doctor",
+		Status:      "healthy",
+		DetailsJSON: `{"source":"test"}`,
+	}); err != nil {
+		t.Fatalf("RecordProjectionFreshness() error = %v", err)
+	}
+	if _, err := store.UpsertRuntimeState(context.Background(), sqlite.UpsertRuntimeStateParams{
+		BootID:             "boot-test",
+		Status:             "degraded",
+		PID:                1234,
+		StartedAt:          now,
+		ReadyAt:            nil,
+		LastHeartbeatAt:    now,
+		LastShutdownReason: "",
+		LastError:          "codex worker unavailable",
+		UpdatedAt:          now,
+	}, sqlite.RuntimeStateWriteOptions{}); err != nil {
+		t.Fatalf("UpsertRuntimeState() error = %v", err)
+	}
+
+	report, ready, err := Service{
+		DB:           store.DB(),
+		Config:       DefaultConfig(),
+		Now:          func() time.Time { return now },
+		ExecutorKeys: []string{"codex_headless"},
+	}.Readiness(context.Background(), true)
+	if err != nil {
+		t.Fatalf("Readiness() error = %v", err)
+	}
+	if ready {
+		t.Fatal("Readiness() = true, want false")
+	}
+	if report.Status != StatusDegraded {
+		t.Fatalf("Readiness() report status = %q, want %q", report.Status, StatusDegraded)
+	}
+	runtimeCheck := findHealthCheck(t, report, "runtime")
+	if runtimeCheck.Status != StatusDegraded {
+		t.Fatalf("runtime check status = %q, want %q", runtimeCheck.Status, StatusDegraded)
+	}
+	if runtimeCheck.Details["status"] != "degraded" {
+		t.Fatalf("runtime status detail = %q, want degraded", runtimeCheck.Details["status"])
+	}
+}
+
 func TestDoctorReportIsFailedWhenDatabaseIsUnavailable(t *testing.T) {
 	t.Parallel()
 

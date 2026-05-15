@@ -70,19 +70,23 @@ func (headlessExecutor) Class() contract.ExecutorClass {
 
 func (executor headlessExecutor) Health(ctx context.Context) (contract.HealthReport, error) {
 	if driver, ok := explicitDriverPath(); ok {
-		if report, ok := executor.jsonDriverHealth(ctx, driver); ok {
+		report, ok, details := executor.probeJSONDriverHealth(ctx, driver)
+		if ok {
 			return report, nil
 		}
 		if err := validateDriverPath(driver); err != nil {
 			return contract.HealthReport{
 				Status:    contract.HealthStatusUnavailable,
-				Details:   fmt.Sprintf("codex legacy driver is unavailable: %v", err),
+				Details:   fmt.Sprintf("codex driver is unavailable: %v", err),
 				CheckedAt: time.Now().UTC(),
 			}, nil
 		}
+		if details == "" {
+			details = "driver did not return a valid health response"
+		}
 		return contract.HealthReport{
-			Status:    contract.HealthStatusHealthy,
-			Details:   fmt.Sprintf("codex legacy driver ready at %s", driver),
+			Status:    contract.HealthStatusUnavailable,
+			Details:   fmt.Sprintf("codex driver health probe failed: %s", details),
 			CheckedAt: time.Now().UTC(),
 		}, nil
 	}
@@ -209,23 +213,28 @@ func (executor headlessExecutor) runJSONDriver(ctx context.Context, spec contrac
 }
 
 func (executor headlessExecutor) jsonDriverHealth(ctx context.Context, driver string) (contract.HealthReport, bool) {
+	report, ok, _ := executor.probeJSONDriverHealth(ctx, driver)
+	return report, ok
+}
+
+func (executor headlessExecutor) probeJSONDriverHealth(ctx context.Context, driver string) (contract.HealthReport, bool, string) {
 	response, _, err := executor.invokeDriverPath(ctx, driver, driverRequest{
 		Action: "health",
 		Mode:   "headless",
 	})
 	if err != nil {
-		return contract.HealthReport{}, false
+		return contract.HealthReport{}, false, err.Error()
 	}
 
 	status, ok := validateHealthStatus(response.Status)
 	if !ok {
-		return contract.HealthReport{}, false
+		return contract.HealthReport{}, false, fmt.Sprintf("invalid health status %q", response.Status)
 	}
 	return contract.HealthReport{
 		Status:    status,
 		Details:   response.Details,
 		CheckedAt: time.Now().UTC(),
-	}, true
+	}, true, ""
 }
 
 func (executor headlessExecutor) runLegacyDriver(ctx context.Context, driver string, spec contract.TaskSpec) (contract.ExecutionResult, error) {

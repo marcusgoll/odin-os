@@ -756,32 +756,24 @@ service:
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	ctx = withServeLoopConfig(ctx, serveLoopConfig{
 		goalInterval: time.Hour,
 	})
 
 	var stdout bytes.Buffer
-	runErr := make(chan error, 1)
+	errc := make(chan error, 1)
 	go func() {
-		runErr <- Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+		errc <- Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
 	}()
 
-	if err := waitForGoalRunning(ctx, store, goal.ID); err != nil {
-		cancel()
-		<-runErr
-		t.Fatal(err)
-	}
-
+	got := waitForServeGoalRunning(t, store, goal.ID)
 	cancel()
-	err = <-runErr
+	err = <-errc
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
 	}
 
-	got, err := store.GetGoal(context.Background(), goal.ID)
-	if err != nil {
-		t.Fatalf("GetGoal() error = %v", err)
-	}
 	if got.Status != sqlite.GoalStatusRunning || got.CurrentRunID == nil {
 		t.Fatalf("goal after serve = %+v, want running with active run", got)
 	}
@@ -2776,6 +2768,33 @@ func countServeGoalEvents(t *testing.T, store *sqlite.Store) map[string]int {
 		}
 	}
 	return counts
+}
+
+func waitForServeGoalRunning(t *testing.T, store *sqlite.Store, goalID int64) sqlite.Goal {
+	t.Helper()
+
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	var last sqlite.Goal
+	for {
+		select {
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for serve goal %d to run; last goal = %+v", goalID, last)
+		case <-ticker.C:
+			got, err := store.GetGoal(context.Background(), goalID)
+			if err != nil {
+				t.Fatalf("GetGoal(%d) error = %v", goalID, err)
+			}
+			last = got
+			if got.Status == sqlite.GoalStatusRunning && got.CurrentRunID != nil {
+				return got
+			}
+		}
+	}
 }
 
 func waitForServeHealthStatus(ctx context.Context, baseURL string, wantCode int, wantStatus string, pathOverride ...string) error {
