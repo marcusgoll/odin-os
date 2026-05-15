@@ -1,5 +1,5 @@
 name: github-issue-delivery-dry-run
-description: Fixture-backed GitHub issue delivery chain through PR-ready branch without external mutation.
+description: Fixture-backed GitHub issue delivery chain through worker, review handoff, approval, and verified dry-run merge without external mutation.
 github:
   mode: fixture
 codex:
@@ -25,7 +25,39 @@ steps:
       tests_recorded: true
       review_artifact: true
 
+  - name: start_workspace_session
+    expect:
+      session_state: live
+
+  - name: attach_workspace_session
+    expect:
+      session_attached_count: 1
+
+  - name: stop_workspace_session
+    expect:
+      session_state: stopped
+
+  - name: handoff_to_specialist_subagents
+    expect:
+      changed_files:
+        - internal/e2e/run.go
+        - shims/codex-worker
+      expected_review_roles:
+        - reviewer
+        - qa
+        - security
+      handoff_review_state: review_selected
+
   - name: require_pr_approval
     expect:
       approval_required: true
       github_writes: 0
+
+  - name: resolve_pr_approval
+    expect:
+      approval_status: approved
+      task_status: queued
+
+  - name: merge_verified_dry_run
+    expect:
+      task_status: completed
