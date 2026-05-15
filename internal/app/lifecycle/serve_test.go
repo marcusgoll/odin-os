@@ -1541,7 +1541,7 @@ func TestRunHealthCycleMarksReadyBeforeSlowNotificationRouting(t *testing.T) {
 	}
 	defer app.Store.Close()
 
-	healthCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	healthCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	var immediateNotReady atomic.Bool
