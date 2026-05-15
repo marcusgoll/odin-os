@@ -392,6 +392,40 @@ func TestRunBrowserSessionLoginRequestCreateAndList(t *testing.T) {
 	}
 }
 
+func TestRunBrowserSessionLoginRequestUsesConfiguredHandoffBaseURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODIN_BROWSER_HANDOFF_BASE_URL", "https://odin.marcusgoll.com/browser/session/handoff")
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "x-profile-bio-stress",
+		"--domain", "x.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run(
+		"browser", "session", "login-request",
+		"--id", int64String(created.ID),
+		"--json",
+	)))
+	if loginRequest.HandoffURL == nil || !strings.HasPrefix(*loginRequest.HandoffURL, "https://odin.marcusgoll.com/browser/session/handoff?handoff_id=") {
+		t.Fatalf("loginRequest.HandoffURL = %v, want configured operator handoff URL", loginRequest.HandoffURL)
+	}
+	if strings.Contains(*loginRequest.HandoffURL, "localhost") || strings.Contains(*loginRequest.HandoffURL, "127.0.0.1") || strings.Contains(*loginRequest.HandoffURL, "session_id=") {
+		t.Fatalf("loginRequest.HandoffURL = %q, must be routed metadata URL without session id", *loginRequest.HandoffURL)
+	}
+}
+
 func TestRunBrowserSessionRunnerMetadataCommands(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
