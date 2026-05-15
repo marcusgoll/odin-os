@@ -5136,11 +5136,17 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 	}
 	workerDispatch := healthsvc.NewWorkerDispatchStatus(ready, runtimeStatus, readinessReport.Status)
 
+	snapshotCtx, cancelSnapshot := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelSnapshot()
 	snapshot, err := conversationsvc.Service{
 		DB:             app.Store.DB(),
 		StalledTimeout: 30 * time.Minute,
-	}.Snapshot(ctx)
-	if err != nil {
+	}.Snapshot(snapshotCtx)
+	statusSnapshotError := ""
+	if err != nil && jsonOutput {
+		statusSnapshotError = err.Error()
+		snapshot = conversationsvc.Snapshot{GeneratedAt: time.Now().UTC()}
+	} else if err != nil {
 		return err
 	}
 
@@ -5165,6 +5171,7 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 			"pending_approvals":            len(snapshot.ApprovalsWaiting),
 			"registry_healthy":             summary.RegistryHealthy,
 			"generated_at":                 snapshot.GeneratedAt,
+			"status_snapshot_error":        statusSnapshotError,
 			"approvals_waiting":            snapshot.ApprovalsWaiting,
 			"stalled_runs":                 snapshot.StalledRuns,
 			"active_runs":                  snapshot.ActiveRuns,
