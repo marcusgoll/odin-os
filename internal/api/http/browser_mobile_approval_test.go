@@ -123,6 +123,72 @@ func TestMobileBrowserAttendedLoginAppearsInReviewQueue(t *testing.T) {
 	assertNoBrowserSecrets(t, item)
 }
 
+func TestMobileBrowserAttendedLoginUsesStartedRunnerViewerLink(t *testing.T) {
+	ctx := context.Background()
+	store := openMobileBrowserStore(t)
+	readModels := store.DB()
+	_ = createMobileBrowserProject(t, ctx, store)
+	store.BrowserSessionHandoffID = func() (string, error) { return "viewer-handoff", nil }
+	session, err := store.CreateBrowserSession(ctx, sqlite.CreateBrowserSessionParams{
+		Name:           "Example login",
+		Domain:         "example.com",
+		AccountHint:    "operator",
+		PermissionTier: sqlite.BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	request, err := store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: time.Now().UTC().Add(15 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("create login request: %v", err)
+	}
+	viewerURL := "https://odin-handoff.tailnet.local/session/novnc-real-1001-1002-1003"
+	runnerID := "novnc-real-1001-1002-1003"
+	processID := int64(1003)
+	runner, err := store.CreateBrowserHandoffRunner(ctx, sqlite.CreateBrowserHandoffRunnerParams{
+		SessionID:      session.ID,
+		LoginRequestID: request.ID,
+		HandoffID:      request.HandoffID,
+		ExpiresAt:      request.ExpiresAt,
+	})
+	if err != nil {
+		t.Fatalf("create runner: %v", err)
+	}
+	_, err = store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+		ID:        runner.ID,
+		Status:    sqlite.BrowserHandoffRunnerStatusStarted,
+		ViewerURL: &viewerURL,
+		RunnerID:  &runnerID,
+		ProcessID: &processID,
+		Actor:     "test",
+		Reason:    "real attended browser handoff started",
+	})
+	if err != nil {
+		t.Fatalf("start runner: %v", err)
+	}
+
+	server := startMobileBrowserServer(t, store, readModels)
+	review := mobileBrowserGet(t, server, "/mobile/review-queue")
+	item := findMobileItem(t, review.Items, "queue_id", "browser-login:"+intString(request.ID))
+	if item["browser_event"] != "browser_attended_login_started" {
+		t.Fatalf("login browser_event = %v", item["browser_event"])
+	}
+	if item["deep_link"] != viewerURL {
+		t.Fatalf("deep_link = %v, want started runner viewer URL", item["deep_link"])
+	}
+	actions, ok := item["allowed_actions"].([]any)
+	if !ok || len(actions) != 1 || actions[0] != "open-viewer" {
+		t.Fatalf("allowed_actions = %#v, want open-viewer only", item["allowed_actions"])
+	}
+	if item["real_browser_evidence"] != true {
+		t.Fatalf("real_browser_evidence = %v, want true for novnc-real runner", item["real_browser_evidence"])
+	}
+	assertNoBrowserSecrets(t, item)
+}
+
 func TestMobileReviewQueueDecisionCompletesBrowserAttendedLogin(t *testing.T) {
 	ctx := context.Background()
 	store := openMobileBrowserStore(t)

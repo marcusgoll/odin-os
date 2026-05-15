@@ -622,6 +622,56 @@ func TestNoVNCRunnerStartExpiresWhenRealWebsockifyTimesOut(t *testing.T) {
 	}
 }
 
+func TestNoVNCRunnerStartReturnsStartedForFullRealAttendedLaunch(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	displayPath := writeProcessTestScript(t, "display-vnc", "#!/bin/sh\nexit 0\n")
+	browserPath := writeProcessTestScript(t, "browser", "#!/bin/sh\nexit 0\n")
+	websockifyPath := writeProcessTestScript(t, "websockify", "#!/bin/sh\nexit 0\n")
+	supervisor := &fakeNoVNCProcessSupervisor{}
+	runner := NoVNCRunner{
+		Supervisor: supervisor,
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			config := validNoVNCLaunchConfig(commandPath)
+			config.DisplayCommand = displayPath
+			config.BrowserCommand = browserPath
+			config.WebsockifyCommand = websockifyPath
+			config.AllowedCommandPaths = []string{displayPath, browserPath, websockifyPath}
+			config.RealDisplayEnabled = true
+			config.RealBrowserEnabled = true
+			config.RealWebsockifyEnabled = true
+			return config, nil
+		},
+	}
+
+	response, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Start(full real attended launch) error = %v", err)
+	}
+	if response.Status != StatusStarted {
+		t.Fatalf("response.Status = %q, want %q for full real attended launch", response.Status, StatusStarted)
+	}
+	if response.RunnerID != "novnc-real-1001-1002-1003" {
+		t.Fatalf("response.RunnerID = %q, want real NoVNC runner id", response.RunnerID)
+	}
+	if response.ViewerURL != "https://odin-handoff.tailnet.local/session/novnc-real-1001-1002-1003" {
+		t.Fatalf("response.ViewerURL = %q, want private real NoVNC viewer URL", response.ViewerURL)
+	}
+	if len(supervisor.started) != 3 || strings.Join(processRoles(supervisor.started), ",") != "display,browser,novnc/websockify" {
+		t.Fatalf("started processes = %+v, want display/browser/websockify", supervisor.started)
+	}
+	if len(supervisor.waited) != 0 {
+		t.Fatalf("waited handles = %+v, want full real attended launch to return while viewer remains available", supervisor.waited)
+	}
+	if len(response.ChildProcesses) != 3 {
+		t.Fatalf("response.ChildProcesses = %+v, want started child process metadata", response.ChildProcesses)
+	}
+	for _, child := range response.ChildProcesses {
+		if child.Status != ProcessStatusStarted {
+			t.Fatalf("child process = %+v, want started status", child)
+		}
+	}
+}
+
 func TestNoVNCRunnerStartReturnsFailedWhenAProcessFails(t *testing.T) {
 	commandPath := testExecutablePath(t, "true")
 	supervisor := &fakeNoVNCProcessSupervisor{

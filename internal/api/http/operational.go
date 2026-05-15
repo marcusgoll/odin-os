@@ -476,15 +476,19 @@ type browserSessionHandoffCompletionResponse struct {
 }
 
 type browserSessionHandoffView struct {
-	HandoffID      string `json:"handoff_id"`
-	LoginRequestID int64  `json:"login_request_id"`
-	SessionID      int64  `json:"session_id"`
-	SessionName    string `json:"session_name"`
-	Domain         string `json:"domain"`
-	AccountHint    string `json:"account_hint"`
-	ExpiresAt      string `json:"expires_at"`
-	Status         string `json:"status"`
-	AllowedActions string `json:"allowed_actions"`
+	HandoffID           string `json:"handoff_id"`
+	LoginRequestID      int64  `json:"login_request_id"`
+	SessionID           int64  `json:"session_id"`
+	SessionName         string `json:"session_name"`
+	Domain              string `json:"domain"`
+	AccountHint         string `json:"account_hint"`
+	ExpiresAt           string `json:"expires_at"`
+	Status              string `json:"status"`
+	AllowedActions      string `json:"allowed_actions"`
+	RunnerStatus        string `json:"runner_status,omitempty"`
+	RunnerID            string `json:"runner_id,omitempty"`
+	ViewerURL           string `json:"viewer_url,omitempty"`
+	RealBrowserEvidence bool   `json:"real_browser_evidence,omitempty"`
 }
 
 type browserSessionHandoffCompletionView struct {
@@ -516,7 +520,11 @@ func handleBrowserSessionHandoffShow(writer http.ResponseWriter, request *http.R
 		writeAPIError(writer, statusCode, code, err.Error())
 		return
 	}
-	view := newBrowserSessionHandoffView(handoff)
+	view, err := newBrowserSessionHandoffView(request.Context(), deps.Store, handoff)
+	if err != nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "browser_handoff_runner_unavailable", err.Error())
+		return
+	}
 	if wantsBrowserSessionHandoffHTML(request) {
 		writeBrowserSessionHandoffHTML(writer, view)
 		return
@@ -588,8 +596,8 @@ func parseBrowserSessionHandoffCompletionID(writer http.ResponseWriter, request 
 	return request.FormValue("handoff_id"), true, nil
 }
 
-func newBrowserSessionHandoffView(handoff sqlite.BrowserSessionLoginHandoff) browserSessionHandoffView {
-	return browserSessionHandoffView{
+func newBrowserSessionHandoffView(ctx context.Context, store *sqlite.Store, handoff sqlite.BrowserSessionLoginHandoff) (browserSessionHandoffView, error) {
+	view := browserSessionHandoffView{
 		HandoffID:      handoff.HandoffID,
 		LoginRequestID: handoff.LoginRequest.ID,
 		SessionID:      handoff.Session.ID,
@@ -600,6 +608,26 @@ func newBrowserSessionHandoffView(handoff sqlite.BrowserSessionLoginHandoff) bro
 		Status:         string(handoff.LoginRequest.Status),
 		AllowedActions: "manual_login_only",
 	}
+	if store == nil {
+		return view, nil
+	}
+	runners, err := store.ListBrowserHandoffRunners(ctx, sqlite.ListBrowserHandoffRunnersParams{LoginRequestID: handoff.LoginRequest.ID})
+	if err != nil {
+		return browserSessionHandoffView{}, err
+	}
+	for index := len(runners) - 1; index >= 0; index-- {
+		runner := runners[index]
+		if runner.Status != sqlite.BrowserHandoffRunnerStatusStarted || runner.ViewerURL == nil || strings.TrimSpace(*runner.ViewerURL) == "" {
+			continue
+		}
+		view.RunnerStatus = string(runner.Status)
+		view.RunnerID = mobileOptionalString(runner.RunnerID)
+		view.ViewerURL = strings.TrimSpace(*runner.ViewerURL)
+		view.RealBrowserEvidence = strings.HasPrefix(view.RunnerID, "novnc-real-")
+		view.AllowedActions = "manual_login_via_private_viewer"
+		break
+	}
+	return view, nil
 }
 
 func newBrowserSessionHandoffCompletionView(handoffID string, session sqlite.BrowserSession, request sqlite.BrowserSessionLoginRequest) browserSessionHandoffCompletionView {
@@ -674,11 +702,13 @@ var browserSessionHandoffHTMLTemplate = template.Must(template.New("browser_sess
   <main>
     <section>
       <h1>Browser Login Handoff</h1>
-      <p class="notice">No browser session is launched yet. Odin is not collecting credentials. Login and 2FA will be manual in a future handoff step.</p>
+      {{if .ViewerURL}}<p class="notice">A private attended browser viewer is available. Odin is not collecting credentials. Login and 2FA stay manual in the visible browser.</p>{{else}}<p class="notice">No browser session is launched yet. Odin is not collecting credentials. Login and 2FA will be manual in a future handoff step.</p>{{end}}
       <dl>
         <dt>Session</dt><dd>{{.SessionName}}</dd>
         <dt>Domain</dt><dd>{{.Domain}}</dd>
         {{if .AccountHint}}<dt>Account hint</dt><dd>{{.AccountHint}}</dd>{{end}}
+        {{if .ViewerURL}}<dt>Private viewer</dt><dd><a href="{{.ViewerURL}}">{{.ViewerURL}}</a></dd>{{end}}
+        {{if .RunnerID}}<dt>Runner</dt><dd>{{.RunnerID}}</dd>{{end}}
         <dt>Expires at</dt><dd>{{.ExpiresAt}}</dd>
         <dt>Status</dt><dd>{{.Status}}</dd>
         <dt>Allowed action</dt><dd>{{.AllowedActions}}</dd>

@@ -150,6 +150,11 @@ func (runner NoVNCRunner) Start(ctx context.Context, request StartRequest) (Star
 	}
 
 	response := newNoVNCStartResponse(request, config, handles, nil)
+	if noVNCFullRealLaunchEnabled(config) {
+		response.Status = StatusStarted
+		response.ChildProcesses = noVNCStartedProcessResults(handles)
+		return response, nil
+	}
 	results := make([]ProcessResult, 0, len(handles))
 	for index, handle := range handles {
 		result, err := supervisor.WaitProcess(ctx, handle)
@@ -201,7 +206,7 @@ func (runner NoVNCRunner) Start(ctx context.Context, request StartRequest) (Star
 }
 
 func newNoVNCStartResponse(request StartRequest, config NoVNCLaunchConfig, handles []ProcessHandle, results []ProcessResult) StartResponse {
-	runnerID := buildNoVNCRunnerID(handles)
+	runnerID := buildNoVNCRunnerID(config, handles)
 	processID := int64(0)
 	if len(handles) > 0 {
 		processID = handles[len(handles)-1].PID
@@ -219,6 +224,24 @@ func newNoVNCStartResponse(request StartRequest, config NoVNCLaunchConfig, handl
 		ChildProcesses: results,
 	}
 	return response
+}
+
+func noVNCFullRealLaunchEnabled(config NoVNCLaunchConfig) bool {
+	return config.RealDisplayEnabled && config.RealBrowserEnabled && config.RealWebsockifyEnabled
+}
+
+func noVNCStartedProcessResults(handles []ProcessHandle) []ProcessResult {
+	results := make([]ProcessResult, 0, len(handles))
+	for _, handle := range handles {
+		results = append(results, ProcessResult{
+			PID:         handle.PID,
+			Role:        handle.Role,
+			CommandPath: handle.CommandPath,
+			StartedAt:   handle.StartedAt,
+			Status:      ProcessStatusStarted,
+		})
+	}
+	return results
 }
 
 func validateNoVNCFixtureSafeLaunchConfig(config NoVNCLaunchConfig) error {
@@ -260,12 +283,16 @@ func validateNoVNCFixtureSafeLaunchConfig(config NoVNCLaunchConfig) error {
 	return nil
 }
 
-func buildNoVNCRunnerID(handles []ProcessHandle) string {
+func buildNoVNCRunnerID(config NoVNCLaunchConfig, handles []ProcessHandle) string {
 	if len(handles) == 0 {
 		return ""
 	}
 	parts := make([]string, 0, len(handles)+1)
-	parts = append(parts, "novnc")
+	if noVNCFullRealLaunchEnabled(config) {
+		parts = append(parts, "novnc-real")
+	} else {
+		parts = append(parts, "novnc")
+	}
 	for _, handle := range handles {
 		parts = append(parts, strconv.FormatInt(handle.PID, 10))
 	}
