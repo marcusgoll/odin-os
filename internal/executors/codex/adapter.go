@@ -19,7 +19,7 @@ const executorKey = "codex_headless"
 
 var (
 	healthDriverTimeout = 5 * time.Second
-	runDriverTimeout    = 30 * time.Second
+	runDriverTimeout    = 30 * time.Minute
 )
 
 type driverRequest struct {
