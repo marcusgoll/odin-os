@@ -2151,7 +2151,14 @@ func (git *cleanupFailureGit) WorktreeDirty(context.Context, string) (bool, erro
 func createRuntimeRoot(t *testing.T) string {
 	t.Helper()
 
-	root := t.TempDir()
+	root, err := os.MkdirTemp("", sanitizeRuntimeRootTestName(t.Name())+"-")
+	if err != nil {
+		t.Fatalf("create runtime root: %v", err)
+	}
+	t.Cleanup(func() {
+		removeRuntimeRoot(t, root)
+	})
+
 	if err := os.MkdirAll(filepath.Join(root, "config"), 0o755); err != nil {
 		t.Fatalf("mkdir config: %v", err)
 	}
@@ -2226,6 +2233,25 @@ routes:
 	}
 
 	return root
+}
+
+func sanitizeRuntimeRootTestName(name string) string {
+	replacer := strings.NewReplacer("/", "-", " ", "-", ":", "-")
+	return replacer.Replace(name)
+}
+
+func removeRuntimeRoot(t *testing.T, root string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := os.RemoveAll(root); err == nil {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("remove runtime root %s: %v", root, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func writeUnavailableExecutorsConfig(t *testing.T, root string) {

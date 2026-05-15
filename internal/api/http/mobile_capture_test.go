@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -104,6 +105,7 @@ func TestOperationalHandlerServesMobileCapturePWAShell(t *testing.T) {
 		`Browser Needs Help`,
 		`Quiet Later`,
 		`Critical confirmation`,
+		`Review action`,
 		`data-capture-kind="note"`,
 		`data-capture-kind="voice_note"`,
 		`data-capture-kind="photo"`,
@@ -142,6 +144,7 @@ func TestOperationalHandlerServesMobileCapturePWAShell(t *testing.T) {
 		`/mobile/status`,
 		`/mobile/overview`,
 		`/mobile/review-queue`,
+		`/mobile/review-queue/${encodeURIComponent(item.queue_id)}/decision`,
 		`/mobile/approvals`,
 		`/mobile/browser/status`,
 		`/mobile/notifications/preferences`,
@@ -150,6 +153,8 @@ func TestOperationalHandlerServesMobileCapturePWAShell(t *testing.T) {
 		`No production mock data is shown.`,
 		`No action-required rows in current projections.`,
 		`Approval reason is required.`,
+		`Review reason is required.`,
+		`Mark attended browser login complete`,
 		`Allowed decisions:`,
 		`confirmation_text`,
 		`expected_policy_snapshot_hash`,
@@ -185,6 +190,62 @@ func TestOperationalHandlerServesMobileCapturePWAShell(t *testing.T) {
 	defer faviconResponse.Body.Close()
 	if faviconResponse.StatusCode != http.StatusOK {
 		t.Fatalf("GET /favicon.ico status = %d, want redirected icon success", faviconResponse.StatusCode)
+	}
+}
+
+func TestMobileReviewQueueDecisionRejectsClarifiesAndArchivesIntake(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Store:      store,
+		ReadModels: store.DB(),
+		AdminToken: "secret",
+	}))
+	defer server.Close()
+
+	cases := []struct {
+		action string
+		status string
+	}{
+		{action: "reject", status: "rejected"},
+		{action: "clarify", status: "needs_clarification"},
+		{action: "archive", status: "archived"},
+	}
+	for _, tc := range cases {
+		item, err := store.CreateIntakeItem(ctx, sqlite.CreateIntakeItemParams{
+			WorkspaceID:         "default",
+			SourceFamily:        "mobile-test",
+			ExternalObjectID:    "review-" + tc.action,
+			EventKind:           "operator_review",
+			Subject:             "Review " + tc.action,
+			DedupeKey:           "review-" + tc.action,
+			DedupeRecipeVersion: "test-v1",
+			SourceFactsJSON:     `{}`,
+			Status:              "review_required",
+			Scope:               "workspace",
+			ScopeKey:            "default",
+		})
+		if err != nil {
+			t.Fatalf("CreateIntakeItem(%s) error = %v", tc.action, err)
+		}
+		queueID := "intake-review:" + int64String(item.ID)
+		res := mustMobileRequest(t, server, http.MethodPost, "/mobile/review-queue/"+url.PathEscape(queueID)+"/decision", "secret", strings.NewReader(`{"action":"`+tc.action+`","reason":"operator decided from PWA"}`))
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			raw, _ := io.ReadAll(res.Body)
+			t.Fatalf("POST review decision %s status = %d body=%s, want %d", tc.action, res.StatusCode, string(raw), http.StatusOK)
+		}
+		updated, err := store.GetIntakeItem(ctx, item.ID)
+		if err != nil {
+			t.Fatalf("GetIntakeItem(%s) error = %v", tc.action, err)
+		}
+		if updated.Status != tc.status {
+			t.Fatalf("intake status after %s = %q, want %q", tc.action, updated.Status, tc.status)
+		}
 	}
 }
 

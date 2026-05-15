@@ -6,8 +6,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -119,6 +121,54 @@ func TestMobileBrowserAttendedLoginAppearsInReviewQueue(t *testing.T) {
 		t.Fatalf("missing handoff deep link: %#v", item)
 	}
 	assertNoBrowserSecrets(t, item)
+}
+
+func TestMobileReviewQueueDecisionCompletesBrowserAttendedLogin(t *testing.T) {
+	ctx := context.Background()
+	store := openMobileBrowserStore(t)
+	readModels := store.DB()
+	store.BrowserSessionHandoffID = func() (string, error) { return "complete-mobile-handoff", nil }
+	session, err := store.CreateBrowserSession(ctx, sqlite.CreateBrowserSessionParams{
+		Name:           "Example login",
+		Domain:         "example.com",
+		AccountHint:    "operator",
+		PermissionTier: sqlite.BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	request, err := store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: time.Now().UTC().Add(15 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("create login request: %v", err)
+	}
+
+	server := startMobileBrowserServer(t, store, readModels)
+	sessionCookie, csrfToken, _ := registerMobileDevice(t, server, browserMobileToken)
+	path := "/mobile/review-queue/" + url.PathEscape("browser-login:"+intString(request.ID)) + "/decision"
+	response := postJSON(t, server.URL+path, sessionCookie.String(), csrfToken, `{"action":"complete","reason":"manual login completed in attended handoff"}`)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("mobile session browser complete status = %d body=%s, want %d", response.StatusCode, body, http.StatusOK)
+	}
+
+	updatedSession, err := store.GetBrowserSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if updatedSession.Status != sqlite.BrowserSessionStatusVerified {
+		t.Fatalf("session status = %q, want verified", updatedSession.Status)
+	}
+	updatedRequest, err := store.GetBrowserSessionLoginRequest(ctx, request.ID)
+	if err != nil {
+		t.Fatalf("get login request: %v", err)
+	}
+	if updatedRequest.Status != sqlite.BrowserSessionLoginRequestStatusCompleted {
+		t.Fatalf("login request status = %q, want completed", updatedRequest.Status)
+	}
 }
 
 func TestMobileBrowserEvidenceReadyDetailAndFailedRetryable(t *testing.T) {
