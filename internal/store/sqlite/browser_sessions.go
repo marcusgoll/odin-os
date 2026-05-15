@@ -1915,28 +1915,33 @@ func browserHandoffRunnerEventType(status BrowserHandoffRunnerStatus) (runtimeev
 
 func browserHandoffRunnerLifecyclePayload(runner BrowserHandoffRunner, previousStatus BrowserHandoffRunnerStatus, actor string, reason string) runtimeevents.BrowserHandoffRunnerLifecyclePayload {
 	return runtimeevents.BrowserHandoffRunnerLifecyclePayload{
-		ID:             runner.ID,
-		SessionID:      runner.SessionID,
-		LoginRequestID: runner.LoginRequestID,
-		HandoffID:      runner.HandoffID,
-		RunnerID:       stringPtrValue(runner.RunnerID),
-		ProcessID:      int64PtrValue(runner.ProcessID),
-		PreviousStatus: string(previousStatus),
-		Status:         string(runner.Status),
-		ViewerURL:      stringPtrValue(runner.ViewerURL),
-		BindAddr:       stringPtrValue(runner.BindAddr),
-		PrivateBaseURL: stringPtrValue(runner.PrivateBaseURL),
-		PublicBaseURL:  stringPtrValue(runner.PublicBaseURL),
-		ExpiresAt:      formatTime(runner.ExpiresAt),
-		StartedAt:      formatOptionalTime(runner.StartedAt),
-		ExitedAt:       formatOptionalTime(runner.ExitedAt),
-		CompletedAt:    formatOptionalTime(runner.CompletedAt),
-		CancelledAt:    formatOptionalTime(runner.CancelledAt),
-		ErrorCode:      stringPtrValue(runner.ErrorCode),
-		ErrorMessage:   stringPtrValue(runner.ErrorMessage),
-		Actor:          defaultString(actor, "operator"),
-		Reason:         strings.TrimSpace(reason),
+		ID:                  runner.ID,
+		SessionID:           runner.SessionID,
+		LoginRequestID:      runner.LoginRequestID,
+		HandoffID:           runner.HandoffID,
+		RunnerID:            stringPtrValue(runner.RunnerID),
+		ProcessID:           int64PtrValue(runner.ProcessID),
+		PreviousStatus:      string(previousStatus),
+		Status:              string(runner.Status),
+		ViewerURL:           stringPtrValue(runner.ViewerURL),
+		BindAddr:            stringPtrValue(runner.BindAddr),
+		PrivateBaseURL:      stringPtrValue(runner.PrivateBaseURL),
+		PublicBaseURL:       stringPtrValue(runner.PublicBaseURL),
+		RealBrowserEvidence: browserHandoffRunnerRealBrowserEvidence(runner),
+		ExpiresAt:           formatTime(runner.ExpiresAt),
+		StartedAt:           formatOptionalTime(runner.StartedAt),
+		ExitedAt:            formatOptionalTime(runner.ExitedAt),
+		CompletedAt:         formatOptionalTime(runner.CompletedAt),
+		CancelledAt:         formatOptionalTime(runner.CancelledAt),
+		ErrorCode:           stringPtrValue(runner.ErrorCode),
+		ErrorMessage:        stringPtrValue(runner.ErrorMessage),
+		Actor:               defaultString(actor, "operator"),
+		Reason:              strings.TrimSpace(reason),
 	}
+}
+
+func browserHandoffRunnerRealBrowserEvidence(runner BrowserHandoffRunner) bool {
+	return strings.HasPrefix(stringPtrValue(runner.RunnerID), "novnc-real-")
 }
 
 func browserEncryptedProfileArtifactPayload(artifact BrowserEncryptedProfileArtifact, previousStatus BrowserEncryptedProfileArtifactStatus, actor string, reason string) map[string]any {
