@@ -156,7 +156,7 @@ type healthLoopDeps struct {
 	Store              *sqlite.Store
 	RuntimeState       runtimestate.Service
 	Health             healthsvc.Service
-	Notifications      runtimenotifications.Service
+	Notifications      notificationRouter
 	Executors          map[string]contract.Executor
 	ExecutorConfig     executorrouter.Config
 	RegistryHealthy    bool
@@ -164,6 +164,10 @@ type healthLoopDeps struct {
 	ShutdownRequested  *atomic.Bool
 	BootID             string
 	RuntimeRoot        string
+}
+
+type notificationRouter interface {
+	RoutePendingEvents(context.Context) (runtimenotifications.RoutePendingResult, error)
 }
 
 type serveDashboardAdmin struct {
@@ -6568,9 +6572,6 @@ func runHealthCycle(ctx context.Context, deps healthLoopDeps, logger *logs.Logge
 		markRuntimeDegraded(ctx, deps, logger, "runtime heartbeat failed", err)
 		return
 	}
-	if _, err := deps.Notifications.RoutePendingEvents(ctx); err != nil {
-		logBackgroundError(logger, "notifications", err)
-	}
 
 	report, safeToDispatch, err := deps.Health.DispatchReport(ctx, deps.RegistryHealthy)
 	if err != nil {
@@ -6611,12 +6612,23 @@ func runHealthCycle(ctx context.Context, deps healthLoopDeps, logger *logs.Logge
 		}
 		setImmediateNotReady(deps.Health, false)
 		clearNotReadyFlag(logger, deps.RuntimeRoot)
+		routePendingNotifications(ctx, deps, logger)
 		return
 	}
 
 	setImmediateNotReady(deps.Health, true)
 	writeNotReadyFlag(logger, deps.RuntimeRoot, fmt.Sprintf("dispatch paused: %s", report.Status))
 	markRuntimeDegraded(ctx, deps, logger, fmt.Sprintf("dispatch paused: %s", report.Status), nil)
+	routePendingNotifications(ctx, deps, logger)
+}
+
+func routePendingNotifications(ctx context.Context, deps healthLoopDeps, logger *logs.Logger) {
+	if deps.Notifications == nil {
+		return
+	}
+	if _, err := deps.Notifications.RoutePendingEvents(ctx); err != nil {
+		logBackgroundError(logger, "notifications", err)
+	}
 }
 
 func markRuntimeDegraded(ctx context.Context, deps healthLoopDeps, logger *logs.Logger, reason string, cause error) {

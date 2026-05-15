@@ -30,6 +30,7 @@ import (
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
+	runtimenotifications "odin-os/internal/runtime/notifications"
 	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
@@ -1529,6 +1530,52 @@ func TestRunHealthCycleDoesNotPromoteDrainingRuntimeToReady(t *testing.T) {
 	}
 }
 
+func TestRunHealthCycleMarksReadyBeforeSlowNotificationRouting(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	ctx := bootstrap.WithBootID(context.Background(), "boot-test")
+	app, err := bootstrap.Load(ctx, root, root)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	healthCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var immediateNotReady atomic.Bool
+	immediateNotReady.Store(true)
+	runHealthCycle(healthCtx, healthLoopDeps{
+		Store:        app.Store,
+		RuntimeState: app.RuntimeState,
+		Health: healthsvc.Service{
+			DB:                app.Store.DB(),
+			Config:            healthsvc.DefaultConfig(),
+			ExecutorKeys:      enabledExecutorKeys(app.ExecutorConfig),
+			ImmediateNotReady: &immediateNotReady,
+		},
+		Notifications:      blockingNotificationRouter{},
+		Executors:          app.Executors,
+		ExecutorConfig:     app.ExecutorConfig,
+		RegistryHealthy:    len(app.RegistryDiagnostics) == 0,
+		ProjectionSurfaces: bootstrap.ServiceOwnedProjectionSurfaces(),
+		BootID:             "boot-test",
+		RuntimeRoot:        root,
+	}, nil)
+
+	state, err := app.Store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if state.Status != "ready" {
+		t.Fatalf("RuntimeState.Status = %q, want ready before notification routing timeout", state.Status)
+	}
+	if immediateNotReady.Load() {
+		t.Fatal("ImmediateNotReady = true, want false before notification routing timeout")
+	}
+}
+
 func TestRunHealthCycleKeepsRuntimeNotReadyWhenShutdownRequested(t *testing.T) {
 	t.Parallel()
 
@@ -2897,4 +2944,11 @@ func assertNoLifecycleStatus(t *testing.T, statuses []string, forbidden string) 
 			t.Fatalf("lifecycle statuses = %v, want no %q", statuses, forbidden)
 		}
 	}
+}
+
+type blockingNotificationRouter struct{}
+
+func (blockingNotificationRouter) RoutePendingEvents(ctx context.Context) (runtimenotifications.RoutePendingResult, error) {
+	<-ctx.Done()
+	return runtimenotifications.RoutePendingResult{}, ctx.Err()
 }
