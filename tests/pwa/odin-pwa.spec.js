@@ -21,6 +21,7 @@ test('Odin PWA shell is installable and renders live operator sections', async (
   expect(serviceWorker.ok()).toBeTruthy();
   await expect(page.getByText('No action-required rows', { exact: true })).toBeVisible();
 
+  await page.getByRole('button', { name: 'Capture a note' }).click();
   await expect(page.getByRole('button', { name: 'Capture raw intake' })).toBeEnabled();
   await expect(page.locator('[data-capture-kind="note"]')).toBeChecked();
   await expect(page.getByRole('heading', { name: 'Failed Uploads' })).toBeVisible();
@@ -58,9 +59,10 @@ test('Odin PWA approval cards submit authenticated decisions', async ({ page }) 
 
   await page.goto('/app/');
 
-  await expect(page.getByRole('heading', { name: 'deploy-prod' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Approve approval 99' })).toBeVisible();
-  await page.getByRole('button', { name: 'Approve approval 99' }).click();
+  const approvals = page.getByRole('region', { name: 'Approvals' });
+  await expect(approvals.getByRole('heading', { name: 'deploy-prod' })).toBeVisible();
+  await expect(approvals.getByRole('button', { name: 'Approve approval 99' })).toBeVisible();
+  await approvals.getByRole('button', { name: 'Approve approval 99' }).click();
   await page.getByPlaceholder('Required audit reason').fill('safe deployment window');
   await page.getByRole('button', { name: 'Confirm approval decision' }).click();
 
