@@ -14,9 +14,12 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"odin-os/internal/core/projects"
+	"odin-os/internal/core/workspace"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/prompts"
+	"odin-os/internal/review"
+	"odin-os/internal/runtime/approvals"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tracker"
@@ -515,11 +518,77 @@ func (runner *runner) runGitHubIssueDeliveryDryRun(ctx context.Context, registry
 	runner.report.Delivery.ReviewArtifact = reviewArtifact
 	runner.passStage("execute_deterministic_stub", fmt.Sprintf("tests_recorded=%t review_artifact=%t", testsRecorded, reviewArtifact))
 
+	sessionManager := newFixtureWorkspaceSessionManager()
+	workspaceService := runner.workspaceServiceForFixture(registry, sessionManager, project.Key)
+
+	startWorkspace := runner.step("start_workspace_session")
+	workspaceStatus, err := workspaceService.Start(ctx, project.Key)
+	if err != nil {
+		return runner.failStage(startWorkspace.Name, err)
+	}
+	if startWorkspace.Expect.SessionState != "" && string(workspaceStatus.State) != startWorkspace.Expect.SessionState {
+		return runner.failStage(startWorkspace.Name, fmt.Errorf("session state = %q, want %q", workspaceStatus.State, startWorkspace.Expect.SessionState))
+	}
+	runner.passStage(startWorkspace.Name, fmt.Sprintf("session=%s state=%s attached=%d", workspaceStatus.SessionName, workspaceStatus.State, workspaceStatus.AttachedCount))
+
+	attachWorkspace := runner.step("attach_workspace_session")
+	workspaceStatus, err = workspaceService.Attach(ctx, project.Key)
+	if err != nil {
+		return runner.failStage(attachWorkspace.Name, err)
+	}
+	if attachWorkspace.Expect.SessionAttachedCount != 0 && workspaceStatus.AttachedCount != attachWorkspace.Expect.SessionAttachedCount {
+		return runner.failStage(attachWorkspace.Name, fmt.Errorf("attached_count = %d, want %d", workspaceStatus.AttachedCount, attachWorkspace.Expect.SessionAttachedCount))
+	}
+	runner.passStage(attachWorkspace.Name, fmt.Sprintf("session=%s state=%s attached=%d", workspaceStatus.SessionName, workspaceStatus.State, workspaceStatus.AttachedCount))
+
+	stopWorkspace := runner.step("stop_workspace_session")
+	workspaceStatus, err = workspaceService.Stop(ctx, project.Key, true)
+	if err != nil {
+		return runner.failStage(stopWorkspace.Name, err)
+	}
+	if stopWorkspace.Expect.SessionState != "" && string(workspaceStatus.State) != stopWorkspace.Expect.SessionState {
+		return runner.failStage(stopWorkspace.Name, fmt.Errorf("session state = %q, want %q", workspaceStatus.State, stopWorkspace.Expect.SessionState))
+	}
+	runner.report.Workspace = mapFixtureWorkspaceStatus(workspaceStatus)
+	runner.passStage(stopWorkspace.Name, fmt.Sprintf("session=%s state=%s attached=%d", workspaceStatus.SessionName, workspaceStatus.State, workspaceStatus.AttachedCount))
+
+	handoffStep := runner.step("handoff_to_specialist_subagents")
+	handoff, err := runner.reviewHandoff(ctx, project.ID, project.GitRoot, lease.BranchName, eligible[0], handoffStep.Expect.ChangedFiles)
+	if err != nil {
+		return runner.failStage(handoffStep.Name, err)
+	}
+	if handoffStep.Expect.ExpectedReviewRoles != nil && !stringSliceEqual(handoffStep.Expect.ExpectedReviewRoles, handoff.Roles) {
+		return runner.failStage(handoffStep.Name, fmt.Errorf("review roles = %v, want %v", handoff.Roles, handoffStep.Expect.ExpectedReviewRoles))
+	}
+	if handoffStep.Expect.ExpectedHandoffReviewState != "" && handoff.HandoffState != handoffStep.Expect.ExpectedHandoffReviewState {
+		return runner.failStage(handoffStep.Name, fmt.Errorf("handoff review_state = %q, want %q", handoff.HandoffState, handoffStep.Expect.ExpectedHandoffReviewState))
+	}
+	if len(handoff.Results) != len(handoff.Roles) {
+		return runner.failStage(handoffStep.Name, fmt.Errorf("handoff review_results = %d, want %d", len(handoff.Results), len(handoff.Roles)))
+	}
+	runner.passStage(handoffStep.Name, fmt.Sprintf("handoff=%d roles=%v", handoff.ID, handoff.Roles))
+
+	runner.report.Delivery.HandoffID = handoff.ID
+	runner.report.Delivery.HandoffReviewState = handoff.HandoffState
+	runner.report.Delivery.HandoffReviewRoles = handoff.Roles
+	runner.report.Delivery.HandoffReviewResults = handoff.Results
+
 	runID := executed.Run.ID
-	approval, err := runner.store.RequestApproval(ctx, sqlite.RequestApprovalParams{
-		TaskID:      executed.Task.ID,
+	approvalGate, err := runner.store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         task.Key + "-pr-approval",
+		Title:       "Approve and merge PR for " + task.Title,
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "pr_review_handoff",
+		WorkKind:    "pull_request_approval",
+	})
+	if err != nil {
+		return runner.failStage("require_pr_approval", err)
+	}
+	approvalTask, approval, err := runner.store.BlockTaskAndRequestApproval(ctx, sqlite.BlockTaskAndRequestApprovalParams{
+		TaskID:      approvalGate.ID,
 		RunID:       &runID,
-		Status:      "pending",
 		RequestedBy: "pr_creation_dry_run",
 	})
 	if err != nil {
@@ -528,14 +597,167 @@ func (runner *runner) runGitHubIssueDeliveryDryRun(ctx context.Context, registry
 	if approval.Status != "pending" {
 		return runner.failStage("require_pr_approval", fmt.Errorf("approval status = %q, want pending", approval.Status))
 	}
+	if approvalTask.Status != "blocked" {
+		return runner.failStage("require_pr_approval", fmt.Errorf("task status = %q, want blocked", approvalTask.Status))
+	}
+	runner.report.Delivery.ApprovalTaskStatusBeforeResolution = approvalTask.Status
+	runner.report.Delivery.ApprovalTaskBlockedReason = approvalTask.BlockedReason
 	if runner.fixture.mutationCalls != runner.step("require_pr_approval").Expect.GitHubWrites {
 		runner.report.GitHub.Mutated = true
 		return runner.failStage("require_pr_approval", fmt.Errorf("github writes = %d, want %d", runner.fixture.mutationCalls, runner.step("require_pr_approval").Expect.GitHubWrites))
 	}
 	runner.report.Delivery.PRReadyBranch = lease.BranchName
 	runner.report.Delivery.PRApprovalRequired = true
+	runner.report.Delivery.ApprovalID = approval.ID
 	runner.passStage("require_pr_approval", fmt.Sprintf("approval=%d status=pending github_writes=%d", approval.ID, runner.fixture.mutationCalls))
+
+	resolveStep := runner.step("resolve_pr_approval")
+	approvalService := approvals.Service{Store: runner.store}
+	resolution, err := approvalService.Resolve(ctx, approvals.ResolveParams{
+		ApprovalID: approval.ID,
+		Action:     "approve",
+		DecisionBy: "fixture-e2e-reviewer",
+		Reason:     "specialist read-through completed in dry-run fixture",
+	})
+	if err != nil {
+		return runner.failStage(resolveStep.Name, err)
+	}
+	runner.report.Delivery.ApprovalResolverSupport = string(resolution.ResolverSupport)
+	runner.report.Delivery.ApprovalStatus = resolution.Approval.Status
+	taskAfterResolution, err := runner.store.GetTask(ctx, approvalGate.ID)
+	if err != nil {
+		return runner.failStage(resolveStep.Name, err)
+	}
+	runner.report.Delivery.ApprovalTaskStatusAfterResolution = taskAfterResolution.Status
+	if resolveStep.Expect.ApprovalStatus != "" && resolution.Approval.Status != resolveStep.Expect.ApprovalStatus {
+		return runner.failStage(resolveStep.Name, fmt.Errorf("approval status = %q, want %q", resolution.Approval.Status, resolveStep.Expect.ApprovalStatus))
+	}
+	if resolveStep.Expect.TaskStatus != "" && taskAfterResolution.Status != resolveStep.Expect.TaskStatus {
+		return runner.failStage(resolveStep.Name, fmt.Errorf("task status = %q, want %q", taskAfterResolution.Status, resolveStep.Expect.TaskStatus))
+	}
+	runner.passStage(resolveStep.Name, fmt.Sprintf("approval=%d status=%s task=%s resolver=%s", resolution.Approval.ID, resolution.Approval.Status, taskAfterResolution.Status, string(resolution.ResolverSupport)))
+
+	mergeStep := runner.step("merge_verified_dry_run")
+	mergedTask, err := runner.store.UpdateTaskStatus(ctx, sqlite.UpdateTaskStatusParams{
+		TaskID:                 approvalGate.ID,
+		Status:                 "completed",
+		Summary:                "fixture PR merge verified without live GitHub mutation",
+		TerminalReason:         "merged_dry_run",
+		AllowedCurrentStatuses: []string{"queued"},
+	})
+	if err != nil {
+		return runner.failStage(mergeStep.Name, err)
+	}
+	runner.report.Delivery.MergeVerified = mergedTask.Status == "completed"
+	runner.report.Delivery.MergeTaskStatus = mergedTask.Status
+	if mergeStep.Expect.TaskStatus != "" && mergedTask.Status != mergeStep.Expect.TaskStatus {
+		return runner.failStage(mergeStep.Name, fmt.Errorf("task status = %q, want %q", mergedTask.Status, mergeStep.Expect.TaskStatus))
+	}
+	runner.passStage(mergeStep.Name, fmt.Sprintf("task=%s status=%s github_writes=%d", approvalGate.Key, mergedTask.Status, runner.fixture.mutationCalls))
 	return nil
+}
+
+type deliveryHandoffResult struct {
+	ID           int64
+	HandoffState string
+	Roles        []string
+	Results      []string
+}
+
+func (runner *runner) reviewHandoff(ctx context.Context, projectID int64, repoRoot string, branch string, issue tracker.Issue, changedFiles []string) (deliveryHandoffResult, error) {
+	if len(changedFiles) == 0 {
+		changedFiles = []string{"internal/review/selection.go", "internal/e2e/run.go"}
+	}
+	handoffService := review.HandoffOrchestrator{
+		Store: runner.store,
+		PullRequests: &fixturePullRequestManager{
+			pullRequest: review.PullRequest{
+				Provider: "github",
+				Repo:     runner.scenario.Project.GitHubRepo,
+				Number:   9901,
+				URL:      issueReviewURL(issue.URL, repoRoot, issue.Number),
+				State:    "open",
+			},
+		},
+	}
+	result, err := handoffService.Upsert(ctx, review.PullRequestHandoffRequest{
+		ProjectID:              projectID,
+		IssueURL:               issue.URL,
+		Title:                  issue.Title,
+		Branch:                 branch,
+		Summary:                fmt.Sprintf("Dry-run PR handoff from fixture issue %d", issue.Number),
+		Tests:                  []string{"odin e2e --scenario fixtures/e2e/github-issue-delivery-dry-run.yaml --json"},
+		Risks:                  []string{"fixture mode uses no live writers"},
+		Blockers:               []string{"approval required before merge"},
+		CommandsRun:            []string{"odin e2e --scenario fixtures/e2e/github-issue-delivery-dry-run.yaml --json"},
+		ChangedFiles:           changedFiles,
+		RuntimeBehaviorChanged: len(changedFiles) > 0,
+		RealOdinProofIncluded:  true,
+		PostComment:            true,
+	})
+	if err != nil {
+		return deliveryHandoffResult{}, err
+	}
+
+	roles := append([]string(nil), result.Handoff.SelectedRoles...)
+	results := make([]string, 0, len(result.ReviewResults))
+	for _, reviewResult := range result.ReviewResults {
+		results = append(results, reviewResult.Outcome)
+	}
+	return deliveryHandoffResult{
+		ID:           result.Handoff.ID,
+		HandoffState: result.Handoff.ReviewState,
+		Roles:        roles,
+		Results:      results,
+	}, nil
+}
+
+func (runner *runner) workspaceServiceForFixture(registry projects.Registry, sessionManager *fixtureWorkspaceSessionManager, projectKey string) workspace.Service {
+	project, ok := registry.Lookup(projectKey)
+	repoRoot := ""
+	if ok {
+		repoRoot = project.GitRoot
+	}
+	return workspace.Service{
+		Store:     runner.store,
+		Registry:  registry,
+		Sessions:  sessionManager,
+		Inspector: &fixtureWorkspaceInspector{repoRoot: repoRoot, branch: "main", head: "0000000000000000"},
+		CodexBin:  "odin",
+	}
+}
+
+func mapFixtureWorkspaceStatus(status workspace.Status) workspaceReport {
+	return workspaceReport{
+		Branch:              status.Branch,
+		WorktreePath:        status.CurrentCwd,
+		InsideWorkspaceRoot: isInside(status.GitRoot, status.CurrentCwd),
+		SessionName:         status.SessionName,
+		WorkspaceState:      string(status.State),
+		WorkspaceDirty:      status.Dirty,
+		WorkspaceHead:       status.Head,
+		WorkspaceAttached:   status.AttachedCount,
+	}
+}
+
+func issueReviewURL(issueURL string, repoRoot string, number int) string {
+	url := strings.TrimSpace(issueURL)
+	if url != "" {
+		return url
+	}
+	return fmt.Sprintf("fixture://%s/%d", repoRoot, number)
+}
+
+func stringSliceEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (runner *runner) runTrackerDryRunLifecycle(ctx context.Context) error {
@@ -1007,22 +1229,29 @@ func (step *scenarioStep) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type stepExpect struct {
-	EligibleCount       int      `yaml:"eligible_count"`
-	Created             int      `yaml:"created"`
-	Linked              int      `yaml:"linked"`
-	RequiredLabel       string   `yaml:"required_label"`
-	ExcludedLabels      []string `yaml:"excluded_labels"`
-	IDempotent          bool     `yaml:"idempotent"`
-	Writes              int      `yaml:"writes"`
-	GitHubWrites        int      `yaml:"github_writes"`
-	BranchPrefix        string   `yaml:"branch_prefix"`
-	InsideWorkspaceRoot bool     `yaml:"inside_workspace_root"`
-	Rejected            bool     `yaml:"rejected"`
-	Category            string   `yaml:"category"`
-	CreatesFollowUp     bool     `yaml:"creates_follow_up"`
-	TestsRecorded       bool     `yaml:"tests_recorded"`
-	ReviewArtifact      bool     `yaml:"review_artifact"`
-	ApprovalRequired    bool     `yaml:"approval_required"`
+	EligibleCount              int      `yaml:"eligible_count"`
+	Created                    int      `yaml:"created"`
+	Linked                     int      `yaml:"linked"`
+	RequiredLabel              string   `yaml:"required_label"`
+	ExcludedLabels             []string `yaml:"excluded_labels"`
+	IDempotent                 bool     `yaml:"idempotent"`
+	Writes                     int      `yaml:"writes"`
+	GitHubWrites               int      `yaml:"github_writes"`
+	BranchPrefix               string   `yaml:"branch_prefix"`
+	InsideWorkspaceRoot        bool     `yaml:"inside_workspace_root"`
+	Rejected                   bool     `yaml:"rejected"`
+	Category                   string   `yaml:"category"`
+	CreatesFollowUp            bool     `yaml:"creates_follow_up"`
+	TestsRecorded              bool     `yaml:"tests_recorded"`
+	ReviewArtifact             bool     `yaml:"review_artifact"`
+	ApprovalRequired           bool     `yaml:"approval_required"`
+	ChangedFiles               []string `yaml:"changed_files"`
+	ExpectedReviewRoles        []string `yaml:"expected_review_roles"`
+	ExpectedHandoffReviewState string   `yaml:"handoff_review_state"`
+	SessionState               string   `yaml:"session_state"`
+	SessionAttachedCount       int      `yaml:"session_attached_count"`
+	ApprovalStatus             string   `yaml:"approval_status"`
+	TaskStatus                 string   `yaml:"task_status"`
 }
 
 type scenarioIssue struct {
@@ -1087,15 +1316,32 @@ type workspaceReport struct {
 	Branch              string `json:"branch,omitempty"`
 	WorktreePath        string `json:"worktree_path,omitempty"`
 	InsideWorkspaceRoot bool   `json:"inside_workspace_root,omitempty"`
+	SessionName         string `json:"session_name,omitempty"`
+	WorkspaceState      string `json:"workspace_state,omitempty"`
+	WorkspaceDirty      bool   `json:"workspace_dirty,omitempty"`
+	WorkspaceHead       string `json:"workspace_head,omitempty"`
+	WorkspaceAttached   int    `json:"workspace_attached,omitempty"`
 }
 
 type deliveryReport struct {
-	WorkItemKey        string `json:"work_item_key,omitempty"`
-	RunID              int64  `json:"run_id,omitempty"`
-	PRReadyBranch      string `json:"pr_ready_branch,omitempty"`
-	PRApprovalRequired bool   `json:"pr_approval_required,omitempty"`
-	TestsRecorded      bool   `json:"tests_recorded,omitempty"`
-	ReviewArtifact     bool   `json:"review_artifact,omitempty"`
+	WorkItemKey                        string   `json:"work_item_key,omitempty"`
+	RunID                              int64    `json:"run_id,omitempty"`
+	PRReadyBranch                      string   `json:"pr_ready_branch,omitempty"`
+	PRApprovalRequired                 bool     `json:"pr_approval_required,omitempty"`
+	TestsRecorded                      bool     `json:"tests_recorded,omitempty"`
+	ReviewArtifact                     bool     `json:"review_artifact,omitempty"`
+	HandoffID                          int64    `json:"handoff_id,omitempty"`
+	HandoffReviewState                 string   `json:"handoff_review_state,omitempty"`
+	HandoffReviewRoles                 []string `json:"handoff_review_roles,omitempty"`
+	HandoffReviewResults               []string `json:"handoff_review_results,omitempty"`
+	ApprovalID                         int64    `json:"approval_id,omitempty"`
+	ApprovalStatus                     string   `json:"approval_status,omitempty"`
+	ApprovalResolverSupport            string   `json:"approval_resolver_support,omitempty"`
+	ApprovalTaskStatusBeforeResolution string   `json:"approval_task_status_before_resolution,omitempty"`
+	ApprovalTaskStatusAfterResolution  string   `json:"approval_task_status_after_resolution,omitempty"`
+	ApprovalTaskBlockedReason          string   `json:"approval_task_blocked_reason,omitempty"`
+	MergeVerified                      bool     `json:"merge_verified,omitempty"`
+	MergeTaskStatus                    string   `json:"merge_task_status,omitempty"`
 }
 
 type promptReport struct {
@@ -1159,6 +1405,121 @@ func (fixture *fixtureTracker) AddComment(context.Context, tracker.IssueID, stri
 func (fixture *fixtureTracker) CreateFollowUpIssue(context.Context, tracker.FollowUpIssue) (tracker.Issue, error) {
 	fixture.mutationCalls++
 	return tracker.Issue{}, errors.New("fixture tracker does not allow mutation in local e2e")
+}
+
+type fixtureWorkspaceSessionManager struct {
+	sessions map[string]*fixtureWorkspaceSession
+}
+
+type fixtureWorkspaceSession struct {
+	sessionName string
+	cwd         string
+	command     []string
+	env         map[string]string
+	attached    int
+	currentPath string
+}
+
+func newFixtureWorkspaceSessionManager() *fixtureWorkspaceSessionManager {
+	return &fixtureWorkspaceSessionManager{
+		sessions: make(map[string]*fixtureWorkspaceSession),
+	}
+}
+
+func (manager *fixtureWorkspaceSessionManager) HasSession(_ context.Context, sessionName string) (bool, error) {
+	_, ok := manager.sessions[sessionName]
+	return ok, nil
+}
+
+func (manager *fixtureWorkspaceSessionManager) NewSession(_ context.Context, request workspace.StartRequest) error {
+	manager.sessions[request.SessionName] = &fixtureWorkspaceSession{
+		sessionName: request.SessionName,
+		cwd:         request.Cwd,
+		command:     append([]string(nil), request.Command...),
+		env:         make(map[string]string),
+		currentPath: request.Cwd,
+	}
+	return nil
+}
+
+func (manager *fixtureWorkspaceSessionManager) SetEnvironment(_ context.Context, sessionName string, key string, value string) error {
+	session, ok := manager.sessions[sessionName]
+	if !ok {
+		return os.ErrNotExist
+	}
+	session.env[key] = value
+	return nil
+}
+
+func (manager *fixtureWorkspaceSessionManager) ShowEnvironment(_ context.Context, sessionName string, key string) (string, error) {
+	session, ok := manager.sessions[sessionName]
+	if !ok {
+		return "", os.ErrNotExist
+	}
+	return session.env[key], nil
+}
+
+func (manager *fixtureWorkspaceSessionManager) CurrentPath(_ context.Context, sessionName string) (string, error) {
+	session, ok := manager.sessions[sessionName]
+	if !ok {
+		return "", os.ErrNotExist
+	}
+	return session.currentPath, nil
+}
+
+func (manager *fixtureWorkspaceSessionManager) AttachedCount(_ context.Context, sessionName string) (int, error) {
+	session, ok := manager.sessions[sessionName]
+	if !ok {
+		return 0, os.ErrNotExist
+	}
+	return session.attached, nil
+}
+
+func (manager *fixtureWorkspaceSessionManager) KillSession(_ context.Context, sessionName string) error {
+	delete(manager.sessions, sessionName)
+	return nil
+}
+
+func (manager *fixtureWorkspaceSessionManager) AttachSession(_ context.Context, sessionName string) error {
+	session, ok := manager.sessions[sessionName]
+	if !ok {
+		return os.ErrNotExist
+	}
+	session.attached++
+	return nil
+}
+
+type fixtureWorkspaceInspector struct {
+	repoRoot string
+	branch   string
+	head     string
+	dirty    bool
+}
+
+func (inspector *fixtureWorkspaceInspector) ResolveGitRoot(context.Context, string) (string, error) {
+	return inspector.repoRoot, nil
+}
+
+func (inspector *fixtureWorkspaceInspector) Inspect(context.Context, string) (workspace.RepoStatus, error) {
+	return workspace.RepoStatus{
+		RepoRoot: inspector.repoRoot,
+		Branch:   inspector.branch,
+		Head:     inspector.head,
+		Dirty:    inspector.dirty,
+	}, nil
+}
+
+type fixturePullRequestManager struct {
+	pullRequest review.PullRequest
+}
+
+func (manager *fixturePullRequestManager) Upsert(context.Context, review.PullRequestRequest) (review.PullRequest, error) {
+	return manager.pullRequest, nil
+}
+
+func (manager *fixturePullRequestManager) AddComment(_ context.Context, request review.PullRequestComment) error {
+	manager.pullRequest.Number = request.PullRequest.Number
+	return nil
 }
 
 type countingDoer struct {

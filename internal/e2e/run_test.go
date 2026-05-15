@@ -51,6 +51,25 @@ func TestFixtureSetRunsLocallyWithoutLiveSystems(t *testing.T) {
 					Mode    string `json:"mode"`
 					Invoked bool   `json:"invoked"`
 				} `json:"codex"`
+				Workspace struct {
+					SessionName       string `json:"session_name"`
+					WorkspaceState    string `json:"workspace_state"`
+					WorkspaceAttached int    `json:"workspace_attached"`
+				} `json:"workspace"`
+				Delivery struct {
+					HandoffID                          int64    `json:"handoff_id"`
+					HandoffReviewState                 string   `json:"handoff_review_state"`
+					HandoffReviewRoles                 []string `json:"handoff_review_roles"`
+					HandoffReviewResults               []string `json:"handoff_review_results"`
+					ApprovalID                         int64    `json:"approval_id"`
+					ApprovalStatus                     string   `json:"approval_status"`
+					ApprovalResolverSupport            string   `json:"approval_resolver_support"`
+					ApprovalTaskStatusBeforeResolution string   `json:"approval_task_status_before_resolution"`
+					ApprovalTaskStatusAfterResolution  string   `json:"approval_task_status_after_resolution"`
+					ApprovalTaskBlockedReason          string   `json:"approval_task_blocked_reason"`
+					MergeVerified                      bool     `json:"merge_verified"`
+					MergeTaskStatus                    string   `json:"merge_task_status"`
+				} `json:"delivery"`
 			}
 			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 				t.Fatalf("json.Unmarshal(%s) error = %v\noutput:\n%s", fixture, err, stdout.String())
@@ -72,6 +91,65 @@ func TestFixtureSetRunsLocallyWithoutLiveSystems(t *testing.T) {
 					t.Fatalf("stage = %+v, want named passed stage", stage)
 				}
 			}
+			if fixture == "github-issue-delivery-dry-run.yaml" {
+				assertDeliveryDryRunLoop(t, report.Workspace, report.Delivery)
+			}
 		})
 	}
+}
+
+func assertDeliveryDryRunLoop(t *testing.T, workspace struct {
+	SessionName       string `json:"session_name"`
+	WorkspaceState    string `json:"workspace_state"`
+	WorkspaceAttached int    `json:"workspace_attached"`
+}, delivery struct {
+	HandoffID                          int64    `json:"handoff_id"`
+	HandoffReviewState                 string   `json:"handoff_review_state"`
+	HandoffReviewRoles                 []string `json:"handoff_review_roles"`
+	HandoffReviewResults               []string `json:"handoff_review_results"`
+	ApprovalID                         int64    `json:"approval_id"`
+	ApprovalStatus                     string   `json:"approval_status"`
+	ApprovalResolverSupport            string   `json:"approval_resolver_support"`
+	ApprovalTaskStatusBeforeResolution string   `json:"approval_task_status_before_resolution"`
+	ApprovalTaskStatusAfterResolution  string   `json:"approval_task_status_after_resolution"`
+	ApprovalTaskBlockedReason          string   `json:"approval_task_blocked_reason"`
+	MergeVerified                      bool     `json:"merge_verified"`
+	MergeTaskStatus                    string   `json:"merge_task_status"`
+}) {
+	t.Helper()
+
+	if workspace.SessionName == "" || workspace.WorkspaceState != "stopped" || workspace.WorkspaceAttached != 0 {
+		t.Fatalf("workspace evidence = %+v, want stopped fixture session evidence", workspace)
+	}
+	if delivery.HandoffID <= 0 || delivery.HandoffReviewState != "review_selected" {
+		t.Fatalf("handoff evidence = %+v, want persisted selected handoff", delivery)
+	}
+	wantRoles := []string{"reviewer", "qa", "security"}
+	if !equalStrings(delivery.HandoffReviewRoles, wantRoles) {
+		t.Fatalf("handoff roles = %#v, want %#v", delivery.HandoffReviewRoles, wantRoles)
+	}
+	if len(delivery.HandoffReviewResults) != len(wantRoles) {
+		t.Fatalf("handoff review results = %#v, want one per role", delivery.HandoffReviewResults)
+	}
+	if delivery.ApprovalID <= 0 || delivery.ApprovalStatus != "approved" || delivery.ApprovalResolverSupport != "supported" {
+		t.Fatalf("approval evidence = %+v, want supported approved resolver", delivery)
+	}
+	if delivery.ApprovalTaskStatusBeforeResolution != "blocked" || delivery.ApprovalTaskBlockedReason != "approval_required" || delivery.ApprovalTaskStatusAfterResolution != "queued" {
+		t.Fatalf("approval task states = %+v, want blocked approval_required then queued", delivery)
+	}
+	if !delivery.MergeVerified || delivery.MergeTaskStatus != "completed" {
+		t.Fatalf("merge evidence = %+v, want completed dry-run merge verification", delivery)
+	}
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
