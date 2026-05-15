@@ -516,9 +516,13 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		_, err = fmt.Fprintf(stdout, "browser_session_profile=%d path=%s exists=%t created=%t\n", view.SessionID, view.ProfilePath, view.ProfilePathExists, view.Created)
 		return err
 	case "login-request":
+		handoffBaseURL := strings.TrimSpace(command.HandoffBaseURL)
+		if handoffBaseURL == "" {
+			handoffBaseURL = strings.TrimSpace(os.Getenv("ODIN_BROWSER_HANDOFF_BASE_URL"))
+		}
 		request, err := app.Store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
 			SessionID:      command.ID,
-			HandoffBaseURL: command.HandoffBaseURL,
+			HandoffBaseURL: handoffBaseURL,
 			ExpiresAt:      time.Now().UTC().Add(10 * time.Minute),
 		})
 		if err != nil {
