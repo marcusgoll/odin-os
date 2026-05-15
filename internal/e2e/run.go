@@ -15,11 +15,13 @@ import (
 
 	"odin-os/internal/core/projects"
 	"odin-os/internal/core/workspace"
+	"odin-os/internal/core/workspaces"
 	"odin-os/internal/executors/contract"
 	executorrouter "odin-os/internal/executors/router"
 	"odin-os/internal/prompts"
 	"odin-os/internal/review"
 	"odin-os/internal/runtime/approvals"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tracker"
@@ -142,6 +144,8 @@ func (runner *runner) run(ctx context.Context) error {
 		err = runner.runGitHubReadOnlyIntake(ctx, registry)
 	case "github-issue-delivery-dry-run":
 		err = runner.runGitHubIssueDeliveryDryRun(ctx, registry)
+	case "raw-intake-delivery-dry-run":
+		err = runner.runRawIntakeDeliveryDryRun(ctx, registry)
 	case "tracker-dry-run-lifecycle":
 		err = runner.runTrackerDryRunLifecycle(ctx)
 	case "workspace-safe-creation":
@@ -437,6 +441,10 @@ func (runner *runner) runGitHubIssueDeliveryDryRun(ctx context.Context, registry
 	runner.report.Delivery.WorkItemKey = task.Key
 	runner.passStage("review_issue_into_work_item", fmt.Sprintf("created=%d linked=%d work_item=%s", reconcileSummary.Created, reconcileSummary.Linked, task.Key))
 
+	return runner.runDeliveryDryRunLoop(ctx, registry, project, task, eligible[0])
+}
+
+func (runner *runner) runDeliveryDryRunLoop(ctx context.Context, registry projects.Registry, project sqlite.Project, task sqlite.Task, reviewIssue tracker.Issue) error {
 	git := &fixtureGit{}
 	worktreeRoot := filepath.Join(runner.odinRoot, "worktrees")
 	jobService := jobs.Service{
@@ -553,7 +561,7 @@ func (runner *runner) runGitHubIssueDeliveryDryRun(ctx context.Context, registry
 	runner.passStage(stopWorkspace.Name, fmt.Sprintf("session=%s state=%s attached=%d", workspaceStatus.SessionName, workspaceStatus.State, workspaceStatus.AttachedCount))
 
 	handoffStep := runner.step("handoff_to_specialist_subagents")
-	handoff, err := runner.reviewHandoff(ctx, project.ID, project.GitRoot, lease.BranchName, eligible[0], handoffStep.Expect.ChangedFiles)
+	handoff, err := runner.reviewHandoff(ctx, project.ID, project.GitRoot, lease.BranchName, reviewIssue, handoffStep.Expect.ChangedFiles)
 	if err != nil {
 		return runner.failStage(handoffStep.Name, err)
 	}
@@ -657,6 +665,171 @@ func (runner *runner) runGitHubIssueDeliveryDryRun(ctx context.Context, registry
 	return nil
 }
 
+func (runner *runner) runRawIntakeDeliveryDryRun(ctx context.Context, registry projects.Registry) error {
+	project, err := runner.ensureScenarioProject(ctx, registry)
+	if err != nil {
+		return runner.failStage("create_raw_intake", err)
+	}
+	if _, err := (projects.Service{Store: runner.store}).SetTransitionState(ctx, projects.TransitionStateInput{
+		ProjectID:   project.ID,
+		Actor:       projects.TransitionControllerOdinOS,
+		TargetState: projects.TransitionStateCutover,
+		ChangedBy:   "e2e",
+		Notes:       "fixture raw intake delivery dry-run proof",
+	}); err != nil {
+		return runner.failStage("create_raw_intake", err)
+	}
+
+	createStep := runner.step("create_raw_intake")
+	title := defaultString(createStep.IssueTitle, "Implement autonomous raw intake delivery proof")
+	source := defaultString(createStep.Expect.Source, "codex-cli")
+	intakeType := defaultString(createStep.Expect.IntakeType, "prompt")
+	dedupKey := defaultString(createStep.Expect.DedupKey, "raw-intake:e2e-autonomous-loop")
+	requestedBy := defaultString(createStep.Expect.RequestedBy, "operator")
+	sourceFactsJSON, err := encodeRawIntakeSourceFacts(requestedBy, title)
+	if err != nil {
+		return runner.failStage("create_raw_intake", err)
+	}
+	intakeItem, err := runner.store.CreateIntakeItem(ctx, sqlite.CreateIntakeItemParams{
+		WorkspaceID:         workspaces.DefaultWorkspaceKey,
+		SourceFamily:        source,
+		ExternalObjectID:    defaultString(createStep.Expect.ExternalObjectID, "raw-intake-e2e-001"),
+		EventKind:           intakeType,
+		Subject:             title,
+		DedupeKey:           dedupKey,
+		DedupeRecipeVersion: "raw-cli-v1",
+		SourceFactsJSON:     sourceFactsJSON,
+		Status:              "received",
+		Scope:               "project",
+		ScopeKey:            project.Key,
+		Summary:             title,
+	})
+	if err != nil {
+		return runner.failStage("create_raw_intake", err)
+	}
+	if createStep.Expect.IntakeStatus != "" && intakeItem.Status != createStep.Expect.IntakeStatus {
+		return runner.failStage("create_raw_intake", fmt.Errorf("intake status = %q, want %q", intakeItem.Status, createStep.Expect.IntakeStatus))
+	}
+	runner.report.Intake = intakeReport{
+		Project:       project.Key,
+		Repo:          project.GitHubRepo,
+		Fetched:       1,
+		Persisted:     1,
+		Stored:        1,
+		RawIntakeKey:  rawIntakeKey(intakeItem.ID),
+		RawStatus:     intakeItem.Status,
+		RawSource:     intakeItem.SourceFamily,
+		RawIntakeType: intakeItem.EventKind,
+	}
+	runner.passStage("create_raw_intake", fmt.Sprintf("raw_intake=%s status=%s source=%s", rawIntakeKey(intakeItem.ID), intakeItem.Status, intakeItem.SourceFamily))
+
+	processStep := runner.step("process_raw_intake_to_work_item")
+	processed, err := runner.store.ProcessIntakeItem(ctx, sqlite.ProcessIntakeItemParams{
+		ID:           intakeItem.ID,
+		Status:       "routed",
+		Summary:      "raw prompt intake routed to autonomous worker dry-run",
+		RoutingNotes: `{"classification":{"result":"actionable"},"routing":{"outcome":"work_item_created","executor":"fixture_delivery"}}`,
+		Events: []sqlite.IntakeItemProcessingEvent{{
+			Type:   runtimeevents.EventIntakeProcessed,
+			Stage:  "raw_prompt_triage",
+			Result: "work_item_created",
+			Payload: runtimeevents.IntakeProcessingPayload{
+				IntakeItemID:          intakeItem.ID,
+				Status:                "routed",
+				Stage:                 "raw_prompt_triage",
+				Result:                "work_item_created",
+				RoutedOutcome:         "work_item_created",
+				ExecutionIntent:       "governance",
+				ExecutionIntentSource: "e2e_raw_intake_classifier",
+			},
+		}},
+	})
+	if err != nil {
+		return runner.failStage("process_raw_intake_to_work_item", err)
+	}
+	taskKey := defaultString(processStep.Expect.WorkItemKey, fmt.Sprintf("raw-intake-%d", intakeItem.ID))
+	task, err := runner.store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:             project.ID,
+		Key:                   taskKey,
+		Title:                 processed.Subject,
+		AcceptanceCriteria:    []string{"Fixture worker completes deterministic proof", "Review handoff selects required specialists", "Approval gate resolves before dry-run merge"},
+		Status:                "queued",
+		Scope:                 "project",
+		RequestedBy:           "raw_intake",
+		WorkKind:              "raw_prompt_delivery",
+		ExecutionIntent:       "mutation",
+		ExecutionIntentSource: "raw_intake_e2e",
+	})
+	if err != nil {
+		return runner.failStage("process_raw_intake_to_work_item", err)
+	}
+	taskPayload, err := json.Marshal(map[string]any{
+		"raw_intake_id":  processed.ID,
+		"raw_intake_key": rawIntakeKey(processed.ID),
+		"subject":        processed.Subject,
+	})
+	if err != nil {
+		return runner.failStage("process_raw_intake_to_work_item", err)
+	}
+	if _, err := runner.store.CreateTaskIntake(ctx, sqlite.CreateTaskIntakeParams{
+		TaskID:      task.ID,
+		Source:      processed.SourceFamily,
+		IntakeType:  processed.EventKind,
+		DedupKey:    processed.DedupeKey,
+		RequestedBy: "raw_intake",
+		PayloadJSON: string(taskPayload),
+	}); err != nil {
+		return runner.failStage("process_raw_intake_to_work_item", err)
+	}
+	if processStep.Expect.IntakeStatus != "" && processed.Status != processStep.Expect.IntakeStatus {
+		return runner.failStage("process_raw_intake_to_work_item", fmt.Errorf("intake status = %q, want %q", processed.Status, processStep.Expect.IntakeStatus))
+	}
+	if processStep.Expect.WorkItemKey != "" && task.Key != processStep.Expect.WorkItemKey {
+		return runner.failStage("process_raw_intake_to_work_item", fmt.Errorf("work item key = %q, want %q", task.Key, processStep.Expect.WorkItemKey))
+	}
+	runner.report.Intake.RawStatus = processed.Status
+	runner.report.Intake.RoutedWorkItemKey = task.Key
+	runner.report.Delivery.WorkItemKey = task.Key
+	runner.passStage("process_raw_intake_to_work_item", fmt.Sprintf("raw_intake=%s status=%s work_item=%s", rawIntakeKey(processed.ID), processed.Status, task.Key))
+
+	reviewIssue := tracker.Issue{
+		Provider: "raw_intake",
+		Repo:     runner.scenario.Project.GitHubRepo,
+		Number:   int(processed.ID),
+		Title:    processed.Subject,
+		Body:     processed.Summary,
+		URL:      "fixture://raw-intake/" + rawIntakeKey(processed.ID),
+		State:    "open",
+		Labels:   []string{"ready"},
+	}
+	runner.fixture = &fixtureTracker{}
+	return runner.runDeliveryDryRunLoop(ctx, registry, project, task, reviewIssue)
+}
+
+func (runner *runner) ensureScenarioProject(ctx context.Context, registry projects.Registry) (sqlite.Project, error) {
+	manifest, ok := registry.Lookup(runner.scenario.Project.Key)
+	if !ok {
+		return sqlite.Project{}, fmt.Errorf("unknown project %q", runner.scenario.Project.Key)
+	}
+	project, err := runner.store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           manifest.Key,
+		Name:          manifest.Name,
+		Scope:         "project",
+		GitRoot:       manifest.GitRoot,
+		DefaultBranch: manifest.DefaultBranch,
+		GitHubRepo:    manifest.GitHub.Repo,
+		ManifestPath:  registry.ConfigPath(),
+	})
+	if err != nil {
+		existing, getErr := runner.store.GetProjectByKey(ctx, manifest.Key)
+		if getErr != nil {
+			return sqlite.Project{}, err
+		}
+		project = existing
+	}
+	return project, nil
+}
+
 type deliveryHandoffResult struct {
 	ID           int64
 	HandoffState string
@@ -686,10 +859,10 @@ func (runner *runner) reviewHandoff(ctx context.Context, projectID int64, repoRo
 		Title:                  issue.Title,
 		Branch:                 branch,
 		Summary:                fmt.Sprintf("Dry-run PR handoff from fixture issue %d", issue.Number),
-		Tests:                  []string{"odin e2e --scenario fixtures/e2e/github-issue-delivery-dry-run.yaml --json"},
+		Tests:                  []string{runner.e2eScenarioCommand()},
 		Risks:                  []string{"fixture mode uses no live writers"},
 		Blockers:               []string{"approval required before merge"},
-		CommandsRun:            []string{"odin e2e --scenario fixtures/e2e/github-issue-delivery-dry-run.yaml --json"},
+		CommandsRun:            []string{runner.e2eScenarioCommand()},
 		ChangedFiles:           changedFiles,
 		RuntimeBehaviorChanged: len(changedFiles) > 0,
 		RealOdinProofIncluded:  true,
@@ -758,6 +931,37 @@ func stringSliceEqual(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+func defaultString(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
+}
+
+func rawIntakeKey(id int64) string {
+	return fmt.Sprintf("intake-%d", id)
+}
+
+func encodeRawIntakeSourceFacts(requestedBy string, originalContent string) (string, error) {
+	payload, err := json.Marshal(map[string]string{
+		"requested_by":     requestedBy,
+		"payload_policy":   "stored_in_source_facts_json",
+		"original_content": originalContent,
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func (runner *runner) e2eScenarioCommand() string {
+	scenarioPath := strings.TrimSpace(runner.options.scenarioPath)
+	if scenarioPath == "" {
+		scenarioPath = defaultScenarioPath
+	}
+	return "odin e2e --scenario " + scenarioPath + " --json"
 }
 
 func (runner *runner) runTrackerDryRunLifecycle(ctx context.Context) error {
@@ -1245,6 +1449,13 @@ type stepExpect struct {
 	TestsRecorded              bool     `yaml:"tests_recorded"`
 	ReviewArtifact             bool     `yaml:"review_artifact"`
 	ApprovalRequired           bool     `yaml:"approval_required"`
+	Source                     string   `yaml:"source"`
+	ExternalObjectID           string   `yaml:"external_object_id"`
+	IntakeType                 string   `yaml:"intake_type"`
+	DedupKey                   string   `yaml:"dedup_key"`
+	RequestedBy                string   `yaml:"requested_by"`
+	IntakeStatus               string   `yaml:"intake_status"`
+	WorkItemKey                string   `yaml:"work_item_key"`
 	ChangedFiles               []string `yaml:"changed_files"`
 	ExpectedReviewRoles        []string `yaml:"expected_review_roles"`
 	ExpectedHandoffReviewState string   `yaml:"handoff_review_state"`
@@ -1305,11 +1516,16 @@ type codexReport struct {
 }
 
 type intakeReport struct {
-	Project   string `json:"project"`
-	Repo      string `json:"repo"`
-	Fetched   int    `json:"fetched"`
-	Persisted int    `json:"persisted"`
-	Stored    int    `json:"stored"`
+	Project           string `json:"project"`
+	Repo              string `json:"repo"`
+	Fetched           int    `json:"fetched"`
+	Persisted         int    `json:"persisted"`
+	Stored            int    `json:"stored"`
+	RawIntakeKey      string `json:"raw_intake_key,omitempty"`
+	RawStatus         string `json:"raw_status,omitempty"`
+	RawSource         string `json:"raw_source,omitempty"`
+	RawIntakeType     string `json:"raw_intake_type,omitempty"`
+	RoutedWorkItemKey string `json:"routed_work_item_key,omitempty"`
 }
 
 type workspaceReport struct {
