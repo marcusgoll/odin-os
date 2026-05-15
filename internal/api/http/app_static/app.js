@@ -8,10 +8,14 @@ const failedList = document.querySelector('#failed-uploads');
 const dashboardError = document.querySelector('#dashboard-error');
 const offlineState = document.querySelector('#offline-state');
 const homeSummary = document.querySelector('#home-summary');
+const registerButton = document.querySelector('#register-device');
+const captureDetails = document.querySelector('#capture-details');
 let voiceBlob = null;
 let recorder = null;
 let chunks = [];
 let pendingApprovalDecision = null;
+let pendingReviewDecision = null;
+let registeredSession = false;
 
 function csrfToken() {
   return sessionStorage.getItem(csrfKey) || '';
@@ -34,6 +38,17 @@ function setStatus(message) {
   statusEl.textContent = message;
 }
 
+function setRegisteredState(authenticated) {
+  registeredSession = authenticated;
+  registerButton.disabled = authenticated;
+  registerButton.classList.toggle('registered', authenticated);
+  registerButton.textContent = authenticated ? 'Registered' : 'Register';
+  registerButton.setAttribute(
+    'aria-label',
+    authenticated ? 'Mobile device registered for this browser session' : 'Register this mobile device',
+  );
+}
+
 function showError(message) {
   dashboardError.hidden = !message;
   dashboardError.textContent = message || '';
@@ -46,6 +61,13 @@ function setCount(id, value) {
 
 function clearNode(node) {
   node.textContent = '';
+}
+
+function humanizeToken(value) {
+  return String(value || '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function emptyCard(message, detail) {
@@ -86,6 +108,63 @@ function projectionCard(kind, title, meta, body) {
     article.appendChild(text);
   }
   return article;
+}
+
+function appendCardFacts(card, facts) {
+  const values = (facts || []).filter((value) => value !== undefined && value !== null && String(value).trim() !== '');
+  if (!values.length) return;
+  const dl = document.createElement('dl');
+  dl.className = 'fact-grid';
+  for (const fact of values) {
+    const [label, ...rest] = String(fact).split('=');
+    const dt = document.createElement('dt');
+    const dd = document.createElement('dd');
+    dt.textContent = humanizeToken(label || 'detail');
+    dd.textContent = rest.length ? rest.join('=') : String(fact);
+    dl.append(dt, dd);
+  }
+  card.appendChild(dl);
+}
+
+function appendActionRow(card, controls) {
+  const active = (controls || []).filter(Boolean);
+  if (!active.length) return;
+  const row = document.createElement('div');
+  row.className = 'button-row action-row';
+  for (const control of active) row.appendChild(control);
+  card.appendChild(row);
+}
+
+function actionButton(label, className, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = className || 'ghost-button small';
+  button.textContent = label;
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+function actionLink(label, href) {
+  if (!href) return null;
+  const link = document.createElement('a');
+  link.className = 'link-button small';
+  link.href = href;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.textContent = label;
+  return link;
+}
+
+function handoffLink(item) {
+  const deepLink = String(item?.deep_link || '');
+  if (!deepLink) return '';
+  const separator = deepLink.includes('?') ? '&' : '?';
+  return deepLink.includes('format=') ? deepLink : `${deepLink}${separator}format=html`;
+}
+
+function compactID(label, value) {
+  if (value === undefined || value === null || value === '') return '';
+  return `${label}=${value}`;
 }
 
 function renderFailed() {
@@ -197,11 +276,13 @@ function registrationFailureMessage(error) {
 async function refreshDashboard() {
   showError('');
   const authenticated = await hasRegisteredSession();
+  setRegisteredState(authenticated);
   if (!authenticated) {
     renderAuthRequired();
     setStatus('Register this device to load Odin projections.');
     return;
   }
+  renderLoading();
   try {
     const [status, overview, reviewQueue, approvals, browser, notifications] = await Promise.all([
       mobileFetch('/mobile/status'),
@@ -215,6 +296,7 @@ async function refreshDashboard() {
   } catch (error) {
     renderAuthRequired();
     if (error.code === 'admin_auth_required') {
+      setRegisteredState(false);
       setStatus('Register this device to load Odin projections.');
       showError('');
       return;
@@ -225,6 +307,12 @@ async function refreshDashboard() {
 
 function renderAuthRequired() {
   homeSummary.textContent = 'Register this device to load live projections.';
+  setCount('#action-count', 0);
+  setCount('#approvals-count', 0);
+  setCount('#failed-blocked-count', 0);
+  setCount('#inbox-count', 0);
+  setCount('#running-work-count', 0);
+  setCount('#browser-count', 0);
   for (const id of [
     '#action-required-list',
     '#approvals-list',
@@ -241,15 +329,42 @@ function renderAuthRequired() {
   }
 }
 
+function renderLoading() {
+  homeSummary.textContent = 'Loading live Odin projections...';
+  setStatus(registeredSession ? 'Device registered. Loading projections...' : 'Loading projections...');
+  setCount('#action-count', '...');
+  setCount('#approvals-count', '...');
+  setCount('#failed-blocked-count', '...');
+  setCount('#inbox-count', '...');
+  setCount('#running-work-count', '...');
+  setCount('#browser-count', '...');
+  for (const id of [
+    '#action-required-list',
+    '#approvals-list',
+    '#failed-blocked-list',
+    '#today-list',
+    '#inbox-list',
+    '#running-work-list',
+    '#browser-list',
+    '#quiet-list',
+  ]) {
+    const node = document.querySelector(id);
+    clearNode(node);
+    node.appendChild(emptyCard('Loading live projections', 'Odin is reading the current operator queues.'));
+  }
+}
+
 function renderDashboard({ status, overview, reviewQueue, approvals, browser, notifications }) {
   const reviewItems = reviewQueue.items || [];
   const approvalItems = approvals.items || [];
-  const actionCount = overview.actual_use?.action_required_count ?? reviewItems.length;
+  const actionCount = workbenchActionCount(reviewItems, approvalItems, browser);
+  const projectionCount = overview.actual_use?.action_required_count ?? reviewItems.length;
+  setStatus('Device registered for this browser session.');
   homeSummary.textContent = actionCount > 0
-    ? `${actionCount} action-required item${actionCount === 1 ? '' : 's'} from live projections.`
+    ? `${actionCount} live action card${actionCount === 1 ? '' : 's'} ready. Odin overview reports ${projectionCount} action-required row${projectionCount === 1 ? '' : 's'}.`
     : 'No action-required rows in current projections.';
 
-  renderActionRequired(overview, reviewItems, browser);
+  renderActionRequired(overview, reviewItems, approvalItems, browser);
   renderApprovals(approvalItems);
   renderFailedBlocked(overview, reviewItems);
   renderToday(status, overview, notifications);
@@ -259,22 +374,126 @@ function renderDashboard({ status, overview, reviewQueue, approvals, browser, no
   renderQuietLater(overview, notifications);
 }
 
-function renderActionRequired(overview, reviewItems, browser) {
+function workbenchActionCount(reviewItems, approvalItems, browser) {
+  const approvalCount = approvalItems.filter((item) => (item.actions || []).length || item.status === 'pending').length;
+  const reviewActionCount = reviewItems.filter((item) => {
+    if (item.source_type === 'approval') return false;
+    if (item.source_type === 'browser_attended_login') return true;
+    if (item.source_type === 'intake_review') return true;
+    if (item.source_type === 'browser_run_failed') return true;
+    if (item.source_type === 'failed_work') return true;
+    return false;
+  }).length;
+  const browserRunnerCount = (browser.runners || []).filter((item) => item.error_code || ['failed', 'expired'].includes(item.status)).length;
+  return approvalCount + reviewActionCount + browserRunnerCount;
+}
+
+function renderActionRequired(overview, reviewItems, approvalItems, browser) {
   const node = document.querySelector('#action-required-list');
   clearNode(node);
   const items = [];
-  for (const item of reviewItems.slice(0, 4)) {
-    items.push(projectionCard('urgent', item.title || item.object_key, item.source_type, item.reason || item.status));
+  for (const item of approvalItems.slice(0, 3)) {
+    items.push(approvalWorkbenchCard(item));
   }
-  const loginNeeds = (browser.login_requests || []).filter((item) => item.status !== 'completed');
-  for (const item of loginNeeds.slice(0, 2)) {
-    items.push(projectionCard('warn', `Browser login request ${item.id}`, item.status, `Session ${item.session_id} expires ${item.expires_at}`));
+  for (const item of reviewItems) {
+    if (items.length >= 6) break;
+    if (item.source_type === 'approval') continue;
+    if (item.source_type === 'browser_attended_login') {
+      items.push(browserLoginWorkbenchCard(item));
+    } else if (item.source_type === 'intake_review') {
+      items.push(intakeReviewWorkbenchCard(item));
+    } else if (item.source_type === 'browser_run_failed' || item.source_type === 'failed_work') {
+      items.push(inspectOnlyWorkbenchCard(item, 'danger'));
+    } else if (item.browser_event) {
+      items.push(inspectOnlyWorkbenchCard(item, 'warn'));
+    }
+  }
+  const runners = (browser.runners || []).filter((item) => item.error_code || ['failed', 'expired'].includes(item.status));
+  for (const item of runners) {
+    if (items.length >= 6) break;
+    const card = projectionCard('danger', `Browser runner ${item.id}`, humanizeToken(item.status), item.error_message || item.error_code || 'Browser handoff needs inspection.');
+    appendCardFacts(card, [compactID('login_request', item.login_request_id), compactID('session', item.session_id), compactID('status_code', item.error_code)]);
+    appendActionRow(card, [actionButton('Refresh', 'ghost-button small', refreshDashboard)]);
+    items.push(card);
+  }
+  if (items.length < 6) {
+    const blocked = overview.observability?.blocked_work || [];
+    for (const item of blocked.slice(0, 6 - items.length)) {
+      items.push(projectionCard('warn', item.work_item_key, humanizeToken(item.reason || item.source), `${item.project_key || 'workspace'} remains blocked.`));
+    }
+  }
+  if (items.length < 6) {
+    const recovery = overview.observability?.recovery_guidance || [];
+    for (const item of recovery.slice(0, 6 - items.length)) {
+      items.push(projectionCard('warn', item.work_item_key, humanizeToken(item.decision), item.recovery_recommendation || item.last_error || 'Inspect failed work before retry.'));
+    }
   }
   if (items.length === 0) {
     items.push(emptyCard('No action-required rows', 'Odin overview has no review, blocked, failed, or browser intervention rows right now.'));
   }
-  setCount('#action-count', overview.actual_use?.action_required_count ?? items.length);
+  setCount('#action-count', items.length);
   items.forEach((item) => node.appendChild(item));
+}
+
+function approvalWorkbenchCard(item) {
+  const actions = Array.isArray(item.actions) && item.actions.length ? item.actions : ['approve', 'deny', 'clarify'];
+  const risk = humanizeToken(item.risk_level || item.resolver_support || 'unknown');
+  const card = projectionCard('urgent action-card', item.title || item.task_key || `Approval ${item.approval_id}`, `approval · ${risk}`, item.requested_action || item.required_reason || 'Approval is required before Odin continues.');
+  appendCardFacts(card, [
+    compactID('approval', item.approval_id),
+    compactID('task', item.task_key),
+    compactID('resolver', item.resolver_support || 'unknown'),
+    compactID('policy', item.policy_snapshot_hash),
+    compactID('runtime', item.runtime_snapshot_hash),
+  ]);
+  appendActionRow(card, actions.map((action) => {
+    const className = action === 'approve' ? 'primary small' : action === 'clarify' ? 'ghost-button small' : 'danger-button small';
+    return actionButton(actionLabel(action), className, () => openApprovalConfirmation(item, action));
+  }));
+  return card;
+}
+
+function browserLoginWorkbenchCard(item) {
+  const card = projectionCard('warn action-card', item.title || item.object_key || 'Browser login required', 'browser handoff', item.reason || 'Manual login or MFA is blocking browser work.');
+  appendCardFacts(card, [
+    compactID('queue', item.queue_id),
+    compactID('login_request', item.object_id),
+    compactID('status', item.status),
+    compactID('allowed', (item.allowed_actions || []).join(',')),
+  ]);
+  appendActionRow(card, [
+    actionLink('Open handoff', handoffLink(item)),
+    actionButton('Mark login complete', 'primary small', () => openReviewDecision(item, 'complete')),
+  ]);
+  return card;
+}
+
+function intakeReviewWorkbenchCard(item) {
+  const card = projectionCard('urgent action-card', item.title || item.object_key || 'Intake review', 'intake review', item.reason || item.status || 'Operator decision required.');
+  appendCardFacts(card, [
+    compactID('queue', item.queue_id),
+    compactID('intake', item.object_id),
+    compactID('project', item.project_key || 'default'),
+    compactID('status', item.status),
+  ]);
+  appendActionRow(card, [
+    actionButton('Reject', 'danger-button small', () => openReviewDecision(item, 'reject')),
+    actionButton('Clarify', 'ghost-button small', () => openReviewDecision(item, 'clarify')),
+    actionButton('Archive', 'ghost-button small', () => openReviewDecision(item, 'archive')),
+  ]);
+  return card;
+}
+
+function inspectOnlyWorkbenchCard(item, kind) {
+  const card = projectionCard(`${kind || 'warn'} action-card`, item.title || item.object_key || 'Review item', humanizeToken(item.source_type), item.reason || item.status || 'Inspect in Odin before acting.');
+  appendCardFacts(card, [
+    compactID('queue', item.queue_id),
+    compactID('object', item.object_key || item.object_id),
+    compactID('status', item.status),
+    compactID('allowed', (item.allowed_actions || []).join(',')),
+  ]);
+  appendActionRow(card, [actionButton('Refresh', 'ghost-button small', refreshDashboard)]);
+  return card;
 }
 
 function renderApprovals(items) {
@@ -288,7 +507,7 @@ function renderApprovals(items) {
   for (const item of items) {
     const actions = Array.isArray(item.actions) && item.actions.length ? item.actions : ['approve', 'deny'];
     const actionText = actions.join(', ');
-    const risk = item.risk_level || item.resolver_support || 'unknown';
+    const risk = humanizeToken(item.risk_level || item.resolver_support || 'unknown');
     const detail = item.requested_action || item.required_reason || 'governed work';
     const card = projectionCard('approval', item.title || item.task_key || `Approval ${item.approval_id}`, risk, `Action: ${detail}. Allowed decisions: ${actionText}.`);
     const row = document.createElement('div');
@@ -323,6 +542,18 @@ function openApprovalConfirmation(item, action) {
   document.querySelector('#approval-reason').focus();
 }
 
+function openReviewDecision(item, action) {
+  pendingReviewDecision = { item, action };
+  const label = action === 'complete'
+    ? 'Mark attended browser login complete'
+    : `${actionLabel(action)} ${humanizeToken(item.source_type)}`;
+  document.querySelector('#review-confirmation-summary').textContent =
+    `${label} for ${item.queue_id}. Odin records this against the governed review queue.`;
+  document.querySelector('#review-reason').value = '';
+  document.querySelector('#review-confirmation').hidden = false;
+  document.querySelector('#review-reason').focus();
+}
+
 async function confirmApprovalDecision() {
   if (!pendingApprovalDecision) return;
   const reason = document.querySelector('#approval-reason').value.trim();
@@ -351,6 +582,29 @@ async function confirmApprovalDecision() {
   await refreshDashboard();
 }
 
+async function confirmReviewDecision() {
+  if (!pendingReviewDecision) return;
+  const reason = document.querySelector('#review-reason').value.trim();
+  if (!reason) {
+    setStatus('Review reason is required.');
+    return;
+  }
+  const { item, action } = pendingReviewDecision;
+  await mobileFetch(`/mobile/review-queue/${encodeURIComponent(item.queue_id)}/decision`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action,
+      reason,
+      actor: 'odin-pwa',
+    }),
+  });
+  document.querySelector('#review-confirmation').hidden = true;
+  pendingReviewDecision = null;
+  setStatus(`Review action ${actionLabel(action)} recorded.`);
+  await refreshDashboard();
+}
+
 function actionLabel(action) {
   switch (action) {
     case 'approve':
@@ -359,8 +613,15 @@ function actionLabel(action) {
       return 'Deny';
     case 'clarify':
       return 'Clarify';
+    case 'archive':
+      return 'Archive';
+    case 'reject':
+      return 'Reject';
+    case 'complete':
+    case 'mark-complete':
+      return 'Complete';
     default:
-      return action;
+      return humanizeToken(action);
   }
 }
 
@@ -372,13 +633,25 @@ function renderFailedBlocked(overview, reviewItems) {
   const recovery = overview.observability?.recovery_guidance || [];
   setCount('#failed-blocked-count', failed.length + blocked.length + recovery.length);
   for (const item of failed.slice(0, 4)) {
-    node.appendChild(projectionCard('danger', item.title || item.object_key, 'failed work', `Allowed actions: ${(item.allowed_actions || []).join(', ') || 'inspect'}`));
+    node.appendChild(inspectOnlyWorkbenchCard(item, 'danger'));
   }
   for (const item of blocked.slice(0, 4)) {
-    node.appendChild(projectionCard('warn', item.work_item_key, item.reason || item.source, `${item.project_key || 'workspace'} remains blocked.`));
+    const card = projectionCard('warn', item.work_item_key, humanizeToken(item.reason || item.source), `${item.project_key || 'workspace'} remains blocked.`);
+    appendCardFacts(card, [
+      compactID('project', item.project_key || 'workspace'),
+      compactID('source', item.source),
+      compactID('reason', item.reason),
+    ]);
+    node.appendChild(card);
   }
   for (const item of recovery.slice(0, 4)) {
-    node.appendChild(projectionCard('warn', item.work_item_key, item.decision, item.recovery_recommendation || item.last_error || 'Inspect failed work before retry.'));
+    const card = projectionCard('warn', item.work_item_key, humanizeToken(item.decision), item.recovery_recommendation || item.last_error || 'Inspect failed work before retry.');
+    appendCardFacts(card, [
+      compactID('decision', item.decision),
+      compactID('status_code', item.status_code || item.error_code),
+      compactID('source', item.source),
+    ]);
+    node.appendChild(card);
   }
   if (!node.childElementCount) {
     node.appendChild(emptyCard('No failed or blocked rows', 'Failed work and blocked work stay visible here until runtime projections clear them.'));
@@ -424,10 +697,22 @@ function renderBrowser(browser) {
   const runners = (browser.runners || []).filter((item) => item.error_code || ['failed', 'expired'].includes(item.status));
   setCount('#browser-count', requests.length + runners.length);
   for (const item of requests) {
-    node.appendChild(projectionCard('warn', `Login request ${item.id}`, item.status, `Session ${item.session_id}; expires ${item.expires_at}`));
+    const card = projectionCard('warn', `Login request ${item.id}`, humanizeToken(item.status), `Session ${item.session_id}; expires ${item.expires_at}`);
+    appendCardFacts(card, [
+      compactID('login_request', item.id),
+      compactID('session', item.session_id),
+      compactID('expires', item.expires_at),
+    ]);
+    node.appendChild(card);
   }
   for (const item of runners) {
-    node.appendChild(projectionCard('danger', `Browser runner ${item.id}`, item.status, item.error_message || item.error_code || 'Browser handoff needs inspection.'));
+    const card = projectionCard('danger', `Browser runner ${item.id}`, humanizeToken(item.status), item.error_message || item.error_code || 'Browser handoff needs inspection.');
+    appendCardFacts(card, [
+      compactID('runner', item.id),
+      compactID('login_request', item.login_request_id),
+      compactID('status_code', item.error_code),
+    ]);
+    node.appendChild(card);
   }
   if (!node.childElementCount) {
     node.appendChild(emptyCard('No browser intervention rows', 'Login, MFA, CAPTCHA, and runner failures appear here from browser status projections.'));
@@ -493,6 +778,7 @@ imageInput.addEventListener('change', () => {
 });
 
 document.querySelector('#register-device').addEventListener('click', async () => {
+  if (registeredSession) return;
   const value = window.prompt('Current Odin admin token');
   const token = normalizeAdminTokenInput(value);
   if (value === null || token === '') {
@@ -523,6 +809,7 @@ document.querySelector('#register-device').addEventListener('click', async () =>
   }
   const payload = await response.json();
   sessionStorage.setItem(csrfKey, payload.csrf_token || '');
+  setRegisteredState(true);
   setStatus('Device registered for this browser session.');
   await refreshDashboard();
 });
@@ -530,8 +817,9 @@ document.querySelector('#register-device').addEventListener('click', async () =>
 document.querySelector('#refresh-dashboard').addEventListener('click', refreshDashboard);
 
 document.querySelector('#capture-fab').addEventListener('click', () => {
-  document.querySelector('#capture-body').focus();
+  captureDetails.open = true;
   document.querySelector('.capture-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.querySelector('#capture-body').focus({ preventScroll: true });
 });
 
 document.querySelector('#approval-cancel').addEventListener('click', () => {
@@ -541,6 +829,15 @@ document.querySelector('#approval-cancel').addEventListener('click', () => {
 
 document.querySelector('#approval-confirm').addEventListener('click', () => {
   confirmApprovalDecision().catch((error) => setStatus(`Approval decision failed: ${error.message}`));
+});
+
+document.querySelector('#review-cancel').addEventListener('click', () => {
+  pendingReviewDecision = null;
+  document.querySelector('#review-confirmation').hidden = true;
+});
+
+document.querySelector('#review-confirm').addEventListener('click', () => {
+  confirmReviewDecision().catch((error) => setStatus(`Review decision failed: ${error.message}`));
 });
 
 document.querySelector('#voice-record').addEventListener('click', async () => {

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const restrictedSkillExecutionProfile = "restricted_command_v1"
@@ -20,6 +21,20 @@ type restrictedSkillMetadata struct {
 }
 
 func runRestrictedCommand(ctx context.Context, repoRoot string, metadata restrictedSkillMetadata, handlerPath string, payload []byte) (string, string, error) {
+	for {
+		stdout, stderr, err := runRestrictedCommandOnce(ctx, repoRoot, metadata, handlerPath, payload)
+		if !errors.Is(err, syscall.ETXTBSY) {
+			return stdout, stderr, err
+		}
+		select {
+		case <-ctx.Done():
+			return stdout, stderr, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func runRestrictedCommandOnce(ctx context.Context, repoRoot string, metadata restrictedSkillMetadata, handlerPath string, payload []byte) (string, string, error) {
 	cmd := exec.CommandContext(ctx, handlerPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

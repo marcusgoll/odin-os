@@ -17,63 +17,11 @@
           <h1 id="home-title">What needs me now?</h1>
           <p id="home-summary" class="summary">Load Odin projections to see action-required work.</p>
         </div>
-        <button id="register-device" class="ghost-button" type="button" aria-label="Register this mobile device">Register</button>
-      </header>
-
-      <section class="capture-panel" aria-labelledby="capture-title-label">
-        <div class="section-heading">
-          <div>
-            <h2 id="capture-title-label">Capture</h2>
-            <p id="capture-status">Raw capture stores evidence first.</p>
-          </div>
+        <div class="hero-actions" aria-label="Session and projection controls">
           <button id="refresh-dashboard" class="icon-button" type="button" aria-label="Refresh Odin projections">Refresh</button>
+          <button id="register-device" class="ghost-button" type="button" aria-label="Register this mobile device">Register</button>
         </div>
-
-        <form id="capture-form" data-api-endpoint="/mobile/intake/raw">
-          <fieldset class="capture-tabs" aria-label="Capture type">
-            <label><input type="radio" name="kind" value="note" data-capture-kind="note" checked> Text</label>
-            <label><input type="radio" name="kind" value="voice_note" data-capture-kind="voice_note"> Voice</label>
-            <label><input type="radio" name="kind" value="photo" data-capture-kind="photo"> Photo</label>
-          </fieldset>
-
-          <label class="field">
-            <span>Quick note</span>
-            <textarea id="capture-body" name="content" rows="4" placeholder="Capture the raw note, prompt, task, or bug."></textarea>
-          </label>
-
-          <label class="field compact-field">
-            <span>Title</span>
-            <input id="capture-title" name="title" autocomplete="off" placeholder="Optional title">
-          </label>
-
-          <div class="media-row" aria-label="Capture attachments">
-            <label class="file-button" aria-label="Attach a photo">
-              <input id="image-input" name="attachment" type="file" accept="image/*" capture="environment">
-              Photo
-            </label>
-            <button id="voice-record" type="button" aria-label="Record a voice note">Voice</button>
-            <span id="media-state">No media attached</span>
-          </div>
-
-          <div class="field-grid">
-            <label>
-              <span>Transcript</span>
-              <input id="capture-transcript" name="transcript" placeholder="Optional transcript">
-            </label>
-            <label>
-              <span>Source</span>
-              <input id="source-app" name="source_app" placeholder="App or context">
-            </label>
-          </div>
-
-          <label class="field compact-field">
-            <span>Share URL</span>
-            <input id="share-url" name="share_url" inputmode="url" placeholder="Optional source URL">
-          </label>
-
-          <button id="capture-submit" class="primary" type="submit" aria-label="Capture raw intake">Capture raw intake</button>
-        </form>
-      </section>
+      </header>
 
       <section id="offline-state" class="state-banner" aria-live="polite" hidden>
         Offline. The shell is available, but runtime projections and uploads need the Odin service.
@@ -88,6 +36,14 @@
             <span id="action-count" class="count-pill">0</span>
           </div>
           <div id="action-required-list" class="card-list"></div>
+        </section>
+
+        <section class="operator-section" aria-labelledby="failed-blocked-title">
+          <div class="section-heading">
+            <h2 id="failed-blocked-title">Failed/Blocked</h2>
+            <span id="failed-blocked-count" class="count-pill">0</span>
+          </div>
+          <div id="failed-blocked-list" class="card-list"></div>
         </section>
 
         <section class="operator-section" aria-labelledby="approvals-title">
@@ -115,12 +71,17 @@
           </div>
         </section>
 
-        <section class="operator-section" aria-labelledby="failed-blocked-title">
-          <div class="section-heading">
-            <h2 id="failed-blocked-title">Failed/Blocked</h2>
-            <span id="failed-blocked-count" class="count-pill">0</span>
+        <section id="review-confirmation" class="confirmation-panel review-panel" aria-labelledby="review-confirmation-title" hidden>
+          <h3 id="review-confirmation-title">Review action</h3>
+          <p id="review-confirmation-summary"></p>
+          <label class="field">
+            <span>Reason</span>
+            <textarea id="review-reason" rows="3" placeholder="Required operator reason"></textarea>
+          </label>
+          <div class="button-row">
+            <button id="review-cancel" type="button" class="ghost-button" aria-label="Cancel review decision">Cancel</button>
+            <button id="review-confirm" type="button" class="primary" aria-label="Confirm review decision">Confirm</button>
           </div>
-          <div id="failed-blocked-list" class="card-list"></div>
         </section>
 
         <section class="operator-section" aria-labelledby="today-title">
@@ -160,6 +121,63 @@
           </div>
           <div id="quiet-list" class="card-list"></div>
         </section>
+      </section>
+
+      <section class="capture-panel" aria-labelledby="capture-title-label">
+        <details id="capture-details">
+          <summary>
+            <span>
+              <strong id="capture-title-label">Capture</strong>
+              <span id="capture-status">Raw capture stores evidence first.</span>
+            </span>
+            <span class="summary-action">capture form</span>
+          </summary>
+
+          <form id="capture-form" data-api-endpoint="/mobile/intake/raw">
+            <fieldset class="capture-tabs" aria-label="Capture type">
+              <label><input type="radio" name="kind" value="note" data-capture-kind="note" checked> Text</label>
+              <label><input type="radio" name="kind" value="voice_note" data-capture-kind="voice_note"> Voice</label>
+              <label><input type="radio" name="kind" value="photo" data-capture-kind="photo"> Photo</label>
+            </fieldset>
+
+            <label class="field">
+              <span>Quick note</span>
+              <textarea id="capture-body" name="content" rows="4" placeholder="Capture the raw note, prompt, task, or bug."></textarea>
+            </label>
+
+            <label class="field compact-field">
+              <span>Title</span>
+              <input id="capture-title" name="title" autocomplete="off" placeholder="Optional title">
+            </label>
+
+            <div class="media-row" aria-label="Capture attachments">
+              <label class="file-button" aria-label="Attach a photo">
+                <input id="image-input" name="attachment" type="file" accept="image/*" capture="environment">
+                Photo
+              </label>
+              <button id="voice-record" type="button" aria-label="Record a voice note">Voice</button>
+              <span id="media-state">No media attached</span>
+            </div>
+
+            <div class="field-grid">
+              <label>
+                <span>Transcript</span>
+                <input id="capture-transcript" name="transcript" placeholder="Optional transcript">
+              </label>
+              <label>
+                <span>Source</span>
+                <input id="source-app" name="source_app" placeholder="App or context">
+              </label>
+            </div>
+
+            <label class="field compact-field">
+              <span>Share URL</span>
+              <input id="share-url" name="share_url" inputmode="url" placeholder="Optional source URL">
+            </label>
+
+            <button id="capture-submit" class="primary" type="submit" aria-label="Capture raw intake">Capture raw intake</button>
+          </form>
+        </details>
       </section>
 
       <section class="operator-section" aria-labelledby="failed-uploads-title">

@@ -1965,6 +1965,9 @@ service:
 	if err := waitForServeHealthStatus(ctx, "http://"+addr, http.StatusServiceUnavailable, "degraded", "/readyz"); err != nil {
 		t.Fatal(err)
 	}
+	if err := waitForLifecycleStatus(ctx, store, "degraded"); err != nil {
+		t.Fatal(err)
+	}
 
 	cancel()
 
@@ -2140,7 +2143,14 @@ func (git *cleanupFailureGit) WorktreeDirty(context.Context, string) (bool, erro
 func createRuntimeRoot(t *testing.T) string {
 	t.Helper()
 
-	root := t.TempDir()
+	root, err := os.MkdirTemp("", sanitizeRuntimeRootTestName(t.Name())+"-")
+	if err != nil {
+		t.Fatalf("create runtime root: %v", err)
+	}
+	t.Cleanup(func() {
+		removeRuntimeRoot(t, root)
+	})
+
 	if err := os.MkdirAll(filepath.Join(root, "config"), 0o755); err != nil {
 		t.Fatalf("mkdir config: %v", err)
 	}
@@ -2215,6 +2225,25 @@ routes:
 	}
 
 	return root
+}
+
+func sanitizeRuntimeRootTestName(name string) string {
+	replacer := strings.NewReplacer("/", "-", " ", "-", ":", "-")
+	return replacer.Replace(name)
+}
+
+func removeRuntimeRoot(t *testing.T, root string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := os.RemoveAll(root); err == nil {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("remove runtime root %s: %v", root, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func writeUnavailableExecutorsConfig(t *testing.T, root string) {
@@ -2664,6 +2693,66 @@ func lifecycleStatuses(store *sqlite.Store) ([]string, error) {
 		statuses = append(statuses, payload.Status)
 	}
 	return statuses, nil
+}
+
+func waitForLifecycleStatus(ctx context.Context, store *sqlite.Store, wantStatus string) error {
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for lifecycle status %q", wantStatus)
+		case <-deadline.C:
+			statuses, err := lifecycleStatuses(store)
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("timed out waiting for lifecycle status %q; statuses=%v", wantStatus, statuses)
+		case <-ticker.C:
+			statuses, err := lifecycleStatuses(store)
+			if err != nil {
+				return err
+			}
+			for _, status := range statuses {
+				if status == wantStatus {
+					return nil
+				}
+			}
+		}
+	}
+}
+
+func waitForGoalRunning(ctx context.Context, store *sqlite.Store, goalID int64) error {
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for goal %d to run", goalID)
+		case <-deadline.C:
+			goal, err := store.GetGoal(context.Background(), goalID)
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("timed out waiting for goal %d to run; goal=%+v", goalID, goal)
+		case <-ticker.C:
+			goal, err := store.GetGoal(context.Background(), goalID)
+			if err != nil {
+				return err
+			}
+			if goal.Status == sqlite.GoalStatusRunning && goal.CurrentRunID != nil {
+				return nil
+			}
+		}
+	}
 }
 
 func countServeGoalEvents(t *testing.T, store *sqlite.Store) map[string]int {
