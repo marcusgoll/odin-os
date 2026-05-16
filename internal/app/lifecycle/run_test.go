@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -404,7 +406,7 @@ func TestRunTUIOnceInvokesRunner(t *testing.T) {
 	})
 
 	called := false
-	runTUI = func(ctx context.Context, args []string, stdout io.Writer) error {
+	runTUI = func(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
 		called = true
 		if len(args) != 1 || args[0] != "--once" {
 			t.Fatalf("tui args = %v, want [--once]", args)
@@ -441,6 +443,112 @@ func TestRunTUIMissingPrometheusReturnsControlledError(t *testing.T) {
 	if strings.Contains(strings.ToUpper(stdout.String()), "HEALTHY") {
 		t.Fatalf("stdout = %q, must not report healthy when Prometheus is missing", stdout.String())
 	}
+}
+
+func TestRunTUIOnceIncludesStoreBackedVisualPanels(t *testing.T) {
+	root := testRepoRoot(t)
+
+	app, err := bootstrap.Load(context.Background(), root, root)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	project, err := app.Store.CreateProject(context.Background(), sqlite.CreateProjectParams{
+		Key:           "odin-core",
+		Name:          "Odin Core",
+		Scope:         "system",
+		GitRoot:       root,
+		DefaultBranch: "main",
+		GitHubRepo:    "acme/odin-os",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	if _, err := app.Store.CreateGoal(context.Background(), sqlite.CreateGoalParams{Title: "Ship visual TUI"}); err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	if _, err := app.Store.UpsertPullRequestHandoff(context.Background(), sqlite.UpsertPullRequestHandoffParams{
+		ProjectID:   project.ID,
+		Provider:    "github",
+		Repo:        "acme/odin-os",
+		Number:      42,
+		URL:         "https://github.com/acme/odin-os/pull/42",
+		State:       "open",
+		Branch:      "codex/visual-tui",
+		Title:       "Visual TUI",
+		ReviewState: "review_ready",
+	}); err != nil {
+		t.Fatalf("UpsertPullRequestHandoff() error = %v", err)
+	}
+	if err := app.Store.Close(); err != nil {
+		t.Fatalf("Store.Close() error = %v", err)
+	}
+
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeLifecyclePrometheusQueryResponse(t, w, r.URL.Query().Get("query"))
+	}))
+	defer prometheus.Close()
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"result": []any{},
+			},
+		})
+	}))
+	defer loki.Close()
+
+	var stdout bytes.Buffer
+	err = Run(context.Background(), root, []string{
+		"tui",
+		"--once",
+		"--prometheus-url", prometheus.URL,
+		"--loki-url", loki.URL,
+	}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(tui --once) error = %v", err)
+	}
+	for _, want := range []string{
+		"│ NAME          Default Workspace",
+		"┌─ CURRENT GOALS ",
+		"Ship visual TUI",
+		"┌─ PROJECT PRS + CI ",
+		"odin-core acme/odin-os#42 state=open ci=not_wired title=Visual TUI",
+		"┌─ APPROVALS WAITING ",
+		"┌─ ODIN LOGS ",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+		}
+	}
+}
+
+func writeLifecyclePrometheusQueryResponse(t *testing.T, w http.ResponseWriter, query string) {
+	t.Helper()
+
+	var result []any
+	switch query {
+	case "odin_os_health_score":
+		result = []any{map[string]any{"metric": map[string]string{}, "value": []any{1714521600.0, "94"}}}
+	case "odin_os_telemetry_stale":
+		result = []any{map[string]any{"metric": map[string]string{}, "value": []any{1714521600.0, "0"}}}
+	case "odin_os_status":
+		result = []any{map[string]any{"metric": map[string]string{"status": "healthy"}, "value": []any{1714521600.0, "1"}}}
+	case "odin_os_lifecycle_phase":
+		result = []any{map[string]any{"metric": map[string]string{"phase": "run"}, "value": []any{1714521600.0, "1"}}}
+	case "odin_active_runs", "odin_blocked_items", "odin_approvals_waiting", "odin_review_queue_items", "odin_failed_work_items", "odin_recovery_recommendations":
+		result = []any{map[string]any{"metric": map[string]string{}, "value": []any{1714521600.0, "0"}}}
+	default:
+		t.Fatalf("unexpected prometheus query %q", query)
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status": "success",
+		"data": map[string]any{
+			"resultType": "vector",
+			"result":     result,
+		},
+	})
 }
 
 func TestRunOverviewJSONUsesCanonicalView(t *testing.T) {

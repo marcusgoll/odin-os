@@ -97,7 +97,7 @@ var (
 	serveInitialHealthRetry   = 1 * time.Second
 	serveHealthConfig         = healthsvc.DefaultConfig()
 	serveListen               = net.Listen
-	runTUI                    = tui.Run
+	runTUI                    = runTUICommand
 )
 
 type serveLoopConfig struct {
@@ -315,7 +315,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	case "capabilities":
 		return runCapabilities(ctx, app, args[1:], stdout)
 	case "tui":
-		return runTUI(ctx, args[1:], stdout)
+		return runTUI(ctx, app, args[1:], stdout)
 	case "status":
 		return runStatus(ctx, app, cfg, args[1:], stdout)
 	case "legacy":
@@ -474,6 +474,135 @@ func runRepl(ctx context.Context, app bootstrap.App, stdin io.Reader, stdout io.
 		return err
 	}
 	return nil
+}
+
+func runTUICommand(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	return tui.RunWithProvider(ctx, args, stdout, tuiModelProvider{app: app})
+}
+
+type tuiModelProvider struct {
+	app bootstrap.App
+}
+
+func (provider tuiModelProvider) EnrichModel(ctx context.Context, model *tui.Model) error {
+	state, err := loadCLIState(provider.app)
+	if err != nil {
+		return err
+	}
+	readinessStatus, healthStatus := overviewRuntimeStatus(ctx, provider.app)
+	binaryPath, _ := os.Executable()
+	view, err := clioverview.Service{
+		Store:            provider.app.Store,
+		Registry:         provider.app.Registry,
+		RegistrySnapshot: provider.app.RegistrySnapshot,
+		ReadinessStatus:  readinessStatus,
+		HealthStatus:     healthStatus,
+		BinaryPath:       binaryPath,
+		SourceRoot:       provider.app.RepoRoot,
+		ReviewQueueProjection: func(ctx context.Context) (reviewqueue.Projection, error) {
+			return readReviewQueueProjection(ctx, provider.app)
+		},
+	}.Build(ctx, state.Scope)
+	if err != nil {
+		return err
+	}
+
+	model.Name = firstNonEmpty(view.Workspace.Name, view.Workspace.WorkspaceKey, "odin")
+	if len(view.Observability.ActiveRuns) > 0 {
+		model.ActiveRuns = len(view.Observability.ActiveRuns)
+	}
+	for _, run := range view.Observability.ActiveRuns {
+		model.Agents = append(model.Agents, tui.AgentRow{
+			Name:    firstNonEmpty(run.Executor, stringPtrValue(run.CompanionKey), fmt.Sprintf("run-%d", run.RunID)),
+			Task:    firstNonEmpty(run.WorkItemKey, fmt.Sprintf("task-%d", run.TaskID)),
+			Project: run.ProjectKey,
+			Status:  run.Status,
+		})
+	}
+	for _, approval := range view.Approvals {
+		model.Approvals = append(model.Approvals, tui.ApprovalRow{
+			ID:       approval.ApprovalID,
+			Task:     firstNonEmpty(approval.WorkItemKey, fmt.Sprintf("task-%d", approval.TaskID)),
+			Project:  approval.ProjectKey,
+			Status:   approval.Status,
+			Resolver: approval.ResolverSupport,
+		})
+	}
+	if len(view.Approvals) > 0 {
+		model.ApprovalsWaiting = len(view.Approvals)
+	}
+
+	goals, err := provider.app.Store.ListGoals(ctx, sqlite.ListGoalsParams{})
+	if err != nil {
+		return err
+	}
+	for _, goal := range goals {
+		if goal.Status == sqlite.GoalStatusCompleted {
+			continue
+		}
+		currentRun := ""
+		if goal.CurrentRunID != nil {
+			currentRun = fmt.Sprintf("%d", *goal.CurrentRunID)
+		}
+		model.Goals = append(model.Goals, tui.GoalRow{
+			ID:         goal.ID,
+			Title:      goal.Title,
+			Status:     string(goal.Status),
+			CurrentRun: currentRun,
+		})
+		if len(model.Goals) >= 6 {
+			break
+		}
+	}
+
+	handoffs, err := provider.app.Store.ListPullRequestHandoffs(ctx, sqlite.ListPullRequestHandoffsParams{})
+	if err != nil {
+		return err
+	}
+	projectNames := make(map[int64]string)
+	for _, handoff := range handoffs {
+		if handoff.State == "closed" && handoff.ReviewState == "merged" {
+			continue
+		}
+		if _, ok := projectNames[handoff.ProjectID]; !ok {
+			project, err := provider.app.Store.GetProject(ctx, handoff.ProjectID)
+			if err == nil {
+				projectNames[handoff.ProjectID] = firstNonEmpty(project.Key, project.Name)
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		model.PullRequests = append(model.PullRequests, tui.PullRequestRow{
+			Project: firstNonEmpty(projectNames[handoff.ProjectID], fmt.Sprintf("project-%d", handoff.ProjectID)),
+			Repo:    handoff.Repo,
+			Number:  handoff.Number,
+			Title:   handoff.Title,
+			State:   firstNonEmpty(handoff.State, handoff.ReviewState),
+			CI:      "not_wired",
+			URL:     handoff.URL,
+		})
+		if len(model.PullRequests) >= 6 {
+			break
+		}
+	}
+	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func stringPtrValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func runOverview(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
