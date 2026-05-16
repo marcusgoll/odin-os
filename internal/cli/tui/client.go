@@ -19,7 +19,12 @@ var ErrUnavailableTelemetry = errors.New("unavailable telemetry")
 var defaultHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 const recentLogsQuery = `{job="docker-containers"} |= "odin"`
-const clearScreen = "\x1b[H\x1b[2J"
+
+const (
+	enterAlternateScreen = "\x1b[?1049h\x1b[?25l"
+	exitAlternateScreen  = "\x1b[?25h\x1b[?1049l"
+	clearScreen          = "\x1b[2J\x1b[H"
+)
 
 type Client struct {
 	PrometheusURL string
@@ -69,6 +74,15 @@ func RunWithProvider(ctx context.Context, args []string, stdout io.Writer, provi
 }
 
 func runContinuous(ctx context.Context, client Client, stdout io.Writer, interval time.Duration, clear bool) error {
+	if clear {
+		if _, err := io.WriteString(stdout, enterAlternateScreen); err != nil {
+			return err
+		}
+		defer func() {
+			_, _ = io.WriteString(stdout, exitAlternateScreen)
+		}()
+	}
+
 	for {
 		if err := renderFrame(ctx, client, stdout, clear); err != nil {
 			return err

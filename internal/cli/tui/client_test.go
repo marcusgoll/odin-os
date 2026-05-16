@@ -52,7 +52,7 @@ func TestRunContinuousModeRefreshesUntilContextCanceled(t *testing.T) {
 	}
 }
 
-func TestRunContinuousModeClearsScreenByDefault(t *testing.T) {
+func TestRunContinuousModeUsesAlternateScreenByDefault(t *testing.T) {
 	t.Parallel()
 
 	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,8 +81,12 @@ func TestRunContinuousModeClearsScreenByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if output := writer.String(); !strings.HasPrefix(output, "\x1b[H\x1b[2J") {
-		t.Fatalf("Run() output = %q, want clear-screen prefix", output)
+	output := writer.String()
+	if !strings.HasPrefix(output, enterAlternateScreen+clearScreen) {
+		t.Fatalf("Run() output = %q, want alternate-screen and clear-screen prefix", output)
+	}
+	if !strings.HasSuffix(output, exitAlternateScreen) {
+		t.Fatalf("Run() output = %q, want alternate-screen restore suffix", output)
 	}
 }
 
