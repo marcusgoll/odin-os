@@ -485,51 +485,61 @@ type tuiModelProvider struct {
 }
 
 func (provider tuiModelProvider) EnrichModel(ctx context.Context, model *tui.Model) error {
-	state, err := loadCLIState(provider.app)
-	if err != nil {
-		return err
-	}
-	readinessStatus, healthStatus := overviewRuntimeStatus(ctx, provider.app)
-	binaryPath, _ := os.Executable()
-	view, err := clioverview.Service{
-		Store:            provider.app.Store,
-		Registry:         provider.app.Registry,
-		RegistrySnapshot: provider.app.RegistrySnapshot,
-		ReadinessStatus:  readinessStatus,
-		HealthStatus:     healthStatus,
-		BinaryPath:       binaryPath,
-		SourceRoot:       provider.app.RepoRoot,
-		ReviewQueueProjection: func(ctx context.Context) (reviewqueue.Projection, error) {
-			return readReviewQueueProjection(ctx, provider.app)
-		},
-	}.Build(ctx, state.Scope)
-	if err != nil {
+	workspaceView, err := projections.GetWorkspaceOverviewView(ctx, provider.app.Store.DB(), workspaces.DefaultWorkspaceKey)
+	if err == nil {
+		model.Name = firstNonEmpty(workspaceView.Name, workspaceView.WorkspaceKey, "odin")
+		if model.ActiveRuns == 0 {
+			model.ActiveRuns = workspaceView.ActiveRunCount
+		}
+		if model.ApprovalsWaiting == 0 {
+			model.ApprovalsWaiting = workspaceView.PendingApprovalCount
+		}
+		if model.BlockedItems == 0 {
+			model.BlockedItems = workspaceView.BlockedWorkItemCount
+		}
+	} else if errors.Is(err, sql.ErrNoRows) {
+		model.Name = "odin"
+	} else {
 		return err
 	}
 
-	model.Name = firstNonEmpty(view.Workspace.Name, view.Workspace.WorkspaceKey, "odin")
-	if len(view.Observability.ActiveRuns) > 0 {
-		model.ActiveRuns = len(view.Observability.ActiveRuns)
+	activeRuns, err := projections.ListActiveRunViews(ctx, provider.app.Store.DB())
+	if err != nil {
+		return err
 	}
-	for _, run := range view.Observability.ActiveRuns {
+	if len(activeRuns) > 0 {
+		model.ActiveRuns = len(activeRuns)
+	}
+	for _, run := range activeRuns {
 		model.Agents = append(model.Agents, tui.AgentRow{
-			Name:    firstNonEmpty(run.Executor, stringPtrValue(run.CompanionKey), fmt.Sprintf("run-%d", run.RunID)),
-			Task:    firstNonEmpty(run.WorkItemKey, fmt.Sprintf("task-%d", run.TaskID)),
+			Name:    firstNonEmpty(run.Executor, fmt.Sprintf("run-%d", run.RunID)),
+			Task:    firstNonEmpty(run.TaskKey, fmt.Sprintf("task-%d", run.TaskID)),
 			Project: run.ProjectKey,
 			Status:  run.Status,
 		})
+		if len(model.Agents) >= 6 {
+			break
+		}
 	}
-	for _, approval := range view.Approvals {
+
+	approvals, err := projections.ListPendingApprovalViews(ctx, provider.app.Store.DB())
+	if err != nil {
+		return err
+	}
+	if len(approvals) > 0 {
+		model.ApprovalsWaiting = len(approvals)
+	}
+	for _, approval := range approvals {
 		model.Approvals = append(model.Approvals, tui.ApprovalRow{
 			ID:       approval.ApprovalID,
-			Task:     firstNonEmpty(approval.WorkItemKey, fmt.Sprintf("task-%d", approval.TaskID)),
+			Task:     firstNonEmpty(approval.TaskKey, fmt.Sprintf("task-%d", approval.TaskID)),
 			Project:  approval.ProjectKey,
 			Status:   approval.Status,
-			Resolver: approval.ResolverSupport,
+			Resolver: "unknown",
 		})
-	}
-	if len(view.Approvals) > 0 {
-		model.ApprovalsWaiting = len(view.Approvals)
+		if len(model.Approvals) >= 6 {
+			break
+		}
 	}
 
 	goals, err := provider.app.Store.ListGoals(ctx, sqlite.ListGoalsParams{})
@@ -596,13 +606,6 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func stringPtrValue(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
 }
 
 func runOverview(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
