@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"odin-os/internal/runtime/browserprofilearchive"
 	"odin-os/internal/runtime/browserprofileartifacts"
 	"odin-os/internal/store/sqlite"
 )
@@ -112,6 +113,61 @@ func Materialize(ctx context.Context, params Params) (Result, error) {
 		MaterializationPath:  materializationRel,
 		MaterializedFilePath: materializedRel,
 		ReadOnly:             runtime.GOOS != "windows",
+	}
+	if _, err := params.Store.RecordBrowserProfileMaterialized(ctx, sqlite.RecordBrowserProfileMaterializedParams{
+		ID:                   params.Artifact.ID,
+		MaterializationPath:  result.MaterializationPath,
+		MaterializedFilePath: result.MaterializedFilePath,
+		Actor:                params.Actor,
+		Reason:               params.Reason,
+	}); err != nil {
+		_, _ = cleanupMaterializationPath(materializationAbs)
+		return Result{}, err
+	}
+	return result, nil
+}
+
+func MaterializeDirectory(ctx context.Context, params Params) (Result, error) {
+	if params.Store == nil {
+		return Result{}, fmt.Errorf("browser profile materialization store is required")
+	}
+	if params.KeyProvider == nil {
+		return Result{}, fmt.Errorf("browser profile materialization key provider is required")
+	}
+	if params.Artifact.ID <= 0 {
+		return Result{}, fmt.Errorf("browser encrypted profile artifact id must be positive")
+	}
+	materializationAbs, materializationRel, err := normalizeMaterializationPath(params.ODINRoot, params.TargetDir)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := rejectMaterializationMetadata(params.Artifact.ProfilePath, params.Artifact.EncryptedArtifactPath, materializationRel); err != nil {
+		return Result{}, err
+	}
+	if _, err := os.Stat(materializationAbs); err == nil {
+		return Result{}, fmt.Errorf("browser profile materialization path already exists")
+	} else if !os.IsNotExist(err) {
+		return Result{}, fmt.Errorf("browser profile materialization path stat: %w", err)
+	}
+	plaintext, err := browserprofileartifacts.Read(browserprofileartifacts.ReadParams{
+		ODINRoot:     params.ODINRoot,
+		ArtifactPath: params.Artifact.EncryptedArtifactPath,
+		KeyProvider:  params.KeyProvider,
+	})
+	if err != nil {
+		return Result{}, fmt.Errorf("read artifact for browser profile materialization: %w", err)
+	}
+	if err := browserprofilearchive.Unpack(plaintext, materializationAbs); err != nil {
+		_, _ = cleanupMaterializationPath(materializationAbs)
+		return Result{}, fmt.Errorf("browser profile materialization unpack directory archive: %w", err)
+	}
+	result := Result{
+		ArtifactID:           params.Artifact.ID,
+		SessionID:            params.Artifact.SessionID,
+		ArtifactPath:         params.Artifact.EncryptedArtifactPath,
+		MaterializationPath:  materializationRel,
+		MaterializedFilePath: materializationRel,
+		ReadOnly:             false,
 	}
 	if _, err := params.Store.RecordBrowserProfileMaterialized(ctx, sqlite.RecordBrowserProfileMaterializedParams{
 		ID:                   params.Artifact.ID,

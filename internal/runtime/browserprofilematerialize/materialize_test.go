@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"odin-os/internal/runtime/browserprofilearchive"
 	"odin-os/internal/runtime/browserprofileartifacts"
 	"odin-os/internal/runtime/browserprofilecrypto"
 	"odin-os/internal/runtime/browserprofilekeys"
@@ -115,6 +116,55 @@ func TestMaterializeDecryptsFixtureArtifactIntoReadOnlyRuntimeDirAndCleanupPrese
 	}
 	if cleanup.Removed {
 		t.Fatalf("cleanup.Removed = true after second cleanup, want false")
+	}
+}
+
+func TestMaterializeDirectoryDecryptsArchiveIntoWritableRuntimeDir(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store := openMaterializeTestStore(t)
+	session := createMaterializeTestSession(t, ctx, store)
+	t.Setenv(browserprofilekeys.EnvKeyB64, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x71}, browserprofilecrypto.KeySize)))
+
+	source := filepath.Join(t.TempDir(), "source-profile")
+	if err := os.MkdirAll(filepath.Join(source, "Default"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "Default", "Preferences"), []byte("managed-profile"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := browserprofilearchive.Pack(source)
+	if err != nil {
+		t.Fatalf("Pack() error = %v", err)
+	}
+	artifact := writeMaterializeTestArtifact(t, ctx, store, root, session, archive, "directory-roundtrip.enc")
+
+	target := "runtime/browser-profile-materializations/directory-proof"
+	result, err := MaterializeDirectory(ctx, Params{
+		Store:       store,
+		ODINRoot:    root,
+		Artifact:    artifact,
+		TargetDir:   target,
+		KeyProvider: browserprofilekeys.LoadFromEnv,
+		Actor:       "test",
+		Reason:      "test materialized browser profile directory",
+	})
+	if err != nil {
+		t.Fatalf("MaterializeDirectory() error = %v", err)
+	}
+	if result.MaterializationPath != target || result.MaterializedFilePath != target || result.ReadOnly {
+		t.Fatalf("result = %+v, want writable directory materialization", result)
+	}
+	materializedPreference := filepath.Join(root, filepath.FromSlash(target), "Default", "Preferences")
+	got, err := os.ReadFile(materializedPreference)
+	if err != nil {
+		t.Fatalf("ReadFile(materialized preference) error = %v", err)
+	}
+	if string(got) != "managed-profile" {
+		t.Fatalf("materialized preference = %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(target), "Default", "Session"), []byte("updated"), 0o600); err != nil {
+		t.Fatalf("WriteFile(updated profile state) error = %v", err)
 	}
 }
 

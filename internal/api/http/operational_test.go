@@ -1494,6 +1494,158 @@ func TestOperationalHandlerBrowserSessionHandoffCompleteJSONVerifiesSessionAndRe
 	}
 }
 
+func TestOperationalHandlerBrowserSessionHandoffViewerRequiresAdminAndActiveRunner(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+	now := time.Date(2026, 5, 16, 22, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+	store.BrowserSessionHandoffID = func() (string, error) { return "viewer-handoff", nil }
+
+	session, err := store.CreateBrowserSession(ctx, sqlite.CreateBrowserSessionParams{
+		Name:           "x viewer",
+		Domain:         "x.com",
+		PermissionTier: sqlite.BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession() error = %v", err)
+	}
+	loginRequest, err := store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest() error = %v", err)
+	}
+	runner, err := store.CreateBrowserHandoffRunner(ctx, sqlite.CreateBrowserHandoffRunnerParams{
+		SessionID:      session.ID,
+		LoginRequestID: loginRequest.ID,
+		HandoffID:      loginRequest.HandoffID,
+		ExpiresAt:      loginRequest.ExpiresAt,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserHandoffRunner() error = %v", err)
+	}
+	upstreamSawAdminHeader := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "" || request.Header.Get("X-Odin-Admin-Token") != "" {
+			upstreamSawAdminHeader = true
+		}
+		_, _ = fmt.Fprintf(writer, "novnc upstream path=%s query=%s", request.URL.Path, request.URL.RawQuery)
+	}))
+	defer upstream.Close()
+	viewerURL := upstream.URL + "/session/novnc-proof"
+	runnerRef := "novnc-proof"
+	if _, err := store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
+		ID:        runner.ID,
+		Status:    sqlite.BrowserHandoffRunnerStatusStarted,
+		ViewerURL: &viewerURL,
+		RunnerID:  &runnerRef,
+		Actor:     "test",
+		Reason:    "test started protected viewer",
+	}); err != nil {
+		t.Fatalf("UpdateBrowserHandoffRunnerStatus(started) error = %v", err)
+	}
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Store:      store,
+		AdminToken: "secret",
+	}))
+	defer server.Close()
+
+	unauth, err := http.Get(server.URL + "/browser/session/handoff/viewer?handoff_id=" + url.QueryEscape(loginRequest.HandoffID) + "&format=json")
+	if err != nil {
+		t.Fatalf("GET viewer unauth error = %v", err)
+	}
+	defer unauth.Body.Close()
+	if unauth.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET viewer unauth status = %d, want %d", unauth.StatusCode, http.StatusUnauthorized)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/browser/session/handoff/viewer?handoff_id="+url.QueryEscape(loginRequest.HandoffID)+"&format=json", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer secret")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET viewer json error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("GET viewer json status = %d body=%s, want %d", res.StatusCode, string(body), http.StatusOK)
+	}
+	var payload struct {
+		Viewer struct {
+			HandoffID          string `json:"handoff_id"`
+			RunnerID           int64  `json:"runner_id"`
+			ProtectedViewerURL string `json:"protected_viewer_url"`
+			ProxyViewerURL     string `json:"proxy_viewer_url"`
+			UpstreamViewerURL  string `json:"upstream_viewer_url"`
+			AllowedActions     string `json:"allowed_actions"`
+		} `json:"viewer"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode viewer payload error = %v", err)
+	}
+	if payload.Viewer.HandoffID != loginRequest.HandoffID || payload.Viewer.RunnerID != runner.ID || payload.Viewer.UpstreamViewerURL != viewerURL {
+		t.Fatalf("viewer payload = %+v, want linked active runner", payload.Viewer)
+	}
+	if payload.Viewer.ProtectedViewerURL != "/browser/session/handoff/viewer?handoff_id="+url.QueryEscape(loginRequest.HandoffID) || payload.Viewer.ProxyViewerURL != "/browser/session/handoff/viewer/proxy/?handoff_id="+url.QueryEscape(loginRequest.HandoffID) || payload.Viewer.AllowedActions != "manual_login_only" {
+		t.Fatalf("viewer payload = %+v, want protected route and manual-login-only actions", payload.Viewer)
+	}
+
+	htmlReq, err := http.NewRequest(http.MethodGet, server.URL+"/browser/session/handoff/viewer?handoff_id="+url.QueryEscape(loginRequest.HandoffID), nil)
+	if err != nil {
+		t.Fatalf("NewRequest(html) error = %v", err)
+	}
+	htmlReq.Header.Set("Authorization", "Bearer secret")
+	htmlReq.Header.Set("Accept", "text/html")
+	htmlRes, err := http.DefaultClient.Do(htmlReq)
+	if err != nil {
+		t.Fatalf("GET viewer html error = %v", err)
+	}
+	defer htmlRes.Body.Close()
+	if htmlRes.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(htmlRes.Body)
+		t.Fatalf("GET viewer html status = %d body=%s, want %d", htmlRes.StatusCode, string(body), http.StatusOK)
+	}
+	htmlBody, err := io.ReadAll(htmlRes.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(viewer html) error = %v", err)
+	}
+	if strings.Contains(string(htmlBody), upstream.URL) || !strings.Contains(string(htmlBody), payload.Viewer.ProxyViewerURL) {
+		t.Fatalf("viewer html body = %s, want Odin proxy URL without raw upstream", string(htmlBody))
+	}
+	if len(htmlRes.Cookies()) == 0 {
+		t.Fatalf("viewer html response missing protected viewer cookie")
+	}
+
+	proxyReq, err := http.NewRequest(http.MethodGet, server.URL+payload.Viewer.ProxyViewerURL, nil)
+	if err != nil {
+		t.Fatalf("NewRequest(proxy) error = %v", err)
+	}
+	for _, cookie := range htmlRes.Cookies() {
+		proxyReq.AddCookie(cookie)
+	}
+	proxyRes, err := http.DefaultClient.Do(proxyReq)
+	if err != nil {
+		t.Fatalf("GET viewer proxy error = %v", err)
+	}
+	defer proxyRes.Body.Close()
+	proxyBody, err := io.ReadAll(proxyRes.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(proxy) error = %v", err)
+	}
+	if proxyRes.StatusCode != http.StatusOK || !strings.Contains(string(proxyBody), "path=/session/novnc-proof") {
+		t.Fatalf("viewer proxy status=%d body=%s, want upstream content through Odin route", proxyRes.StatusCode, string(proxyBody))
+	}
+	if upstreamSawAdminHeader {
+		t.Fatalf("viewer proxy forwarded Odin admin headers to upstream")
+	}
+}
+
 func TestOperationalHandlerBrowserSessionHandoffCompleteFormReturnsEscapedHTML(t *testing.T) {
 	ctx := context.Background()
 	store := openStore(t)

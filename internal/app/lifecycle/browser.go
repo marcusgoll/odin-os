@@ -13,6 +13,7 @@ import (
 	commands "odin-os/internal/cli/commands"
 	browserexecutor "odin-os/internal/executors/browser"
 	"odin-os/internal/runtime/browserhandoff"
+	"odin-os/internal/runtime/browserprofilearchive"
 	"odin-os/internal/runtime/browserprofileartifacts"
 	"odin-os/internal/runtime/browserprofilekeys"
 	"odin-os/internal/runtime/browserprofilematerialize"
@@ -646,6 +647,37 @@ func runBrowserSessionProfileArtifact(ctx context.Context, app bootstrap.App, co
 		}
 		_, err = fmt.Fprintf(stdout, "browser_session_profile_artifact=%d session=%d status=%s path=%s key_ref=%s\n", view.ID, view.SessionID, view.Status, view.ArtifactPath, view.EncryptionKeyRef)
 		return err
+	case "create-directory":
+		session, err := app.Store.GetBrowserSession(ctx, command.SessionID)
+		if err != nil {
+			return err
+		}
+		artifactPath, err := browserSessionFixtureArtifactPath(command.ArtifactName)
+		if err != nil {
+			return err
+		}
+		archive, err := browserprofilearchive.Pack(command.SourceDir)
+		if err != nil {
+			return err
+		}
+		artifact, err := browserprofileartifacts.Write(ctx, browserprofileartifacts.Params{
+			Store:        app.Store,
+			ODINRoot:     app.RuntimeRoot,
+			SessionID:    session.ID,
+			ProfilePath:  session.ProfilePath,
+			Plaintext:    archive,
+			ArtifactPath: artifactPath,
+			KeyProvider:  browserprofilekeys.LoadFromEnv,
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionProfileArtifactView(artifact)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileArtifactEnvelope{Artifact: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_profile_artifact=%d session=%d status=%s path=%s key_ref=%s\n", view.ID, view.SessionID, view.Status, view.ArtifactPath, view.EncryptionKeyRef)
+		return err
 	case "list":
 		artifacts, err := app.Store.ListBrowserEncryptedProfileArtifacts(ctx, sqlite.ListBrowserEncryptedProfileArtifactsParams{SessionID: command.SessionID})
 		if err != nil {
@@ -707,6 +739,29 @@ func runBrowserSessionProfileArtifact(ctx context.Context, app bootstrap.App, co
 			KeyProvider: browserprofilekeys.LoadFromEnv,
 			Actor:       "operator",
 			Reason:      "operator materialized encrypted profile artifact read-only",
+		})
+		if err != nil {
+			return err
+		}
+		view := newBrowserSessionProfileMaterializationView(result)
+		if command.JSON {
+			return commands.WriteJSON(stdout, browserSessionProfileMaterializationEnvelope{Materialization: view})
+		}
+		_, err = fmt.Fprintf(stdout, "browser_session_profile_materialization artifact=%d session=%d path=%s file=%s read_only=%t\n", view.ArtifactID, view.SessionID, view.MaterializationPath, view.MaterializedFilePath, view.ReadOnly)
+		return err
+	case "materialize-directory":
+		artifact, err := app.Store.GetBrowserEncryptedProfileArtifact(ctx, command.ID)
+		if err != nil {
+			return err
+		}
+		result, err := browserprofilematerialize.MaterializeDirectory(ctx, browserprofilematerialize.Params{
+			Store:       app.Store,
+			ODINRoot:    app.RuntimeRoot,
+			Artifact:    artifact,
+			TargetDir:   command.TargetDir,
+			KeyProvider: browserprofilekeys.LoadFromEnv,
+			Actor:       "operator",
+			Reason:      "operator materialized encrypted browser profile directory",
 		})
 		if err != nil {
 			return err
@@ -927,24 +982,35 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 	if fixtureRunner, ok := selectedRunner.(browserhandoff.FixtureRunner); ok {
 		return startBrowserSessionRunnerWithSupervisor(ctx, app, runner, handoff, fixtureRunner)
 	}
+	managedProfile, err := materializeBrowserSessionRunnerManagedProfile(ctx, app, runner.ID, handoff.Session, selectedRunner)
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, err
+	}
 	response, err := selectedRunner.Start(ctx, browserhandoff.StartRequest{
-		SessionID:      handoff.Session.ID,
-		LoginRequestID: handoff.LoginRequest.ID,
-		HandoffID:      handoff.HandoffID,
-		ProfilePath:    handoff.Session.ProfilePath,
-		AllowedDomain:  handoff.Session.Domain,
-		TimeoutSeconds: browserSessionRunnerTimeoutSeconds(handoff.LoginRequest.ExpiresAt),
-		BindAddr:       browserSessionStringPtrValue(runner.BindAddr),
-		PrivateBaseURL: browserSessionStringPtrValue(runner.PrivateBaseURL),
-		PublicBaseURL:  browserSessionStringPtrValue(runner.PublicBaseURL),
+		SessionID:         handoff.Session.ID,
+		LoginRequestID:    handoff.LoginRequest.ID,
+		HandoffID:         handoff.HandoffID,
+		ProfilePath:       handoff.Session.ProfilePath,
+		BrowserProfileDir: managedProfile.AbsolutePath,
+		AllowedDomain:     handoff.Session.Domain,
+		TimeoutSeconds:    browserSessionRunnerTimeoutSeconds(handoff.LoginRequest.ExpiresAt),
+		BindAddr:          browserSessionStringPtrValue(runner.BindAddr),
+		PrivateBaseURL:    browserSessionStringPtrValue(runner.PrivateBaseURL),
+		PublicBaseURL:     browserSessionStringPtrValue(runner.PublicBaseURL),
 	})
 	if err != nil {
+		cleanupBrowserSessionRunnerManagedProfile(ctx, app, managedProfile, "browser handoff runner start failed")
 		return sqlite.BrowserHandoffRunner{}, err
 	}
 	switch response.Status {
 	case browserhandoff.StatusStarted:
 		return updateBrowserSessionRunnerStartedFromResponse(ctx, app, runner, response, "browser handoff runner started")
 	case browserhandoff.StatusCompleted:
+		if err := promoteBrowserSessionRunnerManagedProfile(ctx, app, managedProfile, runner.ID); err != nil {
+			cleanupBrowserSessionRunnerManagedProfile(ctx, app, managedProfile, "browser handoff runner profile promotion failed")
+			return sqlite.BrowserHandoffRunner{}, err
+		}
+		cleanupBrowserSessionRunnerManagedProfile(ctx, app, managedProfile, "browser handoff runner completed")
 		started, err := updateBrowserSessionRunnerStartedFromResponse(ctx, app, runner, response, "browser handoff runner started")
 		if err != nil {
 			return sqlite.BrowserHandoffRunner{}, err
@@ -956,6 +1022,7 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 			Reason: "browser handoff runner completed",
 		})
 	case browserhandoff.StatusNotImplemented:
+		cleanupBrowserSessionRunnerManagedProfile(ctx, app, managedProfile, "browser handoff runner not implemented")
 		errorCode := response.ErrorCode
 		if strings.TrimSpace(errorCode) == "" {
 			errorCode = "not_implemented"
@@ -973,6 +1040,7 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 			Reason:       "browser handoff StubRunner returned not_implemented",
 		})
 	case browserhandoff.StatusFailed:
+		cleanupBrowserSessionRunnerManagedProfile(ctx, app, managedProfile, "browser handoff runner failed")
 		targetRunner := runner
 		if browserSessionRunnerResponseHasStartMetadata(response) {
 			started, err := updateBrowserSessionRunnerStartedFromResponse(ctx, app, runner, response, "browser handoff runner started before failure")
@@ -1000,6 +1068,7 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 			Reason:       "browser handoff fixture runner failed",
 		})
 	case browserhandoff.StatusExpired:
+		cleanupBrowserSessionRunnerManagedProfile(ctx, app, managedProfile, "browser handoff runner expired")
 		targetRunner := runner
 		if browserSessionRunnerResponseHasStartMetadata(response) {
 			started, err := updateBrowserSessionRunnerStartedFromResponse(ctx, app, runner, response, "browser handoff runner started before timeout")
@@ -1122,6 +1191,90 @@ func updateBrowserSessionRunnerStartedFromResponse(ctx context.Context, app boot
 		PrivateBaseURL: nonEmptyBrowserSessionStringPtr(response.PrivateBaseURL),
 		Actor:          "operator",
 		Reason:         reason,
+	})
+}
+
+type browserSessionRunnerManagedProfile struct {
+	Artifact     sqlite.BrowserEncryptedProfileArtifact
+	TargetDir    string
+	RelativePath string
+	AbsolutePath string
+}
+
+func materializeBrowserSessionRunnerManagedProfile(ctx context.Context, app bootstrap.App, runnerID int64, session sqlite.BrowserSession, selectedRunner browserhandoff.Runner) (browserSessionRunnerManagedProfile, error) {
+	if _, ok := selectedRunner.(browserhandoff.NoVNCRunner); !ok {
+		return browserSessionRunnerManagedProfile{}, nil
+	}
+	if session.ProfileStoragePolicy != sqlite.BrowserSessionProfileStoragePolicyEncryptedRequired {
+		return browserSessionRunnerManagedProfile{}, nil
+	}
+	artifacts, err := app.Store.ListBrowserEncryptedProfileArtifacts(ctx, sqlite.ListBrowserEncryptedProfileArtifactsParams{
+		SessionID: session.ID,
+		Status:    sqlite.BrowserEncryptedProfileArtifactStatusEncrypted,
+	})
+	if err != nil {
+		return browserSessionRunnerManagedProfile{}, err
+	}
+	if len(artifacts) == 0 {
+		return browserSessionRunnerManagedProfile{}, nil
+	}
+	artifact := artifacts[len(artifacts)-1]
+	targetDir := fmt.Sprintf("runtime/browser-profile-materializations/runner-%d-artifact-%d", runnerID, artifact.ID)
+	result, err := browserprofilematerialize.MaterializeDirectory(ctx, browserprofilematerialize.Params{
+		Store:       app.Store,
+		ODINRoot:    app.RuntimeRoot,
+		Artifact:    artifact,
+		TargetDir:   targetDir,
+		KeyProvider: browserprofilekeys.LoadFromEnv,
+		Actor:       "operator",
+		Reason:      "browser handoff runner materialized encrypted browser profile directory",
+	})
+	if err != nil {
+		return browserSessionRunnerManagedProfile{}, err
+	}
+	return browserSessionRunnerManagedProfile{
+		Artifact:     artifact,
+		TargetDir:    targetDir,
+		RelativePath: result.MaterializationPath,
+		AbsolutePath: filepath.Join(app.RuntimeRoot, filepath.FromSlash(result.MaterializationPath)),
+	}, nil
+}
+
+func promoteBrowserSessionRunnerManagedProfile(ctx context.Context, app bootstrap.App, profile browserSessionRunnerManagedProfile, runnerID int64) error {
+	if profile.Artifact.ID <= 0 || strings.TrimSpace(profile.AbsolutePath) == "" {
+		return nil
+	}
+	archive, err := browserprofilearchive.Pack(profile.AbsolutePath)
+	if err != nil {
+		return err
+	}
+	artifactPath, err := browserSessionFixtureArtifactPath(fmt.Sprintf("runner-%d-profile-%d", runnerID, time.Now().UTC().UnixNano()))
+	if err != nil {
+		return err
+	}
+	_, err = browserprofileartifacts.Write(ctx, browserprofileartifacts.Params{
+		Store:        app.Store,
+		ODINRoot:     app.RuntimeRoot,
+		SessionID:    profile.Artifact.SessionID,
+		ProfilePath:  profile.Artifact.ProfilePath,
+		Plaintext:    archive,
+		ArtifactPath: artifactPath,
+		KeyProvider:  browserprofilekeys.LoadFromEnv,
+	})
+	return err
+}
+
+func cleanupBrowserSessionRunnerManagedProfile(ctx context.Context, app bootstrap.App, profile browserSessionRunnerManagedProfile, reason string) {
+	if profile.Artifact.ID <= 0 || strings.TrimSpace(profile.TargetDir) == "" {
+		return
+	}
+	_, _ = browserprofilematerialize.Cleanup(ctx, browserprofilematerialize.CleanupParams{
+		Store:     app.Store,
+		ODINRoot:  app.RuntimeRoot,
+		Artifact:  profile.Artifact,
+		TargetDir: profile.TargetDir,
+		Actor:     "operator",
+		Reason:    reason,
 	})
 }
 

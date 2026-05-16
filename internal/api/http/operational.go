@@ -13,6 +13,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
@@ -240,6 +241,12 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 	})
 	mux.HandleFunc("GET /browser/session/handoff", func(writer http.ResponseWriter, request *http.Request) {
 		handleBrowserSessionHandoffShow(writer, request, deps)
+	})
+	mux.HandleFunc("GET /browser/session/handoff/viewer", func(writer http.ResponseWriter, request *http.Request) {
+		handleBrowserSessionHandoffViewer(writer, request, deps)
+	})
+	mux.HandleFunc("/browser/session/handoff/viewer/proxy/", func(writer http.ResponseWriter, request *http.Request) {
+		handleBrowserSessionHandoffViewerProxy(writer, request, deps)
 	})
 	mux.HandleFunc("POST /browser/session/handoff/complete", func(writer http.ResponseWriter, request *http.Request) {
 		handleBrowserSessionHandoffComplete(writer, request, deps)
@@ -476,15 +483,16 @@ type browserSessionHandoffCompletionResponse struct {
 }
 
 type browserSessionHandoffView struct {
-	HandoffID      string `json:"handoff_id"`
-	LoginRequestID int64  `json:"login_request_id"`
-	SessionID      int64  `json:"session_id"`
-	SessionName    string `json:"session_name"`
-	Domain         string `json:"domain"`
-	AccountHint    string `json:"account_hint"`
-	ExpiresAt      string `json:"expires_at"`
-	Status         string `json:"status"`
-	AllowedActions string `json:"allowed_actions"`
+	HandoffID          string `json:"handoff_id"`
+	LoginRequestID     int64  `json:"login_request_id"`
+	SessionID          int64  `json:"session_id"`
+	SessionName        string `json:"session_name"`
+	Domain             string `json:"domain"`
+	AccountHint        string `json:"account_hint"`
+	ExpiresAt          string `json:"expires_at"`
+	Status             string `json:"status"`
+	AllowedActions     string `json:"allowed_actions"`
+	ProtectedViewerURL string `json:"protected_viewer_url,omitempty"`
 }
 
 type browserSessionHandoffCompletionView struct {
@@ -497,6 +505,22 @@ type browserSessionHandoffCompletionView struct {
 	SessionStatus      string `json:"session_status"`
 	LoginRequestStatus string `json:"login_request_status"`
 	CompletedAt        string `json:"completed_at"`
+	AllowedActions     string `json:"allowed_actions"`
+}
+
+type browserSessionHandoffViewerResponse struct {
+	Viewer browserSessionHandoffViewerView `json:"viewer"`
+}
+
+type browserSessionHandoffViewerView struct {
+	HandoffID          string `json:"handoff_id"`
+	LoginRequestID     int64  `json:"login_request_id"`
+	SessionID          int64  `json:"session_id"`
+	RunnerID           int64  `json:"runner_id"`
+	Status             string `json:"status"`
+	ProtectedViewerURL string `json:"protected_viewer_url"`
+	ProxyViewerURL     string `json:"proxy_viewer_url"`
+	UpstreamViewerURL  string `json:"upstream_viewer_url,omitempty"`
 	AllowedActions     string `json:"allowed_actions"`
 }
 
@@ -517,11 +541,114 @@ func handleBrowserSessionHandoffShow(writer http.ResponseWriter, request *http.R
 		return
 	}
 	view := newBrowserSessionHandoffView(handoff)
+	if runner, ok := activeBrowserSessionHandoffViewerRunner(request.Context(), deps.Store, handoff); ok {
+		view.ProtectedViewerURL = protectedBrowserSessionHandoffViewerURL(handoff.HandoffID)
+		_ = runner
+	}
 	if wantsBrowserSessionHandoffHTML(request) {
 		writeBrowserSessionHandoffHTML(writer, view)
 		return
 	}
 	writeJSON(writer, http.StatusOK, browserSessionHandoffResponse{Handoff: view})
+}
+
+func handleBrowserSessionHandoffViewer(writer http.ResponseWriter, request *http.Request, deps Dependencies) {
+	if statusCode, ok := authorizeAdmin(request, deps.AdminToken); !ok {
+		writeAdminAuthorizationError(writer, statusCode)
+		return
+	}
+	if deps.Store == nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "browser_handoff_viewer_unavailable", "browser session handoff store unavailable")
+		return
+	}
+	handoffID := strings.TrimSpace(request.URL.Query().Get("handoff_id"))
+	if handoffID == "" {
+		writeAPIError(writer, http.StatusBadRequest, "browser_handoff_id_required", "handoff_id is required")
+		return
+	}
+	handoff, err := deps.Store.GetBrowserSessionLoginHandoff(request.Context(), handoffID)
+	if err != nil {
+		statusCode, code := browserSessionHandoffErrorStatus(err)
+		writeAPIError(writer, statusCode, code, err.Error())
+		return
+	}
+	runner, ok := activeBrowserSessionHandoffViewerRunner(request.Context(), deps.Store, handoff)
+	if !ok || runner.ViewerURL == nil || strings.TrimSpace(*runner.ViewerURL) == "" {
+		writeAPIError(writer, http.StatusConflict, "browser_handoff_viewer_unavailable", "no active protected browser viewer is available for this handoff")
+		return
+	}
+	view := browserSessionHandoffViewerView{
+		HandoffID:          handoff.HandoffID,
+		LoginRequestID:     handoff.LoginRequest.ID,
+		SessionID:          handoff.Session.ID,
+		RunnerID:           runner.ID,
+		Status:             string(runner.Status),
+		ProtectedViewerURL: protectedBrowserSessionHandoffViewerURL(handoff.HandoffID),
+		ProxyViewerURL:     protectedBrowserSessionHandoffViewerProxyURL(handoff.HandoffID),
+		UpstreamViewerURL:  strings.TrimSpace(*runner.ViewerURL),
+		AllowedActions:     "manual_login_only",
+	}
+	if strings.EqualFold(strings.TrimSpace(request.URL.Query().Get("format")), "json") || strings.Contains(strings.ToLower(request.Header.Get("Accept")), "application/json") {
+		writeJSON(writer, http.StatusOK, browserSessionHandoffViewerResponse{Viewer: view})
+		return
+	}
+	setBrowserSessionViewerCookie(writer, handoff.HandoffID, deps.AdminToken, handoff.LoginRequest.ExpiresAt)
+	writeBrowserSessionViewerHTML(writer, view)
+}
+
+func handleBrowserSessionHandoffViewerProxy(writer http.ResponseWriter, request *http.Request, deps Dependencies) {
+	if deps.Store == nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "browser_handoff_viewer_unavailable", "browser session handoff store unavailable")
+		return
+	}
+	handoffID := strings.TrimSpace(request.URL.Query().Get("handoff_id"))
+	if handoffID == "" {
+		writeAPIError(writer, http.StatusBadRequest, "browser_handoff_id_required", "handoff_id is required")
+		return
+	}
+	if statusCode, ok := authorizeAdmin(request, deps.AdminToken); !ok {
+		if !validBrowserSessionViewerCookie(request, handoffID, deps.AdminToken) {
+			writeAdminAuthorizationError(writer, statusCode)
+			return
+		}
+	}
+	handoff, err := deps.Store.GetBrowserSessionLoginHandoff(request.Context(), handoffID)
+	if err != nil {
+		statusCode, code := browserSessionHandoffErrorStatus(err)
+		writeAPIError(writer, statusCode, code, err.Error())
+		return
+	}
+	runner, ok := activeBrowserSessionHandoffViewerRunner(request.Context(), deps.Store, handoff)
+	if !ok || runner.ViewerURL == nil || strings.TrimSpace(*runner.ViewerURL) == "" {
+		writeAPIError(writer, http.StatusConflict, "browser_handoff_viewer_unavailable", "no active protected browser viewer is available for this handoff")
+		return
+	}
+	upstream, err := url.Parse(strings.TrimSpace(*runner.ViewerURL))
+	if err != nil || upstream.Scheme == "" || upstream.Host == "" {
+		writeAPIError(writer, http.StatusConflict, "browser_handoff_viewer_invalid_upstream", "active browser viewer upstream is invalid")
+		return
+	}
+	proxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: upstream.Scheme, Host: upstream.Host})
+	originalDirector := proxy.Director
+	proxy.Director = func(outbound *http.Request) {
+		originalDirector(outbound)
+		outbound.URL.Scheme = upstream.Scheme
+		outbound.URL.Host = upstream.Host
+		outbound.URL.Path = joinBrowserSessionViewerProxyPath(upstream.EscapedPath(), strings.TrimPrefix(request.URL.EscapedPath(), "/browser/session/handoff/viewer/proxy"))
+		outbound.URL.RawQuery = mergeBrowserSessionViewerProxyQuery(upstream.RawQuery, request.URL.Query())
+		outbound.Host = upstream.Host
+		outbound.Header.Del("Authorization")
+		outbound.Header.Del("X-Odin-Admin-Token")
+	}
+	proxy.ModifyResponse = func(response *http.Response) error {
+		if location := strings.TrimSpace(response.Header.Get("Location")); location != "" {
+			if rewritten := rewriteBrowserSessionViewerLocation(location, upstream, handoffID); rewritten != "" {
+				response.Header.Set("Location", rewritten)
+			}
+		}
+		return nil
+	}
+	proxy.ServeHTTP(writer, request)
 }
 
 func handleBrowserSessionHandoffComplete(writer http.ResponseWriter, request *http.Request, deps Dependencies) {
@@ -600,6 +727,129 @@ func newBrowserSessionHandoffView(handoff sqlite.BrowserSessionLoginHandoff) bro
 		Status:         string(handoff.LoginRequest.Status),
 		AllowedActions: "manual_login_only",
 	}
+}
+
+func activeBrowserSessionHandoffViewerRunner(ctx context.Context, store *sqlite.Store, handoff sqlite.BrowserSessionLoginHandoff) (sqlite.BrowserHandoffRunner, bool) {
+	if store == nil || handoff.LoginRequest.ID <= 0 {
+		return sqlite.BrowserHandoffRunner{}, false
+	}
+	runners, err := store.ListBrowserHandoffRunners(ctx, sqlite.ListBrowserHandoffRunnersParams{LoginRequestID: handoff.LoginRequest.ID})
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, false
+	}
+	for index := len(runners) - 1; index >= 0; index-- {
+		runner := runners[index]
+		if runner.Status != sqlite.BrowserHandoffRunnerStatusStarted {
+			continue
+		}
+		if runner.ViewerURL == nil || strings.TrimSpace(*runner.ViewerURL) == "" {
+			continue
+		}
+		return runner, true
+	}
+	return sqlite.BrowserHandoffRunner{}, false
+}
+
+func protectedBrowserSessionHandoffViewerURL(handoffID string) string {
+	return "/browser/session/handoff/viewer?handoff_id=" + url.QueryEscape(strings.TrimSpace(handoffID))
+}
+
+func protectedBrowserSessionHandoffViewerProxyURL(handoffID string) string {
+	return "/browser/session/handoff/viewer/proxy/?handoff_id=" + url.QueryEscape(strings.TrimSpace(handoffID))
+}
+
+const browserSessionViewerCookieName = "odin_browser_handoff_viewer"
+
+func setBrowserSessionViewerCookie(writer http.ResponseWriter, handoffID string, adminToken string, expiresAt time.Time) {
+	expires := expiresAt.UTC()
+	if expires.IsZero() || expires.After(time.Now().UTC().Add(10*time.Minute)) {
+		expires = time.Now().UTC().Add(10 * time.Minute)
+	}
+	http.SetCookie(writer, &http.Cookie{
+		Name:     browserSessionViewerCookieName,
+		Value:    browserSessionViewerCookieValue(handoffID, adminToken),
+		Path:     "/browser/session/handoff/viewer/proxy/",
+		Expires:  expires,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func validBrowserSessionViewerCookie(request *http.Request, handoffID string, adminToken string) bool {
+	cookie, err := request.Cookie(browserSessionViewerCookieName)
+	if err != nil {
+		return false
+	}
+	expected := browserSessionViewerCookieValue(handoffID, adminToken)
+	return subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(expected)) == 1
+}
+
+func browserSessionViewerCookieValue(handoffID string, adminToken string) string {
+	handoffID = strings.TrimSpace(handoffID)
+	mac := hmac.New(sha256.New, []byte(strings.TrimSpace(adminToken)))
+	_, _ = mac.Write([]byte("browser-viewer:"))
+	_, _ = mac.Write([]byte(handoffID))
+	return handoffID + "." + hex.EncodeToString(mac.Sum(nil))
+}
+
+func joinBrowserSessionViewerProxyPath(upstreamBasePath string, proxySuffix string) string {
+	upstreamBasePath = strings.TrimRight(strings.TrimSpace(upstreamBasePath), "/")
+	if upstreamBasePath == "" {
+		upstreamBasePath = "/"
+	}
+	proxySuffix = strings.TrimSpace(proxySuffix)
+	if proxySuffix == "" || proxySuffix == "/" {
+		return upstreamBasePath
+	}
+	return strings.TrimRight(upstreamBasePath, "/") + "/" + strings.TrimLeft(proxySuffix, "/")
+}
+
+func mergeBrowserSessionViewerProxyQuery(upstreamRawQuery string, query url.Values) string {
+	merged := url.Values{}
+	if upstreamRawQuery != "" {
+		if parsed, err := url.ParseQuery(upstreamRawQuery); err == nil {
+			for key, values := range parsed {
+				for _, value := range values {
+					merged.Add(key, value)
+				}
+			}
+		}
+	}
+	for key, values := range query {
+		if key == "handoff_id" || key == "format" {
+			continue
+		}
+		for _, value := range values {
+			merged.Add(key, value)
+		}
+	}
+	return merged.Encode()
+}
+
+func rewriteBrowserSessionViewerLocation(location string, upstream *url.URL, handoffID string) string {
+	parsed, err := url.Parse(location)
+	if err != nil {
+		return ""
+	}
+	if parsed.IsAbs() && !strings.EqualFold(parsed.Scheme, upstream.Scheme) {
+		return ""
+	}
+	if parsed.IsAbs() && !strings.EqualFold(parsed.Host, upstream.Host) {
+		return ""
+	}
+	relativePath := strings.TrimPrefix(parsed.EscapedPath(), strings.TrimRight(upstream.EscapedPath(), "/"))
+	rewritten := protectedBrowserSessionHandoffViewerProxyURL(handoffID)
+	if relativePath != "" && relativePath != "/" {
+		rewritten = "/browser/session/handoff/viewer/proxy/" + strings.TrimLeft(relativePath, "/") + "?handoff_id=" + url.QueryEscape(strings.TrimSpace(handoffID))
+	}
+	if parsed.RawQuery != "" {
+		separator := "&"
+		if !strings.Contains(rewritten, "?") {
+			separator = "?"
+		}
+		rewritten += separator + parsed.RawQuery
+	}
+	return rewritten
 }
 
 func newBrowserSessionHandoffCompletionView(handoffID string, session sqlite.BrowserSession, request sqlite.BrowserSessionLoginRequest) browserSessionHandoffCompletionView {
@@ -682,6 +932,7 @@ var browserSessionHandoffHTMLTemplate = template.Must(template.New("browser_sess
         <dt>Expires at</dt><dd>{{.ExpiresAt}}</dd>
         <dt>Status</dt><dd>{{.Status}}</dd>
         <dt>Allowed action</dt><dd>{{.AllowedActions}}</dd>
+        {{if .ProtectedViewerURL}}<dt>Protected viewer</dt><dd><a href="{{.ProtectedViewerURL}}">{{.ProtectedViewerURL}}</a></dd>{{end}}
       </dl>
     </section>
   </main>
@@ -726,6 +977,31 @@ var browserSessionHandoffCompletionHTMLTemplate = template.Must(template.New("br
 </html>
 `))
 
+var browserSessionViewerHTMLTemplate = template.Must(template.New("browser_session_viewer").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Protected Browser Viewer</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; font-family: system-ui, sans-serif; color: #111827; background: #0f172a; }
+    header { height: 48px; display: flex; align-items: center; gap: 16px; padding: 0 16px; color: #f8fafc; background: #111827; border-bottom: 1px solid #334155; }
+    header strong { font-size: 0.95rem; }
+    header span { color: #cbd5e1; font-size: 0.85rem; }
+    iframe { width: 100%; height: calc(100% - 49px); border: 0; background: #000000; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Protected Browser Viewer</strong>
+    <span>handoff {{.HandoffID}}</span>
+    <span>{{.AllowedActions}}</span>
+  </header>
+  <iframe src="{{.ProxyViewerURL}}" title="Protected browser session"></iframe>
+</body>
+</html>
+`))
+
 func writeBrowserSessionHandoffHTML(writer http.ResponseWriter, view browserSessionHandoffView) {
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
@@ -738,6 +1014,13 @@ func writeBrowserSessionHandoffCompletionHTML(writer http.ResponseWriter, view b
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
 	writer.WriteHeader(http.StatusOK)
 	_ = browserSessionHandoffCompletionHTMLTemplate.Execute(writer, view)
+}
+
+func writeBrowserSessionViewerHTML(writer http.ResponseWriter, view browserSessionHandoffViewerView) {
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.WriteHeader(http.StatusOK)
+	_ = browserSessionViewerHTMLTemplate.Execute(writer, view)
 }
 
 type githubIssuesWebhookPayload struct {
