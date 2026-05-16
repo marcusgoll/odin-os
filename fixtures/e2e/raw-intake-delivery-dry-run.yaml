@@ -1,19 +1,24 @@
-name: github-issue-delivery-dry-run
-description: Fixture-backed GitHub issue delivery chain through worker, review handoff, approval, and verified dry-run merge without external mutation.
+name: raw-intake-delivery-dry-run
+description: Fixture-backed raw prompt intake chain through worker, review handoff, approval, and verified dry-run merge without external mutation.
 github:
   mode: fixture
 codex:
   mode: disabled
 steps:
-  - name: load_fixture_issue
-    fixture: fixtures/github/issues/delivery-chain.json
+  - name: create_raw_intake
+    issue_title: Implement autonomous raw intake delivery proof
     expect:
-      eligible_count: 1
+      source: codex-cli
+      external_object_id: raw-intake-e2e-001
+      intake_type: prompt
+      dedup_key: raw-intake:e2e-autonomous-loop
+      requested_by: operator
+      intake_status: received
 
-  - name: review_issue_into_work_item
+  - name: process_raw_intake_to_work_item
     expect:
-      created: 1
-      linked: 1
+      intake_status: routed
+      work_item_key: raw-intake-1
 
   - name: dispatch_to_isolated_worktree
     expect:

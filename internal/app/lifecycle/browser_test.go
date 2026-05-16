@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"odin-os/internal/runtime/browserprofileartifacts"
 	"odin-os/internal/runtime/browserprofilecrypto"
@@ -389,6 +390,40 @@ func TestRunBrowserSessionLoginRequestCreateAndList(t *testing.T) {
 		if strings.Contains(strings.ToLower(logs), forbidden) {
 			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
 		}
+	}
+}
+
+func TestRunBrowserSessionLoginRequestUsesConfiguredHandoffBaseURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ODIN_BROWSER_HANDOFF_BASE_URL", "https://odin.marcusgoll.com/browser/session/handoff")
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "x-profile-bio-stress",
+		"--domain", "x.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run(
+		"browser", "session", "login-request",
+		"--id", int64String(created.ID),
+		"--json",
+	)))
+	if loginRequest.HandoffURL == nil || !strings.HasPrefix(*loginRequest.HandoffURL, "https://odin.marcusgoll.com/browser/session/handoff?handoff_id=") {
+		t.Fatalf("loginRequest.HandoffURL = %v, want configured operator handoff URL", loginRequest.HandoffURL)
+	}
+	if strings.Contains(*loginRequest.HandoffURL, "localhost") || strings.Contains(*loginRequest.HandoffURL, "127.0.0.1") || strings.Contains(*loginRequest.HandoffURL, "session_id=") {
+		t.Fatalf("loginRequest.HandoffURL = %q, must be routed metadata URL without session id", *loginRequest.HandoffURL)
 	}
 }
 
@@ -860,6 +895,93 @@ func TestRunBrowserSessionRunnerStartRealBrowserDoesNotReusePreparedProfile(t *t
 			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
 		}
 	}
+}
+
+func TestRunBrowserSessionRunnerStartFullRealNoVNCRecordsStartedEvidence(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	displayMarker := filepath.Join(t.TempDir(), "display.marker")
+	browserMarker := filepath.Join(t.TempDir(), "browser.marker")
+	websockifyMarker := filepath.Join(t.TempDir(), "websockify.marker")
+	displayPath := writeLifecycleExecutable(t, "display-vnc", "#!/bin/sh\nprintf ran > "+shellQuote(displayMarker)+"\n")
+	browserPath := writeLifecycleExecutable(t, "browser", "#!/bin/sh\nprintf ran > "+shellQuote(browserMarker)+"\n")
+	websockifyPath := writeLifecycleExecutable(t, "websockify", "#!/bin/sh\nprintf ran > "+shellQuote(websockifyMarker)+"\n")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "novnc")
+	t.Setenv("ODIN_NOVNC_BROWSER_COMMAND", browserPath)
+	t.Setenv("ODIN_NOVNC_DISPLAY_COMMAND", displayPath)
+	t.Setenv("ODIN_NOVNC_WEBSOCKIFY_COMMAND", websockifyPath)
+	t.Setenv("ODIN_NOVNC_ALLOWED_COMMANDS", strings.Join([]string{displayPath, browserPath, websockifyPath}, ","))
+	t.Setenv("ODIN_NOVNC_BIND_ADDR", "127.0.0.1:6080")
+	t.Setenv("ODIN_NOVNC_PRIVATE_BASE_URL", "https://odin-handoff.tailnet.local")
+	t.Setenv("ODIN_NOVNC_TIMEOUT_SECONDS", "2")
+	t.Setenv("ODIN_NOVNC_REAL_DISPLAY", "true")
+	t.Setenv("ODIN_NOVNC_REAL_BROWSER", "true")
+	t.Setenv("ODIN_NOVNC_REAL_WEBSOCKIFY", "true")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "real-novnc-start",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	started := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if started.Status != "started" {
+		t.Fatalf("started runner status = %q, want started for full real NoVNC handoff", started.Status)
+	}
+	if !started.RealBrowserEvidence {
+		t.Fatalf("started runner = %+v, want real_browser_evidence marker", started)
+	}
+	if started.ViewerURL == nil || !strings.HasPrefix(*started.ViewerURL, "https://odin-handoff.tailnet.local/session/novnc-real-") {
+		t.Fatalf("started runner viewer_url = %v, want private real NoVNC viewer URL", started.ViewerURL)
+	}
+	if started.RunnerID == nil || !strings.HasPrefix(*started.RunnerID, "novnc-real-") || started.ProcessID == nil || *started.ProcessID <= 0 || started.StartedAt == "" || started.CompletedAt != "" {
+		t.Fatalf("started runner = %+v, want real runner/process started metadata without completion", started)
+	}
+	for _, marker := range []string{displayMarker, browserMarker, websockifyMarker} {
+		waitForBrowserSessionMarker(t, marker, "ran")
+	}
+	assertNoBrowserSessionArtifacts(t, root)
+
+	logs := run("logs", "--json")
+	if !strings.Contains(logs, `"type": "browser.handoff_runner_started"`) || !strings.Contains(logs, `"real_browser_evidence": true`) {
+		t.Fatalf("logs output = %s, want started runner audit event with real browser evidence marker", logs)
+	}
+	if strings.Contains(logs, `"type": "browser.handoff_runner_completed"`) {
+		t.Fatalf("logs output = %s, want full real NoVNC runner to remain started for attended login", logs)
+	}
+	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
+		if strings.Contains(strings.ToLower(logs), forbidden) {
+			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func waitForBrowserSessionMarker(t *testing.T, path string, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var payload []byte
+	var err error
+	for time.Now().Before(deadline) {
+		payload, err = os.ReadFile(path)
+		if err == nil && string(payload) == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("marker %s payload=%q err=%v, want real role executable to run", path, string(payload), err)
 }
 
 func TestRunBrowserSessionRunnerPlanNoVNCIsReadOnly(t *testing.T) {
@@ -2081,26 +2203,27 @@ type browserSessionHandoffJSON struct {
 }
 
 type browserSessionRunnerJSON struct {
-	ID             int64   `json:"id"`
-	SessionID      int64   `json:"session_id"`
-	LoginRequestID int64   `json:"login_request_id"`
-	HandoffID      string  `json:"handoff_id"`
-	Status         string  `json:"status"`
-	ViewerURL      *string `json:"viewer_url"`
-	RunnerID       *string `json:"runner_id"`
-	ProcessID      *int64  `json:"process_id"`
-	BindAddr       *string `json:"bind_addr"`
-	PrivateBaseURL *string `json:"private_base_url"`
-	PublicBaseURL  *string `json:"public_base_url"`
-	ExpiresAt      string  `json:"expires_at"`
-	StartedAt      string  `json:"started_at,omitempty"`
-	ExitedAt       string  `json:"exited_at,omitempty"`
-	CompletedAt    string  `json:"completed_at,omitempty"`
-	CancelledAt    string  `json:"cancelled_at,omitempty"`
-	CreatedAt      string  `json:"created_at"`
-	UpdatedAt      string  `json:"updated_at"`
-	ErrorCode      *string `json:"error_code"`
-	ErrorMessage   *string `json:"error_message"`
+	ID                  int64   `json:"id"`
+	SessionID           int64   `json:"session_id"`
+	LoginRequestID      int64   `json:"login_request_id"`
+	HandoffID           string  `json:"handoff_id"`
+	Status              string  `json:"status"`
+	RealBrowserEvidence bool    `json:"real_browser_evidence"`
+	ViewerURL           *string `json:"viewer_url"`
+	RunnerID            *string `json:"runner_id"`
+	ProcessID           *int64  `json:"process_id"`
+	BindAddr            *string `json:"bind_addr"`
+	PrivateBaseURL      *string `json:"private_base_url"`
+	PublicBaseURL       *string `json:"public_base_url"`
+	ExpiresAt           string  `json:"expires_at"`
+	StartedAt           string  `json:"started_at,omitempty"`
+	ExitedAt            string  `json:"exited_at,omitempty"`
+	CompletedAt         string  `json:"completed_at,omitempty"`
+	CancelledAt         string  `json:"cancelled_at,omitempty"`
+	CreatedAt           string  `json:"created_at"`
+	UpdatedAt           string  `json:"updated_at"`
+	ErrorCode           *string `json:"error_code"`
+	ErrorMessage        *string `json:"error_message"`
 }
 
 type browserSessionRunnerPlanJSON struct {

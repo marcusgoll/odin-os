@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"odin-os/internal/executors/contract"
 )
@@ -84,7 +85,7 @@ func TestHeadlessHealthInvokesJsonDriver(t *testing.T) {
 	}
 }
 
-func TestHeadlessHealthFallsBackToLegacyReadinessCheckForExplicitDriver(t *testing.T) {
+func TestHeadlessHealthRequiresExplicitDriverHealthContract(t *testing.T) {
 	tracePath := filepath.Join(t.TempDir(), "called")
 	driverPath := writeExecutable(t, "legacy-driver.sh", `#!/usr/bin/env bash
 echo called > `+shellQuote(tracePath)+`
@@ -96,11 +97,53 @@ exit 1
 	if err != nil {
 		t.Fatalf("Health() error = %v", err)
 	}
-	if health.Status != contract.HealthStatusHealthy {
-		t.Fatalf("Health().Status = %q, want healthy", health.Status)
+	if health.Status != contract.HealthStatusUnavailable {
+		t.Fatalf("Health().Status = %q, want %q", health.Status, contract.HealthStatusUnavailable)
 	}
 	if _, err := os.Stat(tracePath); err != nil {
 		t.Fatalf("legacy driver probe trace missing: %v", err)
+	}
+}
+
+func TestHeadlessHealthFailsClosedForExplicitDriverProbeErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		script string
+		want   string
+	}{
+		{
+			name: "failed health command",
+			script: `#!/usr/bin/env bash
+echo "codex CLI is not logged in" >&2
+exit 1
+`,
+			want: "codex CLI is not logged in",
+		},
+		{
+			name: "invalid json",
+			script: `#!/usr/bin/env bash
+printf 'not-json'
+`,
+			want: "invalid JSON",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			driverPath := writeExecutable(t, "driver.sh", tt.script)
+			t.Setenv("ODIN_CODEX_DRIVER", driverPath)
+
+			health, err := NewHeadless().Health(context.Background())
+			if err != nil {
+				t.Fatalf("Health() error = %v", err)
+			}
+			if health.Status != contract.HealthStatusUnavailable {
+				t.Fatalf("Health().Status = %q, want %q", health.Status, contract.HealthStatusUnavailable)
+			}
+			if !strings.Contains(health.Details, tt.want) {
+				t.Fatalf("Health().Details = %q, want to contain %q", health.Details, tt.want)
+			}
+		})
 	}
 }
 
@@ -128,6 +171,15 @@ func TestHeadlessRunTaskUsesDriverScript(t *testing.T) {
 	}
 	if result.Metadata["driver"] != "codex_headless_script" {
 		t.Fatalf("driver metadata = %q, want codex_headless_script", result.Metadata["driver"])
+	}
+}
+
+func TestDriverRunTimeoutAllowsRealCodexSessions(t *testing.T) {
+	if got := driverTimeout("run"); got < 30*time.Minute {
+		t.Fatalf("driverTimeout(run) = %s, want at least 30m for live codex sessions", got)
+	}
+	if got := driverTimeout("health"); got >= driverTimeout("run") {
+		t.Fatalf("driverTimeout(health) = %s, want shorter than run timeout %s", got, driverTimeout("run"))
 	}
 }
 

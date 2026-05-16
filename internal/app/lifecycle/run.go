@@ -97,7 +97,7 @@ var (
 	serveInitialHealthRetry   = 1 * time.Second
 	serveHealthConfig         = healthsvc.DefaultConfig()
 	serveListen               = net.Listen
-	runTUI                    = tui.Run
+	runTUI                    = runTUICommand
 )
 
 type serveLoopConfig struct {
@@ -156,7 +156,7 @@ type healthLoopDeps struct {
 	Store              *sqlite.Store
 	RuntimeState       runtimestate.Service
 	Health             healthsvc.Service
-	Notifications      runtimenotifications.Service
+	Notifications      notificationRouter
 	Executors          map[string]contract.Executor
 	ExecutorConfig     executorrouter.Config
 	RegistryHealthy    bool
@@ -164,6 +164,10 @@ type healthLoopDeps struct {
 	ShutdownRequested  *atomic.Bool
 	BootID             string
 	RuntimeRoot        string
+}
+
+type notificationRouter interface {
+	RoutePendingEvents(context.Context) (runtimenotifications.RoutePendingResult, error)
 }
 
 type serveDashboardAdmin struct {
@@ -311,7 +315,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	case "capabilities":
 		return runCapabilities(ctx, app, args[1:], stdout)
 	case "tui":
-		return runTUI(ctx, args[1:], stdout)
+		return runTUI(ctx, app, args[1:], stdout)
 	case "status":
 		return runStatus(ctx, app, cfg, args[1:], stdout)
 	case "legacy":
@@ -472,6 +476,138 @@ func runRepl(ctx context.Context, app bootstrap.App, stdin io.Reader, stdout io.
 	return nil
 }
 
+func runTUICommand(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	return tui.RunWithProvider(ctx, args, stdout, tuiModelProvider{app: app})
+}
+
+type tuiModelProvider struct {
+	app bootstrap.App
+}
+
+func (provider tuiModelProvider) EnrichModel(ctx context.Context, model *tui.Model) error {
+	workspaceView, err := projections.GetWorkspaceOverviewView(ctx, provider.app.Store.DB(), workspaces.DefaultWorkspaceKey)
+	if err == nil {
+		model.Name = firstNonEmpty(workspaceView.Name, workspaceView.WorkspaceKey, "odin")
+		if model.ActiveRuns == 0 {
+			model.ActiveRuns = workspaceView.ActiveRunCount
+		}
+		if model.ApprovalsWaiting == 0 {
+			model.ApprovalsWaiting = workspaceView.PendingApprovalCount
+		}
+		if model.BlockedItems == 0 {
+			model.BlockedItems = workspaceView.BlockedWorkItemCount
+		}
+	} else if errors.Is(err, sql.ErrNoRows) {
+		model.Name = "odin"
+	} else {
+		return err
+	}
+
+	activeRuns, err := projections.ListActiveRunViews(ctx, provider.app.Store.DB())
+	if err != nil {
+		return err
+	}
+	if len(activeRuns) > 0 {
+		model.ActiveRuns = len(activeRuns)
+	}
+	for _, run := range activeRuns {
+		model.Agents = append(model.Agents, tui.AgentRow{
+			Name:    firstNonEmpty(run.Executor, fmt.Sprintf("run-%d", run.RunID)),
+			Task:    firstNonEmpty(run.TaskKey, fmt.Sprintf("task-%d", run.TaskID)),
+			Project: run.ProjectKey,
+			Status:  run.Status,
+		})
+		if len(model.Agents) >= 6 {
+			break
+		}
+	}
+
+	approvals, err := projections.ListPendingApprovalViews(ctx, provider.app.Store.DB())
+	if err != nil {
+		return err
+	}
+	if len(approvals) > 0 {
+		model.ApprovalsWaiting = len(approvals)
+	}
+	for _, approval := range approvals {
+		model.Approvals = append(model.Approvals, tui.ApprovalRow{
+			ID:       approval.ApprovalID,
+			Task:     firstNonEmpty(approval.TaskKey, fmt.Sprintf("task-%d", approval.TaskID)),
+			Project:  approval.ProjectKey,
+			Status:   approval.Status,
+			Resolver: "unknown",
+		})
+		if len(model.Approvals) >= 6 {
+			break
+		}
+	}
+
+	goals, err := provider.app.Store.ListGoals(ctx, sqlite.ListGoalsParams{})
+	if err != nil {
+		return err
+	}
+	for _, goal := range goals {
+		if goal.Status == sqlite.GoalStatusCompleted {
+			continue
+		}
+		currentRun := ""
+		if goal.CurrentRunID != nil {
+			currentRun = fmt.Sprintf("%d", *goal.CurrentRunID)
+		}
+		model.Goals = append(model.Goals, tui.GoalRow{
+			ID:         goal.ID,
+			Title:      goal.Title,
+			Status:     string(goal.Status),
+			CurrentRun: currentRun,
+		})
+		if len(model.Goals) >= 6 {
+			break
+		}
+	}
+
+	handoffs, err := provider.app.Store.ListPullRequestHandoffs(ctx, sqlite.ListPullRequestHandoffsParams{})
+	if err != nil {
+		return err
+	}
+	projectNames := make(map[int64]string)
+	for _, handoff := range handoffs {
+		if handoff.State == "closed" && handoff.ReviewState == "merged" {
+			continue
+		}
+		if _, ok := projectNames[handoff.ProjectID]; !ok {
+			project, err := provider.app.Store.GetProject(ctx, handoff.ProjectID)
+			if err == nil {
+				projectNames[handoff.ProjectID] = firstNonEmpty(project.Key, project.Name)
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		model.PullRequests = append(model.PullRequests, tui.PullRequestRow{
+			Project: firstNonEmpty(projectNames[handoff.ProjectID], fmt.Sprintf("project-%d", handoff.ProjectID)),
+			Repo:    handoff.Repo,
+			Number:  handoff.Number,
+			Title:   handoff.Title,
+			State:   firstNonEmpty(handoff.State, handoff.ReviewState),
+			CI:      "not_wired",
+			URL:     handoff.URL,
+		})
+		if len(model.PullRequests) >= 6 {
+			break
+		}
+	}
+	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func runOverview(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
 	jsonOutput, remaining, err := consumeJSONFlag(args)
 	if err != nil {
@@ -513,13 +649,9 @@ func runOverview(ctx context.Context, app bootstrap.App, args []string, stdout i
 func overviewRuntimeStatus(ctx context.Context, app bootstrap.App) (string, string) {
 	health := healthsvc.Service{DB: app.Store.DB()}
 	registryHealthy := len(app.RegistryDiagnostics) == 0
-	report, err := health.Doctor(ctx, registryHealthy)
+	report, ready, err := health.Readiness(ctx, registryHealthy)
 	if err != nil {
 		return "unknown", "unknown"
-	}
-	_, ready, err := health.Readiness(ctx, registryHealthy)
-	if err != nil {
-		return "unknown", string(report.Status)
 	}
 	if ready {
 		return "ready", string(report.Status)
@@ -956,7 +1088,7 @@ func runDoctor(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 		return err
 	}
 
-	report, err := newHealthService(app, healthsvc.DefaultConfig(), cfg).Doctor(ctx, len(app.RegistryDiagnostics) == 0)
+	report, _, err := newHealthService(app, healthsvc.DefaultConfig(), cfg).Readiness(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
 	}
@@ -5118,14 +5250,6 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 		return fmt.Errorf("usage: odin status [--json]")
 	}
 
-	snapshot, err := conversationsvc.Service{
-		DB:             app.Store.DB(),
-		StalledTimeout: 30 * time.Minute,
-	}.Snapshot(ctx)
-	if err != nil {
-		return err
-	}
-
 	summary, err := newHealthService(app, healthsvc.DefaultConfig(), cfg).Summary(ctx, len(app.RegistryDiagnostics) == 0)
 	if err != nil {
 		return err
@@ -5144,6 +5268,20 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 	}
 	workerDispatch := healthsvc.NewWorkerDispatchStatus(ready, runtimeStatus, readinessReport.Status)
 
+	snapshotCtx, cancelSnapshot := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelSnapshot()
+	snapshot, err := conversationsvc.Service{
+		DB:             app.Store.DB(),
+		StalledTimeout: 30 * time.Minute,
+	}.Snapshot(snapshotCtx)
+	statusSnapshotError := ""
+	if err != nil && jsonOutput {
+		statusSnapshotError = err.Error()
+		snapshot = conversationsvc.Snapshot{GeneratedAt: time.Now().UTC()}
+	} else if err != nil {
+		return err
+	}
+
 	if jsonOutput {
 		companionSwarmCounts := struct {
 			Active  int `json:"active"`
@@ -5161,10 +5299,11 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 		encoder := json.NewEncoder(stdout)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(map[string]any{
-			"health":                       string(summary.Status),
+			"health":                       string(readinessReport.Status),
 			"pending_approvals":            len(snapshot.ApprovalsWaiting),
 			"registry_healthy":             summary.RegistryHealthy,
 			"generated_at":                 snapshot.GeneratedAt,
+			"status_snapshot_error":        statusSnapshotError,
 			"approvals_waiting":            snapshot.ApprovalsWaiting,
 			"stalled_runs":                 snapshot.StalledRuns,
 			"active_runs":                  snapshot.ActiveRuns,
@@ -5178,7 +5317,7 @@ func runStatus(ctx context.Context, app bootstrap.App, cfg appconfig.Config, arg
 
 	companionSwarmCount := len(snapshot.CompanionSwarms)
 	_, err = fmt.Fprintf(stdout, "health=%s pending_approvals=%d stalled_runs=%d active_runs=%d project_transitions=%d companion_swarms=%d registry_healthy=%t worker_dispatch=%s dry_run=%t read_only=%t\n",
-		summary.Status,
+		readinessReport.Status,
 		len(snapshot.ApprovalsWaiting),
 		len(snapshot.StalledRuns),
 		len(snapshot.ActiveRuns),
@@ -6572,9 +6711,6 @@ func runHealthCycle(ctx context.Context, deps healthLoopDeps, logger *logs.Logge
 		markRuntimeDegraded(ctx, deps, logger, "runtime heartbeat failed", err)
 		return
 	}
-	if _, err := deps.Notifications.RoutePendingEvents(ctx); err != nil {
-		logBackgroundError(logger, "notifications", err)
-	}
 
 	report, safeToDispatch, err := deps.Health.DispatchReport(ctx, deps.RegistryHealthy)
 	if err != nil {
@@ -6615,12 +6751,23 @@ func runHealthCycle(ctx context.Context, deps healthLoopDeps, logger *logs.Logge
 		}
 		setImmediateNotReady(deps.Health, false)
 		clearNotReadyFlag(logger, deps.RuntimeRoot)
+		routePendingNotifications(ctx, deps, logger)
 		return
 	}
 
 	setImmediateNotReady(deps.Health, true)
 	writeNotReadyFlag(logger, deps.RuntimeRoot, fmt.Sprintf("dispatch paused: %s", report.Status))
 	markRuntimeDegraded(ctx, deps, logger, fmt.Sprintf("dispatch paused: %s", report.Status), nil)
+	routePendingNotifications(ctx, deps, logger)
+}
+
+func routePendingNotifications(ctx context.Context, deps healthLoopDeps, logger *logs.Logger) {
+	if deps.Notifications == nil {
+		return
+	}
+	if _, err := deps.Notifications.RoutePendingEvents(ctx); err != nil {
+		logBackgroundError(logger, "notifications", err)
+	}
 }
 
 func markRuntimeDegraded(ctx context.Context, deps healthLoopDeps, logger *logs.Logger, reason string, cause error) {

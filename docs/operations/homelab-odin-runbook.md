@@ -64,6 +64,10 @@ Allowed public paths:
 - `/mobile/*` serves concrete authenticated mobile/PWA API endpoints; the
   `/mobile/` root may return `404` when no root endpoint is registered
 - `/healthz` and `/readyz` expose health and fail-closed readiness
+- `/browser/session/handoff` exposes metadata-only attended browser handoff
+  lookup for requested login handoffs
+- `/browser/session/handoff/complete` records admin-token-protected,
+  operator-attested metadata completion for a handoff
 
 All other public paths, including `/metrics` and legacy `/api/v1/*` routes, must
 return `404` at nginx before reaching Odin.
@@ -74,6 +78,16 @@ Runtime config lives outside the repo at:
 /home/orchestrator/.homelab-runtime/odin-pwa-proxy/
 ```
 
+The repo-owned nginx template is:
+
+```bash
+deploy/nginx/odin-pwa-proxy.conf
+```
+
+Before recreating `odin-overseer`, copy or otherwise sync that template to the
+runtime config path used by `run-container.sh`. Do not widen the route gate
+locally without making the same change in the repo-owned template and tests.
+
 The active container must include these environment values:
 
 ```bash
@@ -83,6 +97,7 @@ ODIN_HTTP_ADDR=127.0.0.1:9444
 ODIN_PROJECTS_OVERLAY=/config/odin-os-projects.local.yaml
 ODIN_CODEX_DRIVER=/config/odin-codex-live-driver.sh
 ODIN_CORE_GIT_ROOT=/home/orchestrator/odin-os
+ODIN_BROWSER_HANDOFF_BASE_URL=https://odin.marcusgoll.com/browser/session/handoff
 ```
 
 Verify the running `odin serve` process inherited those values; Docker config
@@ -230,6 +245,17 @@ curl -fsS http://127.0.0.1:9444/metrics
 
 `healthcheck` must fail before `serve` owns the runtime root and after the
 service stops.
+
+After creating a requested browser login handoff, the live PWA proxy must also
+route the metadata-only handoff lookup:
+
+```bash
+curl -fsS 'http://127.0.0.1:5173/browser/session/handoff?handoff_id=<requested-handoff-id>'
+curl -fsS -H 'Accept: text/html' 'http://127.0.0.1:5173/browser/session/handoff?handoff_id=<requested-handoff-id>'
+```
+
+These checks must not launch a browser, collect credentials, write profile
+bytes, or prove authenticated browser reuse.
 
 ## Backup and verify before cutover
 

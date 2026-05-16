@@ -30,6 +30,7 @@ import (
 	runtimeevents "odin-os/internal/runtime/events"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
+	runtimenotifications "odin-os/internal/runtime/notifications"
 	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/vcs/leases"
@@ -756,21 +757,24 @@ service:
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	ctx = withServeLoopConfig(ctx, serveLoopConfig{
 		goalInterval: time.Hour,
 	})
-	time.AfterFunc(150*time.Millisecond, cancel)
 
 	var stdout bytes.Buffer
-	err = Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- Run(ctx, root, []string{"serve"}, strings.NewReader(""), &stdout)
+	}()
+
+	got := waitForServeGoalRunning(t, store, goal.ID)
+	cancel()
+	err = <-errc
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run(serve) error = %v\n%s", err, stdout.String())
 	}
 
-	got, err := store.GetGoal(context.Background(), goal.ID)
-	if err != nil {
-		t.Fatalf("GetGoal() error = %v", err)
-	}
 	if got.Status != sqlite.GoalStatusRunning || got.CurrentRunID == nil {
 		t.Fatalf("goal after serve = %+v, want running with active run", got)
 	}
@@ -1526,6 +1530,52 @@ func TestRunHealthCycleDoesNotPromoteDrainingRuntimeToReady(t *testing.T) {
 	}
 }
 
+func TestRunHealthCycleMarksReadyBeforeSlowNotificationRouting(t *testing.T) {
+	t.Parallel()
+
+	root := createRuntimeRoot(t)
+	ctx := bootstrap.WithBootID(context.Background(), "boot-test")
+	app, err := bootstrap.Load(ctx, root, root)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+
+	healthCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var immediateNotReady atomic.Bool
+	immediateNotReady.Store(true)
+	runHealthCycle(healthCtx, healthLoopDeps{
+		Store:        app.Store,
+		RuntimeState: app.RuntimeState,
+		Health: healthsvc.Service{
+			DB:                app.Store.DB(),
+			Config:            healthsvc.DefaultConfig(),
+			ExecutorKeys:      enabledExecutorKeys(app.ExecutorConfig),
+			ImmediateNotReady: &immediateNotReady,
+		},
+		Notifications:      blockingNotificationRouter{},
+		Executors:          app.Executors,
+		ExecutorConfig:     app.ExecutorConfig,
+		RegistryHealthy:    len(app.RegistryDiagnostics) == 0,
+		ProjectionSurfaces: bootstrap.ServiceOwnedProjectionSurfaces(),
+		BootID:             "boot-test",
+		RuntimeRoot:        root,
+	}, nil)
+
+	state, err := app.Store.GetRuntimeState(context.Background())
+	if err != nil {
+		t.Fatalf("GetRuntimeState() error = %v", err)
+	}
+	if state.Status != "ready" {
+		t.Fatalf("RuntimeState.Status = %q, want ready before notification routing timeout", state.Status)
+	}
+	if immediateNotReady.Load() {
+		t.Fatal("ImmediateNotReady = true, want false before notification routing timeout")
+	}
+}
+
 func TestRunHealthCycleKeepsRuntimeNotReadyWhenShutdownRequested(t *testing.T) {
 	t.Parallel()
 
@@ -1962,6 +2012,9 @@ service:
 	if err := waitForServeHealthStatus(ctx, "http://"+addr, http.StatusServiceUnavailable, "degraded", "/readyz"); err != nil {
 		t.Fatal(err)
 	}
+	if err := waitForLifecycleStatus(ctx, store, "degraded"); err != nil {
+		t.Fatal(err)
+	}
 
 	cancel()
 
@@ -2137,7 +2190,14 @@ func (git *cleanupFailureGit) WorktreeDirty(context.Context, string) (bool, erro
 func createRuntimeRoot(t *testing.T) string {
 	t.Helper()
 
-	root := t.TempDir()
+	root, err := os.MkdirTemp("", sanitizeRuntimeRootTestName(t.Name())+"-")
+	if err != nil {
+		t.Fatalf("create runtime root: %v", err)
+	}
+	t.Cleanup(func() {
+		removeRuntimeRoot(t, root)
+	})
+
 	if err := os.MkdirAll(filepath.Join(root, "config"), 0o755); err != nil {
 		t.Fatalf("mkdir config: %v", err)
 	}
@@ -2212,6 +2272,25 @@ routes:
 	}
 
 	return root
+}
+
+func sanitizeRuntimeRootTestName(name string) string {
+	replacer := strings.NewReplacer("/", "-", " ", "-", ":", "-")
+	return replacer.Replace(name)
+}
+
+func removeRuntimeRoot(t *testing.T, root string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := os.RemoveAll(root); err == nil {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("remove runtime root %s: %v", root, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func writeUnavailableExecutorsConfig(t *testing.T, root string) {
@@ -2663,6 +2742,66 @@ func lifecycleStatuses(store *sqlite.Store) ([]string, error) {
 	return statuses, nil
 }
 
+func waitForLifecycleStatus(ctx context.Context, store *sqlite.Store, wantStatus string) error {
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for lifecycle status %q", wantStatus)
+		case <-deadline.C:
+			statuses, err := lifecycleStatuses(store)
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("timed out waiting for lifecycle status %q; statuses=%v", wantStatus, statuses)
+		case <-ticker.C:
+			statuses, err := lifecycleStatuses(store)
+			if err != nil {
+				return err
+			}
+			for _, status := range statuses {
+				if status == wantStatus {
+					return nil
+				}
+			}
+		}
+	}
+}
+
+func waitForGoalRunning(ctx context.Context, store *sqlite.Store, goalID int64) error {
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for goal %d to run", goalID)
+		case <-deadline.C:
+			goal, err := store.GetGoal(context.Background(), goalID)
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("timed out waiting for goal %d to run; goal=%+v", goalID, goal)
+		case <-ticker.C:
+			goal, err := store.GetGoal(context.Background(), goalID)
+			if err != nil {
+				return err
+			}
+			if goal.Status == sqlite.GoalStatusRunning && goal.CurrentRunID != nil {
+				return nil
+			}
+		}
+	}
+}
+
 func countServeGoalEvents(t *testing.T, store *sqlite.Store) map[string]int {
 	t.Helper()
 	events, err := store.ListEvents(context.Background(), sqlite.ListEventsParams{})
@@ -2676,6 +2815,33 @@ func countServeGoalEvents(t *testing.T, store *sqlite.Store) map[string]int {
 		}
 	}
 	return counts
+}
+
+func waitForServeGoalRunning(t *testing.T, store *sqlite.Store, goalID int64) sqlite.Goal {
+	t.Helper()
+
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	var last sqlite.Goal
+	for {
+		select {
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for serve goal %d to run; last goal = %+v", goalID, last)
+		case <-ticker.C:
+			got, err := store.GetGoal(context.Background(), goalID)
+			if err != nil {
+				t.Fatalf("GetGoal(%d) error = %v", goalID, err)
+			}
+			last = got
+			if got.Status == sqlite.GoalStatusRunning && got.CurrentRunID != nil {
+				return got
+			}
+		}
+	}
 }
 
 func waitForServeHealthStatus(ctx context.Context, baseURL string, wantCode int, wantStatus string, pathOverride ...string) error {
@@ -2778,4 +2944,11 @@ func assertNoLifecycleStatus(t *testing.T, statuses []string, forbidden string) 
 			t.Fatalf("lifecycle statuses = %v, want no %q", statuses, forbidden)
 		}
 	}
+}
+
+type blockingNotificationRouter struct{}
+
+func (blockingNotificationRouter) RoutePendingEvents(ctx context.Context) (runtimenotifications.RoutePendingResult, error) {
+	<-ctx.Done()
+	return runtimenotifications.RoutePendingResult{}, ctx.Err()
 }

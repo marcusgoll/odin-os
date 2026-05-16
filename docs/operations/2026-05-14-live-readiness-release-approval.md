@@ -25,8 +25,9 @@ the cutover window.
 - Public origin bind mount: `/home/orchestrator/odin-os-live:/app:ro`.
 - Runtime root bind mount: `/home/orchestrator/.local/state/odin-os:/state`.
 - Runtime config root bind mount: `/home/orchestrator/.config/odin:/config:ro`.
-- Public ingress gate: `/app/*`, `/mobile/*`, `/healthz`, and `/readyz` are
-  proxied; all other public paths return `404` at nginx.
+- Public ingress gate: `/app/*`, `/mobile/*`, `/healthz`, `/readyz`, and the
+  exact metadata-only browser handoff paths are proxied; all other public paths
+  return `404` at nginx.
 - Live `/readyz` currently fails closed with HTTP `503`; this is a required
   post-cutover proof point, not an ingress exposure issue.
 - A 2026-05-14 read-only probe found the Docker container config includes
@@ -210,6 +211,8 @@ Expected post-cutover public behavior:
 - `/healthz` returns HTTP `200`.
 - `/readyz` must return HTTP `200` before the live release is credited as
   ready.
+- `/browser/session/handoff?handoff_id=<requested-handoff-id>` must return HTTP
+  `200` through the operator ingress for a current requested login handoff.
 - `/metrics`, `/api/v1/*`, `/api/health`, and `/admin` return `404` at nginx.
 
 ## Trigger Dispatch Reproof

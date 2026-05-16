@@ -27,8 +27,9 @@ No live email/calendar/GitHub/production mutation occurs by default. The harness
 4. Dedupe: creates a duplicate raw item and proves it is linked to the canonical item while retaining raw payload evidence.
 5. Approval gate: starts high-risk Odin work and proves dispatch is blocked on an approval request.
 6. Work dispatch: runs safe internal project work through the canonical `codex_headless` executor with the deterministic fixture driver.
-7. Scheduler: materializes a due trigger once, proves a repeated tick does not duplicate it, and checks trigger audit events.
-8. Review queue: proves approvals, failed work/recovery, context-pack artifacts, and intake appear in the single `review list --json` queue.
-9. Observability: proves `overview --json` shows intake, triggers, approvals, work, recovery/readiness evidence, and activity from the same temp store.
+7. Delivery loop: runs the `raw-intake-delivery-dry-run` fixture from raw prompt intake through routed Work Item, isolated worktree dispatch, deterministic worker evidence, tmux/session orchestration, specialist reviewer/QA/security handoff, approval resolution, and verified dry-run PR merge.
+8. Scheduler: materializes a due trigger once, proves a repeated tick does not duplicate it, and checks trigger audit events.
+9. Review queue: proves approvals, failed work/recovery, context-pack artifacts, and intake appear in the single `review list --json` queue.
+10. Observability: proves `overview --json` shows intake, triggers, approvals, work, recovery/readiness evidence, and activity from the same temp store.
 
 Artifacts are written under `.odin/actual-use-e2e/`, including `latest.log` and `latest.json`.

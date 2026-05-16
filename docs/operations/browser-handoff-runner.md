@@ -12,6 +12,10 @@ The browser handoff runner creates and supervises one runner lifecycle for a bro
 - `ODIN_BROWSER_HANDOFF_RUNNER=novnc` selects the NoVNC runner.
 - Display/VNC, browser, and websockify/noVNC role commands must be absolute, executable, and allowlisted before launch.
 - Real display, websockify, and browser role commands are independently gated by explicit environment variables.
+- When all three real gates are enabled, `runner start` records a `started`
+  runner with a `novnc-real-*` runner ID, private `viewer_url`, process
+  metadata, and `real_browser_evidence=true`, then returns without waiting for
+  the attended browser stack to exit.
 - Runner lifecycle changes are persisted through existing store transition paths and runtime audit events.
 - Repo-local proof uses `./bin/odin` after `make build`.
 
@@ -108,7 +112,7 @@ test ! -e "$runtime_root/cookies"
 test ! -e "$runtime_root/credentials"
 ```
 
-Expected result: the runner reaches a terminal state through the metadata lifecycle, emits browser handoff runner audit events, and creates no browser profile, cookie, or credential artifacts.
+Expected result: the fixture-safe runner reaches a terminal state through the metadata lifecycle, emits browser handoff runner audit events, and creates no browser profile, cookie, or credential artifacts. This fixture proof is not real browser evidence.
 
 ## Real Command Rollout Checklist
 
@@ -137,10 +141,12 @@ ODIN_ROOT="$runtime_root" ./bin/odin browser session runner plan-novnc \
   --json
 ```
 
-7. Start the runner only after the plan reports valid command detection for every role.
-8. Use the returned private `viewer_url` only from the approved private network path.
-9. Complete any username, password, passkey, MFA, consent, or account selection manually in the visible browser. Odin must not collect or store those values.
-10. Inspect `./bin/odin logs --json` and `runner show --id <runner_id> --json` after the run.
+7. Start the runner only after the plan reports valid command detection for every role. The runner passes no args or custom env to role commands; if real system binaries need display, profile, target URL, or port arguments, configure reviewed host-side wrapper commands and allowlist those wrapper paths.
+8. Confirm `runner start --json` returns `status: "started"`, a `novnc-real-*`
+   runner ID, `real_browser_evidence: true`, and a private `viewer_url`.
+9. Use the returned private `viewer_url` only from the approved private network path.
+10. Complete any username, password, passkey, MFA, consent, or account selection manually in the visible browser. Odin must not collect or store those values.
+11. Inspect `./bin/odin logs --json`, `/mobile/review-queue`, and `runner show --id <runner_id> --json` after the run. The mobile review item should expose `open-viewer` while the runner is `started`.
 
 ## Rollback Steps
 

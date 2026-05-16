@@ -19,15 +19,29 @@ var ErrUnavailableTelemetry = errors.New("unavailable telemetry")
 var defaultHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 const recentLogsQuery = `{job="docker-containers"} |= "odin"`
-const clearScreen = "\x1b[H\x1b[2J"
+
+const (
+	enterAlternateScreen = "\x1b[?1049h\x1b[?25l"
+	exitAlternateScreen  = "\x1b[?25h\x1b[?1049l"
+	clearScreen          = "\x1b[2J\x1b[H"
+)
 
 type Client struct {
 	PrometheusURL string
 	LokiURL       string
 	HTTPClient    *http.Client
+	Provider      ModelProvider
+}
+
+type ModelProvider interface {
+	EnrichModel(context.Context, *Model) error
 }
 
 func Run(ctx context.Context, args []string, stdout io.Writer) error {
+	return RunWithProvider(ctx, args, stdout, nil)
+}
+
+func RunWithProvider(ctx context.Context, args []string, stdout io.Writer, provider ModelProvider) error {
 	flags := flag.NewFlagSet("tui", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	once := flags.Bool("once", false, "render once and exit")
@@ -51,6 +65,7 @@ func Run(ctx context.Context, args []string, stdout io.Writer) error {
 	client := Client{
 		PrometheusURL: *prometheusURL,
 		LokiURL:       *lokiURL,
+		Provider:      provider,
 	}
 	if *once {
 		return renderFrame(ctx, client, stdout, false)
@@ -59,6 +74,15 @@ func Run(ctx context.Context, args []string, stdout io.Writer) error {
 }
 
 func runContinuous(ctx context.Context, client Client, stdout io.Writer, interval time.Duration, clear bool) error {
+	if clear {
+		if _, err := io.WriteString(stdout, enterAlternateScreen); err != nil {
+			return err
+		}
+		defer func() {
+			_, _ = io.WriteString(stdout, exitAlternateScreen)
+		}()
+	}
+
 	for {
 		if err := renderFrame(ctx, client, stdout, clear); err != nil {
 			return err
@@ -82,7 +106,13 @@ func runContinuous(ctx context.Context, client Client, stdout io.Writer, interva
 func renderFrame(ctx context.Context, client Client, stdout io.Writer, clear bool) error {
 	model, err := client.QueryOverview(ctx)
 	if err != nil {
-		return err
+		if !errors.Is(err, ErrUnavailableTelemetry) {
+			return err
+		}
+		model = Model{
+			TelemetryAvailable:   false,
+			TelemetryUnavailable: err.Error(),
+		}
 	}
 	logs, err := client.QueryRecentLogs(ctx)
 	if err != nil {
@@ -90,12 +120,18 @@ func renderFrame(ctx context.Context, client Client, stdout io.Writer, clear boo
 	} else {
 		model.Logs = logs
 	}
+	if client.Provider != nil {
+		if err := client.Provider.EnrichModel(ctx, &model); err != nil {
+			return err
+		}
+	}
 	if clear {
 		if _, err := io.WriteString(stdout, clearScreen); err != nil {
 			return err
 		}
 	}
-	_, err = io.WriteString(stdout, RenderOverview(model))
+	width, color := renderSettings(stdout)
+	_, err = io.WriteString(stdout, RenderOverviewForTerminal(model, width, color))
 	return err
 }
 

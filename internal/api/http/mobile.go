@@ -136,6 +136,9 @@ func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time
 		}
 		writeMobileJSON(writer, http.StatusOK, map[string]any{"items": items, "count": len(items)})
 	}))
+	mux.HandleFunc("POST /mobile/review-queue/{queue_id}/decision", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		handleMobileReviewQueueDecision(writer, request, deps)
+	}))
 
 	mux.HandleFunc("GET /mobile/review", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
 		items, err := mobileReviewQueue(request.Context(), deps)
@@ -354,19 +357,20 @@ func writeMobileJSON(writer http.ResponseWriter, statusCode int, payload any) {
 }
 
 type mobileReviewItem struct {
-	QueueID        string                  `json:"queue_id"`
-	SourceType     string                  `json:"source_type"`
-	Source         string                  `json:"source"`
-	ObjectID       int64                   `json:"object_id"`
-	ObjectKey      string                  `json:"object_key"`
-	Title          string                  `json:"title"`
-	Status         string                  `json:"status"`
-	Reason         string                  `json:"reason,omitempty"`
-	ProjectKey     string                  `json:"project_key,omitempty"`
-	AllowedActions []string                `json:"allowed_actions"`
-	BrowserEvent   string                  `json:"browser_event,omitempty"`
-	DeepLink       string                  `json:"deep_link,omitempty"`
-	Notification   *mobileNotificationView `json:"notification,omitempty"`
+	QueueID             string                  `json:"queue_id"`
+	SourceType          string                  `json:"source_type"`
+	Source              string                  `json:"source"`
+	ObjectID            int64                   `json:"object_id"`
+	ObjectKey           string                  `json:"object_key"`
+	Title               string                  `json:"title"`
+	Status              string                  `json:"status"`
+	Reason              string                  `json:"reason,omitempty"`
+	ProjectKey          string                  `json:"project_key,omitempty"`
+	AllowedActions      []string                `json:"allowed_actions"`
+	BrowserEvent        string                  `json:"browser_event,omitempty"`
+	DeepLink            string                  `json:"deep_link,omitempty"`
+	RealBrowserEvidence bool                    `json:"real_browser_evidence,omitempty"`
+	Notification        *mobileNotificationView `json:"notification,omitempty"`
 }
 
 type mobileApprovalView struct {
@@ -434,6 +438,24 @@ type mobileApprovalDecisionRequest struct {
 	ConfirmationText            string `json:"confirmation_text"`
 	ExpectedPolicySnapshotHash  string `json:"expected_policy_snapshot_hash"`
 	ExpectedRuntimeSnapshotHash string `json:"expected_runtime_snapshot_hash"`
+}
+
+type mobileReviewQueueDecisionRequest struct {
+	Action   string `json:"action"`
+	Decision string `json:"decision"`
+	Reason   string `json:"reason"`
+	Actor    string `json:"actor"`
+}
+
+type mobileReviewQueueDecisionResponse struct {
+	QueueID     string `json:"queue_id"`
+	SourceType  string `json:"source_type"`
+	ObjectID    int64  `json:"object_id"`
+	Action      string `json:"action"`
+	Status      string `json:"status"`
+	Result      string `json:"result"`
+	NextStep    string `json:"next_step,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
 }
 
 type mobileApprovalDecisionResponse struct {
@@ -608,19 +630,22 @@ type mobileBrowserLoginRequest struct {
 }
 
 type mobileBrowserRunnerView struct {
-	ID             int64  `json:"id"`
-	SessionID      int64  `json:"session_id"`
-	LoginRequestID int64  `json:"login_request_id"`
-	Status         string `json:"status"`
-	ExpiresAt      string `json:"expires_at"`
-	StartedAt      string `json:"started_at,omitempty"`
-	ExitedAt       string `json:"exited_at,omitempty"`
-	CompletedAt    string `json:"completed_at,omitempty"`
-	CancelledAt    string `json:"cancelled_at,omitempty"`
-	CreatedAt      string `json:"created_at"`
-	UpdatedAt      string `json:"updated_at"`
-	ErrorCode      string `json:"error_code,omitempty"`
-	ErrorMessage   string `json:"error_message,omitempty"`
+	ID                  int64  `json:"id"`
+	SessionID           int64  `json:"session_id"`
+	LoginRequestID      int64  `json:"login_request_id"`
+	Status              string `json:"status"`
+	ViewerURL           string `json:"viewer_url,omitempty"`
+	RunnerID            string `json:"runner_id,omitempty"`
+	RealBrowserEvidence bool   `json:"real_browser_evidence,omitempty"`
+	ExpiresAt           string `json:"expires_at"`
+	StartedAt           string `json:"started_at,omitempty"`
+	ExitedAt            string `json:"exited_at,omitempty"`
+	CompletedAt         string `json:"completed_at,omitempty"`
+	CancelledAt         string `json:"cancelled_at,omitempty"`
+	CreatedAt           string `json:"created_at"`
+	UpdatedAt           string `json:"updated_at"`
+	ErrorCode           string `json:"error_code,omitempty"`
+	ErrorMessage        string `json:"error_message,omitempty"`
 }
 
 func handleMobileDeviceRegister(writer http.ResponseWriter, request *http.Request, deps Dependencies, now func() time.Time) {
@@ -913,6 +938,166 @@ func mobileReviewQueueDetail(ctx context.Context, deps Dependencies, queueID str
 	return []mobileReviewItem{}, nil
 }
 
+func handleMobileReviewQueueDecision(writer http.ResponseWriter, request *http.Request, deps Dependencies) {
+	if deps.Store == nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "mobile_review_store_unavailable", "runtime store unavailable")
+		return
+	}
+	queueID, err := url.PathUnescape(request.PathValue("queue_id"))
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_review_queue_id", "queue_id is invalid")
+		return
+	}
+	item, ok, err := mobileReviewQueueItemByID(request.Context(), deps, queueID)
+	if err != nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "mobile_review_queue_unavailable", err.Error())
+		return
+	}
+	if !ok {
+		writeAPIError(writer, http.StatusNotFound, "mobile_review_queue_item_not_found", "review queue item was not found")
+		return
+	}
+	var body mobileReviewQueueDecisionRequest
+	if err := decodeMobileJSON(writer, request, &body); err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(body.Action, body.Decision)))
+	if action == "" {
+		writeAPIError(writer, http.StatusBadRequest, "mobile_review_action_required", "action is required")
+		return
+	}
+	reason := strings.TrimSpace(body.Reason)
+	if reason == "" {
+		writeAPIError(writer, http.StatusBadRequest, "mobile_review_reason_required", "reason is required")
+		return
+	}
+	actor := strings.TrimSpace(body.Actor)
+	if actor == "" {
+		actor = "odin-pwa"
+	}
+	switch item.SourceType {
+	case "intake_review":
+		handleMobileIntakeReviewDecision(writer, request, deps, item, action, reason)
+	case "browser_attended_login":
+		handleMobileBrowserLoginDecision(writer, request, deps, item, action, actor, reason)
+	case "approval":
+		writeAPIError(writer, http.StatusConflict, "mobile_review_approval_route_required", "use /mobile/approvals/{approval_id}/decision for approval decisions")
+	default:
+		writeAPIError(writer, http.StatusConflict, "mobile_review_action_unsupported", "this review item is inspect-only in the mobile PWA")
+	}
+}
+
+func mobileReviewQueueItemByID(ctx context.Context, deps Dependencies, queueID string) (mobileReviewItem, bool, error) {
+	items, err := mobileReviewQueue(ctx, deps)
+	if err != nil {
+		return mobileReviewItem{}, false, err
+	}
+	for _, item := range items {
+		if item.QueueID == queueID {
+			return item, true, nil
+		}
+	}
+	return mobileReviewItem{}, false, nil
+}
+
+func handleMobileIntakeReviewDecision(writer http.ResponseWriter, request *http.Request, deps Dependencies, item mobileReviewItem, action string, reason string) {
+	existing, err := deps.Store.GetIntakeItem(request.Context(), item.ObjectID)
+	if err != nil {
+		writeAPIError(writer, http.StatusConflict, "mobile_review_decision_failed", err.Error())
+		return
+	}
+	routingNotes := strings.TrimSpace(existing.RoutingNotes)
+	if routingNotes == "" {
+		routingNotes = "{}"
+	}
+	status := ""
+	decision := ""
+	eventType := runtimeevents.EventIntakeReviewRejected
+	summary := ""
+	switch action {
+	case "reject":
+		status = "rejected"
+		decision = "rejected"
+		eventType = runtimeevents.EventIntakeReviewRejected
+		summary = "Intake review rejected from Odin PWA: " + reason
+	case "clarify":
+		status = "needs_clarification"
+		decision = "clarification_requested"
+		eventType = runtimeevents.EventIntakeReviewClarificationRequested
+		summary = "Operator requested clarification from Odin PWA: " + reason
+	case "archive":
+		status = "archived"
+		decision = "archived"
+		eventType = runtimeevents.EventIntakeReviewArchived
+		summary = "Intake archived from Odin PWA: " + reason
+	default:
+		writeAPIError(writer, http.StatusConflict, "mobile_review_action_unsupported", "mobile intake review supports reject, clarify, or archive; use odin review for accept/promote")
+		return
+	}
+	updated, err := deps.Store.ReviewIntakeItem(request.Context(), sqlite.ReviewIntakeItemParams{
+		ID:             item.ObjectID,
+		Status:         status,
+		Summary:        summary,
+		RoutingNotes:   routingNotes,
+		EventType:      eventType,
+		Decision:       decision,
+		PolicyDecision: "mobile_review_decision",
+		PolicyReason:   reason,
+	})
+	if err != nil {
+		writeAPIError(writer, http.StatusConflict, "mobile_review_decision_failed", err.Error())
+		return
+	}
+	writeMobileJSON(writer, http.StatusOK, mobileReviewQueueDecisionResponse{
+		QueueID:    item.QueueID,
+		SourceType: item.SourceType,
+		ObjectID:   item.ObjectID,
+		Action:     action,
+		Status:     updated.Status,
+		Result:     decision,
+		NextStep:   "refresh the review queue",
+	})
+}
+
+func handleMobileBrowserLoginDecision(writer http.ResponseWriter, request *http.Request, deps Dependencies, item mobileReviewItem, action string, actor string, reason string) {
+	if action != "complete" && action != "mark-complete" {
+		writeAPIError(writer, http.StatusConflict, "mobile_review_action_unsupported", "browser login review supports complete after manual login")
+		return
+	}
+	loginRequest, err := deps.Store.GetBrowserSessionLoginRequest(request.Context(), item.ObjectID)
+	if err != nil {
+		statusCode, code := browserSessionHandoffErrorStatus(err)
+		writeAPIError(writer, statusCode, code, err.Error())
+		return
+	}
+	session, completed, err := deps.Store.VerifyBrowserSession(request.Context(), sqlite.VerifyBrowserSessionParams{
+		SessionID:      loginRequest.SessionID,
+		LoginRequestID: loginRequest.ID,
+		Actor:          actor,
+		Reason:         "operator attested manual browser handoff completion from mobile PWA: " + reason,
+	})
+	if err != nil {
+		statusCode, code := browserSessionHandoffErrorStatus(err)
+		writeAPIError(writer, statusCode, code, err.Error())
+		return
+	}
+	if completed == nil {
+		writeAPIError(writer, http.StatusInternalServerError, "browser_handoff_completion_failed", "login request completion was not recorded")
+		return
+	}
+	writeMobileJSON(writer, http.StatusOK, mobileReviewQueueDecisionResponse{
+		QueueID:     item.QueueID,
+		SourceType:  item.SourceType,
+		ObjectID:    item.ObjectID,
+		Action:      "complete",
+		Status:      string(completed.Status),
+		Result:      string(session.Status),
+		NextStep:    "browser session verified",
+		CompletedAt: formatMobileOptionalTime(completed.CompletedAt),
+	})
+}
+
 func mobileNotifications(ctx context.Context, deps Dependencies) ([]mobileNotificationView, error) {
 	items, err := mobileReviewQueue(ctx, deps)
 	if err != nil {
@@ -981,23 +1166,56 @@ func mobileBrowserLoginReviewItems(ctx context.Context, deps Dependencies) ([]mo
 				continue
 			}
 			deepLink := fmt.Sprintf("/browser/session/handoff?handoff_id=%s", request.HandoffID)
+			allowedActions := []string{"open-handoff"}
+			browserEvent := "browser_attended_login_required"
+			reason := "manual_login_required"
+			realBrowserEvidence := false
+			if runner, ok, err := mobileStartedBrowserHandoffRunner(ctx, deps, request.ID); err != nil {
+				return nil, err
+			} else if ok {
+				deepLink = strings.TrimSpace(*runner.ViewerURL)
+				allowedActions = []string{"open-viewer"}
+				browserEvent = "browser_attended_login_started"
+				reason = "manual_login_in_progress"
+				realBrowserEvidence = mobileBrowserRunnerRealBrowserEvidence(runner)
+			}
 			item := mobileReviewItem{
-				QueueID:        fmt.Sprintf("browser-login:%d", request.ID),
-				SourceType:     "browser_attended_login",
-				ObjectID:       request.ID,
-				ObjectKey:      fmt.Sprintf("browser-login-%d", request.ID),
-				Title:          fmt.Sprintf("Attended login required: %s", firstNonEmpty(session.Name, session.Domain)),
-				Status:         string(request.Status),
-				Reason:         "manual_login_required",
-				AllowedActions: []string{"open-handoff"},
-				BrowserEvent:   "browser_attended_login_required",
-				DeepLink:       deepLink,
+				QueueID:             fmt.Sprintf("browser-login:%d", request.ID),
+				SourceType:          "browser_attended_login",
+				ObjectID:            request.ID,
+				ObjectKey:           fmt.Sprintf("browser-login-%d", request.ID),
+				Title:               fmt.Sprintf("Attended login required: %s", firstNonEmpty(session.Name, session.Domain)),
+				Status:              string(request.Status),
+				Reason:              reason,
+				AllowedActions:      allowedActions,
+				BrowserEvent:        browserEvent,
+				DeepLink:            deepLink,
+				RealBrowserEvidence: realBrowserEvidence,
 			}
 			item.Notification = mobileNotification(item.BrowserEvent, item.ObjectKey, item.Title, item.DeepLink)
 			items = append(items, item)
 		}
 	}
 	return items, nil
+}
+
+func mobileStartedBrowserHandoffRunner(ctx context.Context, deps Dependencies, loginRequestID int64) (sqlite.BrowserHandoffRunner, bool, error) {
+	runners, err := deps.Store.ListBrowserHandoffRunners(ctx, sqlite.ListBrowserHandoffRunnersParams{LoginRequestID: loginRequestID})
+	if err != nil {
+		return sqlite.BrowserHandoffRunner{}, false, err
+	}
+	for index := len(runners) - 1; index >= 0; index-- {
+		runner := runners[index]
+		if runner.Status != sqlite.BrowserHandoffRunnerStatusStarted || runner.ViewerURL == nil || strings.TrimSpace(*runner.ViewerURL) == "" {
+			continue
+		}
+		return runner, true, nil
+	}
+	return sqlite.BrowserHandoffRunner{}, false, nil
+}
+
+func mobileBrowserRunnerRealBrowserEvidence(runner sqlite.BrowserHandoffRunner) bool {
+	return strings.HasPrefix(mobileOptionalString(runner.RunnerID), "novnc-real-")
 }
 
 func handleMobileApprovalDetail(writer http.ResponseWriter, request *http.Request, deps Dependencies) (mobileApprovalView, bool) {
@@ -1656,19 +1874,22 @@ func mobileBrowserStatus(ctx context.Context, deps Dependencies) (mobileBrowserS
 			}
 			for _, runner := range runners {
 				response.Runners = append(response.Runners, mobileBrowserRunnerView{
-					ID:             runner.ID,
-					SessionID:      runner.SessionID,
-					LoginRequestID: runner.LoginRequestID,
-					Status:         string(runner.Status),
-					ExpiresAt:      runner.ExpiresAt.UTC().Format(time.RFC3339),
-					StartedAt:      formatMobileOptionalTime(runner.StartedAt),
-					ExitedAt:       formatMobileOptionalTime(runner.ExitedAt),
-					CompletedAt:    formatMobileOptionalTime(runner.CompletedAt),
-					CancelledAt:    formatMobileOptionalTime(runner.CancelledAt),
-					CreatedAt:      runner.CreatedAt.UTC().Format(time.RFC3339),
-					UpdatedAt:      runner.UpdatedAt.UTC().Format(time.RFC3339),
-					ErrorCode:      mobileOptionalString(runner.ErrorCode),
-					ErrorMessage:   mobileOptionalString(runner.ErrorMessage),
+					ID:                  runner.ID,
+					SessionID:           runner.SessionID,
+					LoginRequestID:      runner.LoginRequestID,
+					Status:              string(runner.Status),
+					ViewerURL:           mobileOptionalString(runner.ViewerURL),
+					RunnerID:            mobileOptionalString(runner.RunnerID),
+					RealBrowserEvidence: mobileBrowserRunnerRealBrowserEvidence(runner),
+					ExpiresAt:           runner.ExpiresAt.UTC().Format(time.RFC3339),
+					StartedAt:           formatMobileOptionalTime(runner.StartedAt),
+					ExitedAt:            formatMobileOptionalTime(runner.ExitedAt),
+					CompletedAt:         formatMobileOptionalTime(runner.CompletedAt),
+					CancelledAt:         formatMobileOptionalTime(runner.CancelledAt),
+					CreatedAt:           runner.CreatedAt.UTC().Format(time.RFC3339),
+					UpdatedAt:           runner.UpdatedAt.UTC().Format(time.RFC3339),
+					ErrorCode:           mobileOptionalString(runner.ErrorCode),
+					ErrorMessage:        mobileOptionalString(runner.ErrorMessage),
 				})
 			}
 		}

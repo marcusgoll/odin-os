@@ -3,11 +3,74 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
-const renderWidth = 76
+const (
+	defaultRenderWidth = 76
+	minRenderWidth     = 52
+	maxRenderWidth     = 160
+	wideRenderWidth    = 118
+	columnGap          = 2
+)
+
+const (
+	ansiReset  = "\x1b[0m"
+	ansiDim    = "\x1b[2m"
+	ansiRed    = "\x1b[31m"
+	ansiGreen  = "\x1b[32m"
+	ansiYellow = "\x1b[33m"
+	ansiBlue   = "\x1b[34m"
+	ansiCyan   = "\x1b[36m"
+	ansiBold   = "\x1b[1m"
+)
+
+type renderOptions struct {
+	Width int
+	Color bool
+}
+
+type panel struct {
+	Title string
+	Rows  []string
+	Span  bool
+}
 
 func RenderOverview(model Model) string {
+	return renderOverview(model, renderOptions{Width: defaultRenderWidth})
+}
+
+func RenderOverviewForTerminal(model Model, width int, color bool) string {
+	return renderOverview(model, renderOptions{Width: width, Color: color})
+}
+
+func renderOverview(model Model, options renderOptions) string {
+	width := normalizedRenderWidth(options.Width)
+	panels := []panel{
+		observabilityPanel(model, options.Color),
+		actionPanel(model, options.Color),
+		agentsPanel(model),
+		goalsPanel(model),
+		pullRequestsPanel(model),
+		approvalsPanel(model),
+		logsPanel(model),
+	}
+
+	var builder strings.Builder
+	if width >= wideRenderWidth {
+		writeResponsivePanels(&builder, panels, width, options.Color)
+		return builder.String()
+	}
+	for index, panel := range panels {
+		writePanel(&builder, panel, width, options.Color)
+		if index < len(panels)-1 {
+			builder.WriteByte('\n')
+		}
+	}
+	return builder.String()
+}
+
+func observabilityPanel(model Model, color bool) panel {
 	status := strings.ToUpper(model.Status)
 	if status == "" || !model.TelemetryAvailable || model.TelemetryStale {
 		status = "UNKNOWN"
@@ -16,95 +79,389 @@ func RenderOverview(model Model) string {
 	if model.TelemetryAvailable {
 		score = fmt.Sprintf("%d", model.HealthScore)
 	}
-	phase := model.LifecyclePhase
-	if phase == "" {
-		phase = "unknown"
-	}
+	phase := valueOrUnknown(model.LifecyclePhase)
 	telemetry := "fresh"
-	if model.TelemetryStale {
+	if !model.TelemetryAvailable {
+		telemetry = "unavailable"
+	} else if model.TelemetryStale {
 		telemetry = "stale"
 	}
 
-	var builder strings.Builder
-	writeBoxTop(&builder, "ODIN OBSERVABILITY")
-	writeBoxRow(&builder, labelledRow("HEALTH", status))
-	writeBoxRow(&builder, labelledRow("SCORE", score))
-	writeBoxRow(&builder, labelledRow("TELEMETRY", telemetry))
-	writeBoxRow(&builder, labelledRow("PHASE", phase))
-	writeBoxRow(&builder, labelledRow("ACTIVE RUNS", fmt.Sprintf("%d", model.ActiveRuns)))
-	writeBoxBottom(&builder)
-	builder.WriteByte('\n')
+	rows := []string{}
+	if model.Name != "" {
+		rows = append(rows, labelledRow("NAME", model.Name))
+	}
+	rows = append(rows,
+		labelledRow("WATCH", watchLabel(model)),
+		labelledRow("HEALTH", styleStatus(status, color)),
+		labelledRow("SCORE", styleScore(score, model.HealthScore, color)),
+		labelledRow("TELEMETRY", styleTelemetry(telemetry, color)),
+		labelledRow("PHASE", phase),
+		labelledRow("ACTIVE RUNS", styleCount(model.ActiveRuns, model.ActiveRuns > 0, color)),
+	)
+	return panel{Title: "ODIN OBSERVABILITY", Rows: rows}
+}
 
-	writeBoxTop(&builder, "ACTION REQUIRED")
-	writeBoxRow(&builder, labelledRow("APPROVALS", fmt.Sprintf("%d", model.ApprovalsWaiting)))
-	writeBoxRow(&builder, labelledRow("BLOCKED", fmt.Sprintf("%d", model.BlockedItems)))
-	writeBoxRow(&builder, labelledRow("REVIEW QUEUE", fmt.Sprintf("%d", model.ReviewQueueItems)))
-	writeBoxRow(&builder, labelledRow("FAILED WORK", fmt.Sprintf("%d", model.FailedWorkItems)))
-	writeBoxRow(&builder, labelledRow("RECOVERY", fmt.Sprintf("%d", model.RecoveryRecommendations)))
-	writeBoxBottom(&builder)
-	builder.WriteByte('\n')
+func actionPanel(model Model, color bool) panel {
+	return panel{Title: "ACTION REQUIRED", Rows: []string{
+		labelledRow("APPROVALS", styleCount(model.ApprovalsWaiting, model.ApprovalsWaiting > 0, color)),
+		labelledRow("BLOCKED", styleCount(model.BlockedItems, model.BlockedItems > 0, color)),
+		labelledRow("REVIEW QUEUE", styleCount(model.ReviewQueueItems, model.ReviewQueueItems > 0, color)),
+		labelledRow("FAILED WORK", styleCount(model.FailedWorkItems, model.FailedWorkItems > 0, color)),
+		labelledRow("RECOVERY", styleCount(model.RecoveryRecommendations, model.RecoveryRecommendations > 0, color)),
+	}}
+}
 
-	writeBoxTop(&builder, "RECENT LOGS")
+func agentsPanel(model Model) panel {
+	rows := []string{"none"}
+	if len(model.Agents) > 0 {
+		rows = rows[:0]
+		for _, agent := range model.Agents {
+			rows = append(rows, fmt.Sprintf(
+				"%s task=%s project=%s status=%s",
+				valueOrNone(agent.Name),
+				valueOrNone(agent.Task),
+				valueOrNone(agent.Project),
+				valueOrNone(agent.Status),
+			))
+		}
+	}
+	return panel{Title: "AGENTS RUNNING", Rows: rows}
+}
+
+func goalsPanel(model Model) panel {
+	rows := []string{"none"}
+	if len(model.Goals) > 0 {
+		rows = rows[:0]
+		for _, goal := range model.Goals {
+			rows = append(rows, fmt.Sprintf(
+				"goal=%d status=%s run=%s title=%s",
+				goal.ID,
+				valueOrNone(goal.Status),
+				valueOrNone(goal.CurrentRun),
+				valueOrNone(goal.Title),
+			))
+		}
+	}
+	return panel{Title: "CURRENT GOALS", Rows: rows}
+}
+
+func pullRequestsPanel(model Model) panel {
+	rows := []string{"none"}
+	if len(model.PullRequests) > 0 {
+		rows = rows[:0]
+		for _, pr := range model.PullRequests {
+			rows = append(rows, fmt.Sprintf(
+				"%s %s#%d state=%s ci=%s title=%s",
+				valueOrNone(pr.Project),
+				valueOrNone(pr.Repo),
+				pr.Number,
+				valueOrNone(pr.State),
+				valueOrNone(pr.CI),
+				valueOrNone(pr.Title),
+			))
+		}
+	}
+	return panel{Title: "PROJECT PRS + CI", Rows: rows}
+}
+
+func approvalsPanel(model Model) panel {
+	rows := []string{"none"}
+	if len(model.Approvals) > 0 {
+		rows = rows[:0]
+		for _, approval := range model.Approvals {
+			rows = append(rows, fmt.Sprintf(
+				"approval=%d task=%s project=%s status=%s resolver=%s",
+				approval.ID,
+				valueOrNone(approval.Task),
+				valueOrNone(approval.Project),
+				valueOrNone(approval.Status),
+				valueOrNone(approval.Resolver),
+			))
+		}
+	}
+	return panel{Title: "APPROVALS WAITING", Rows: rows}
+}
+
+func logsPanel(model Model) panel {
+	rows := []string{"none"}
 	if model.LogsUnavailable != "" {
-		writeBoxRow(&builder, "unavailable: "+model.LogsUnavailable)
-		writeBoxBottom(&builder)
-		return builder.String()
-	}
-	if len(model.Logs) == 0 {
-		writeBoxRow(&builder, "none")
-		writeBoxBottom(&builder)
-		return builder.String()
-	}
-	for _, entry := range model.Logs {
-		line := strings.TrimSpace(entry.Line)
-		if line == "" {
-			line = "<empty>"
+		rows = []string{
+			"Loki unavailable - runtime panels continue from store projections",
+			"unavailable: " + model.LogsUnavailable,
 		}
-		if entry.Timestamp != "" {
-			writeBoxRow(&builder, entry.Timestamp+"  "+line)
-			continue
-		}
-		writeBoxRow(&builder, line)
+		return panel{Title: "ODIN LOGS", Rows: rows, Span: true}
 	}
-	writeBoxBottom(&builder)
-	return builder.String()
+	if len(model.Logs) > 0 {
+		rows = rows[:0]
+		for _, entry := range model.Logs {
+			line := strings.TrimSpace(entry.Line)
+			if line == "" {
+				line = "<empty>"
+			}
+			if entry.Timestamp != "" {
+				rows = append(rows, entry.Timestamp+"  "+line)
+				continue
+			}
+			rows = append(rows, line)
+		}
+	}
+	return panel{Title: "ODIN LOGS", Rows: rows, Span: true}
 }
 
 func labelledRow(label string, value string) string {
 	return fmt.Sprintf("%-13s %s", label, value)
 }
 
-func writeBoxTop(builder *strings.Builder, title string) {
-	prefix := "┌─ " + title + " "
-	builder.WriteString(prefix)
-	builder.WriteString(strings.Repeat("─", renderWidth-runeLen(prefix)-1))
-	builder.WriteString("┐\n")
+func valueOrNone(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "none"
+	}
+	return value
 }
 
-func writeBoxRow(builder *strings.Builder, text string) {
-	contentWidth := renderWidth - 4
+func valueOrUnknown(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
+
+func watchLabel(model Model) string {
+	switch {
+	case !model.TelemetryAvailable:
+		return "watching store; telemetry offline"
+	case model.TelemetryStale:
+		return "telemetry stale"
+	case model.ApprovalsWaiting > 0 || model.BlockedItems > 0 || model.FailedWorkItems > 0 || model.RecoveryRecommendations > 0:
+		return "attention needed"
+	case model.ActiveRuns > 0:
+		return "active"
+	default:
+		return "quiet"
+	}
+}
+
+func writeResponsivePanels(builder *strings.Builder, panels []panel, width int, color bool) {
+	columnWidth := (width - columnGap) / 2
+	for index := 0; index < len(panels); index++ {
+		current := panels[index]
+		if current.Span || index == len(panels)-1 || panels[index+1].Span {
+			writePanel(builder, current, width, color)
+			if index < len(panels)-1 {
+				builder.WriteByte('\n')
+			}
+			continue
+		}
+		left := renderPanelLines(current, columnWidth, color)
+		right := renderPanelLines(panels[index+1], width-columnWidth-columnGap, color)
+		writePanelColumns(builder, left, right, columnGap)
+		index++
+		if index < len(panels)-1 {
+			builder.WriteByte('\n')
+		}
+	}
+}
+
+func writePanel(builder *strings.Builder, panel panel, width int, color bool) {
+	for _, line := range renderPanelLines(panel, width, color) {
+		builder.WriteString(line)
+		builder.WriteByte('\n')
+	}
+}
+
+func renderPanelLines(panel panel, width int, color bool) []string {
+	width = normalizedPanelWidth(width)
+	lines := []string{boxTop(panel.Title, width, color)}
+	for _, row := range panel.Rows {
+		lines = append(lines, boxRow(row, width))
+	}
+	lines = append(lines, boxBottom(width))
+	return lines
+}
+
+func writePanelColumns(builder *strings.Builder, left []string, right []string, gap int) {
+	height := len(left)
+	if len(right) > height {
+		height = len(right)
+	}
+	leftWidth := visibleLen(left[0])
+	rightWidth := visibleLen(right[0])
+	for index := 0; index < height; index++ {
+		if index < len(left) {
+			builder.WriteString(left[index])
+		} else {
+			builder.WriteString(strings.Repeat(" ", leftWidth))
+		}
+		builder.WriteString(strings.Repeat(" ", gap))
+		if index < len(right) {
+			builder.WriteString(right[index])
+		} else {
+			builder.WriteString(strings.Repeat(" ", rightWidth))
+		}
+		builder.WriteByte('\n')
+	}
+}
+
+func boxTop(title string, width int, color bool) string {
+	renderedTitle := title
+	if color {
+		renderedTitle = ansiBold + ansiCyan + title + ansiReset
+	}
+	prefix := "┌─ " + renderedTitle + " "
+	return prefix + strings.Repeat("─", width-visibleLen(prefix)-1) + "┐"
+}
+
+func boxRow(text string, width int) string {
+	contentWidth := width - 4
 	text = strings.ReplaceAll(text, "\n", " ")
-	text = truncateRunes(text, contentWidth)
-	builder.WriteString("│ ")
-	builder.WriteString(text)
-	builder.WriteString(strings.Repeat(" ", contentWidth-runeLen(text)))
-	builder.WriteString(" │\n")
+	text = truncateVisible(text, contentWidth)
+	return "│ " + text + strings.Repeat(" ", contentWidth-visibleLen(text)) + " │"
 }
 
-func writeBoxBottom(builder *strings.Builder) {
-	builder.WriteString("└")
-	builder.WriteString(strings.Repeat("─", renderWidth-2))
-	builder.WriteString("┘\n")
+func boxBottom(width int) string {
+	return "└" + strings.Repeat("─", width-2) + "┘"
 }
 
-func truncateRunes(text string, limit int) string {
-	if runeLen(text) <= limit {
+func normalizedRenderWidth(width int) int {
+	if width <= 0 {
+		return defaultRenderWidth
+	}
+	if width < minRenderWidth {
+		return minRenderWidth
+	}
+	if width > maxRenderWidth {
+		return maxRenderWidth
+	}
+	return width
+}
+
+func normalizedPanelWidth(width int) int {
+	if width < minRenderWidth {
+		return minRenderWidth
+	}
+	return width
+}
+
+func styleStatus(status string, color bool) string {
+	if !color {
+		return status
+	}
+	switch strings.ToUpper(status) {
+	case "HEALTHY", "OK", "READY":
+		return ansiGreen + status + ansiReset
+	case "DEGRADED", "UNKNOWN":
+		return ansiYellow + status + ansiReset
+	default:
+		return ansiRed + status + ansiReset
+	}
+}
+
+func styleScore(score string, value int, color bool) string {
+	if !color || score == "unknown" {
+		return score
+	}
+	switch {
+	case value >= 90:
+		return ansiGreen + score + ansiReset
+	case value >= 70:
+		return ansiYellow + score + ansiReset
+	default:
+		return ansiRed + score + ansiReset
+	}
+}
+
+func styleTelemetry(telemetry string, color bool) string {
+	if !color {
+		return telemetry
+	}
+	switch telemetry {
+	case "fresh":
+		return ansiGreen + telemetry + ansiReset
+	case "stale":
+		return ansiYellow + telemetry + ansiReset
+	default:
+		return ansiBlue + telemetry + ansiReset
+	}
+}
+
+func styleCount(count int, attention bool, color bool) string {
+	value := fmt.Sprintf("%d", count)
+	if !color {
+		return value
+	}
+	if attention {
+		return ansiYellow + value + ansiReset
+	}
+	return ansiDim + value + ansiReset
+}
+
+func truncateVisible(text string, limit int) string {
+	if visibleLen(text) <= limit {
 		return text
 	}
-	runes := []rune(text)
+	plain := stripANSI(text)
+	runes := []rune(plain)
+	if len(runes) <= limit {
+		return plain
+	}
 	return string(runes[:limit-3]) + "..."
 }
 
-func runeLen(text string) int {
-	return len([]rune(text))
+func visibleLen(text string) int {
+	length := 0
+	for index := 0; index < len(text); {
+		if text[index] == '\x1b' {
+			next := index + 1
+			if next < len(text) && text[next] == '[' {
+				next++
+				for next < len(text) {
+					if text[next] >= '@' && text[next] <= '~' {
+						next++
+						break
+					}
+					next++
+				}
+				index = next
+				continue
+			}
+		}
+		_, size := utf8.DecodeRuneInString(text[index:])
+		if size == 0 {
+			break
+		}
+		length++
+		index += size
+	}
+	return length
+}
+
+func stripANSI(text string) string {
+	var builder strings.Builder
+	for index := 0; index < len(text); {
+		if text[index] == '\x1b' {
+			next := index + 1
+			if next < len(text) && text[next] == '[' {
+				next++
+				for next < len(text) {
+					if text[next] >= '@' && text[next] <= '~' {
+						next++
+						break
+					}
+					next++
+				}
+				index = next
+				continue
+			}
+		}
+		r, size := utf8.DecodeRuneInString(text[index:])
+		if size == 0 {
+			break
+		}
+		builder.WriteRune(r)
+		index += size
+	}
+	return builder.String()
 }

@@ -194,26 +194,27 @@ type browserSessionHandoffView struct {
 }
 
 type browserSessionRunnerView struct {
-	ID             int64   `json:"id"`
-	SessionID      int64   `json:"session_id"`
-	LoginRequestID int64   `json:"login_request_id"`
-	HandoffID      string  `json:"handoff_id"`
-	Status         string  `json:"status"`
-	ViewerURL      *string `json:"viewer_url"`
-	RunnerID       *string `json:"runner_id"`
-	ProcessID      *int64  `json:"process_id"`
-	BindAddr       *string `json:"bind_addr"`
-	PrivateBaseURL *string `json:"private_base_url"`
-	PublicBaseURL  *string `json:"public_base_url"`
-	ExpiresAt      string  `json:"expires_at"`
-	StartedAt      string  `json:"started_at,omitempty"`
-	ExitedAt       string  `json:"exited_at,omitempty"`
-	CompletedAt    string  `json:"completed_at,omitempty"`
-	CancelledAt    string  `json:"cancelled_at,omitempty"`
-	CreatedAt      string  `json:"created_at"`
-	UpdatedAt      string  `json:"updated_at"`
-	ErrorCode      *string `json:"error_code"`
-	ErrorMessage   *string `json:"error_message"`
+	ID                  int64   `json:"id"`
+	SessionID           int64   `json:"session_id"`
+	LoginRequestID      int64   `json:"login_request_id"`
+	HandoffID           string  `json:"handoff_id"`
+	Status              string  `json:"status"`
+	RealBrowserEvidence bool    `json:"real_browser_evidence"`
+	ViewerURL           *string `json:"viewer_url"`
+	RunnerID            *string `json:"runner_id"`
+	ProcessID           *int64  `json:"process_id"`
+	BindAddr            *string `json:"bind_addr"`
+	PrivateBaseURL      *string `json:"private_base_url"`
+	PublicBaseURL       *string `json:"public_base_url"`
+	ExpiresAt           string  `json:"expires_at"`
+	StartedAt           string  `json:"started_at,omitempty"`
+	ExitedAt            string  `json:"exited_at,omitempty"`
+	CompletedAt         string  `json:"completed_at,omitempty"`
+	CancelledAt         string  `json:"cancelled_at,omitempty"`
+	CreatedAt           string  `json:"created_at"`
+	UpdatedAt           string  `json:"updated_at"`
+	ErrorCode           *string `json:"error_code"`
+	ErrorMessage        *string `json:"error_message"`
 }
 
 type browserSessionRunnerPlanView struct {
@@ -517,9 +518,13 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		_, err = fmt.Fprintf(stdout, "browser_session_profile=%d path=%s exists=%t created=%t\n", view.SessionID, view.ProfilePath, view.ProfilePathExists, view.Created)
 		return err
 	case "login-request":
+		handoffBaseURL := strings.TrimSpace(command.HandoffBaseURL)
+		if handoffBaseURL == "" {
+			handoffBaseURL = strings.TrimSpace(os.Getenv("ODIN_BROWSER_HANDOFF_BASE_URL"))
+		}
 		request, err := app.Store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
 			SessionID:      command.ID,
-			HandoffBaseURL: command.HandoffBaseURL,
+			HandoffBaseURL: handoffBaseURL,
 			ExpiresAt:      time.Now().UTC().Add(10 * time.Minute),
 		})
 		if err != nil {
@@ -1554,27 +1559,32 @@ func newBrowserSessionHandoffView(handoff sqlite.BrowserSessionLoginHandoff) bro
 
 func newBrowserSessionRunnerView(runner sqlite.BrowserHandoffRunner) browserSessionRunnerView {
 	return browserSessionRunnerView{
-		ID:             runner.ID,
-		SessionID:      runner.SessionID,
-		LoginRequestID: runner.LoginRequestID,
-		HandoffID:      runner.HandoffID,
-		Status:         string(runner.Status),
-		ViewerURL:      cloneBrowserSessionStringPtr(runner.ViewerURL),
-		RunnerID:       cloneBrowserSessionStringPtr(runner.RunnerID),
-		ProcessID:      cloneBrowserSessionInt64Ptr(runner.ProcessID),
-		BindAddr:       cloneBrowserSessionStringPtr(runner.BindAddr),
-		PrivateBaseURL: cloneBrowserSessionStringPtr(runner.PrivateBaseURL),
-		PublicBaseURL:  cloneBrowserSessionStringPtr(runner.PublicBaseURL),
-		ExpiresAt:      formatBrowserSessionTime(runner.ExpiresAt),
-		StartedAt:      formatBrowserSessionOptionalTime(runner.StartedAt),
-		ExitedAt:       formatBrowserSessionOptionalTime(runner.ExitedAt),
-		CompletedAt:    formatBrowserSessionOptionalTime(runner.CompletedAt),
-		CancelledAt:    formatBrowserSessionOptionalTime(runner.CancelledAt),
-		CreatedAt:      formatBrowserSessionTime(runner.CreatedAt),
-		UpdatedAt:      formatBrowserSessionTime(runner.UpdatedAt),
-		ErrorCode:      cloneBrowserSessionStringPtr(runner.ErrorCode),
-		ErrorMessage:   cloneBrowserSessionStringPtr(runner.ErrorMessage),
+		ID:                  runner.ID,
+		SessionID:           runner.SessionID,
+		LoginRequestID:      runner.LoginRequestID,
+		HandoffID:           runner.HandoffID,
+		Status:              string(runner.Status),
+		RealBrowserEvidence: browserSessionRunnerRealBrowserEvidence(runner),
+		ViewerURL:           cloneBrowserSessionStringPtr(runner.ViewerURL),
+		RunnerID:            cloneBrowserSessionStringPtr(runner.RunnerID),
+		ProcessID:           cloneBrowserSessionInt64Ptr(runner.ProcessID),
+		BindAddr:            cloneBrowserSessionStringPtr(runner.BindAddr),
+		PrivateBaseURL:      cloneBrowserSessionStringPtr(runner.PrivateBaseURL),
+		PublicBaseURL:       cloneBrowserSessionStringPtr(runner.PublicBaseURL),
+		ExpiresAt:           formatBrowserSessionTime(runner.ExpiresAt),
+		StartedAt:           formatBrowserSessionOptionalTime(runner.StartedAt),
+		ExitedAt:            formatBrowserSessionOptionalTime(runner.ExitedAt),
+		CompletedAt:         formatBrowserSessionOptionalTime(runner.CompletedAt),
+		CancelledAt:         formatBrowserSessionOptionalTime(runner.CancelledAt),
+		CreatedAt:           formatBrowserSessionTime(runner.CreatedAt),
+		UpdatedAt:           formatBrowserSessionTime(runner.UpdatedAt),
+		ErrorCode:           cloneBrowserSessionStringPtr(runner.ErrorCode),
+		ErrorMessage:        cloneBrowserSessionStringPtr(runner.ErrorMessage),
 	}
+}
+
+func browserSessionRunnerRealBrowserEvidence(runner sqlite.BrowserHandoffRunner) bool {
+	return strings.HasPrefix(browserSessionStringPtrValue(runner.RunnerID), "novnc-real-")
 }
 
 func cloneBrowserSessionStringPtr(value *string) *string {
