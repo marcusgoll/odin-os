@@ -100,7 +100,7 @@ func TestRenderOverviewUsesBoxedCockpitLayout(t *testing.T) {
 		"│ SCORE         87",
 		"│ TELEMETRY     fresh",
 		"│ PHASE         run",
-		"┌─ RECENT LOGS ",
+		"┌─ ODIN LOGS ",
 		"│ 1714521600000000000  {\"level\":\"info\",\"message\":\"ready\"}",
 		"└",
 	} {
@@ -120,7 +120,47 @@ func TestRenderOverviewShowsUnavailableLogs(t *testing.T) {
 		LifecyclePhase:     "run",
 		LogsUnavailable:    "loki query failed",
 	})
-	if !strings.Contains(output, "┌─ RECENT LOGS ") || !strings.Contains(output, "│ unavailable: loki query failed") {
+	if !strings.Contains(output, "┌─ ODIN LOGS ") || !strings.Contains(output, "│ unavailable: loki query failed") {
 		t.Fatalf("output = %q, want unavailable logs", output)
+	}
+}
+
+func TestRenderOverviewShowsVisualDeliveryCockpitPanels(t *testing.T) {
+	t.Parallel()
+
+	output := RenderOverview(Model{
+		Name:               "Odin Core",
+		TelemetryAvailable: true,
+		Status:             "healthy",
+		HealthScore:        100,
+		LifecyclePhase:     "run",
+		Agents: []AgentRow{
+			{Name: "codex", Task: "visual-tui", Project: "odin-os", Status: "running"},
+		},
+		Goals: []GoalRow{
+			{ID: 7, Title: "Ship visual TUI", Status: "running", CurrentRun: "12"},
+		},
+		PullRequests: []PullRequestRow{
+			{Project: "odin-os", Repo: "owner/odin-os", Number: 276, Title: "Visual TUI", State: "open", CI: "not_wired"},
+		},
+		Approvals: []ApprovalRow{
+			{ID: 3, Task: "visual-tui", Project: "odin-os", Status: "pending", Resolver: "ok"},
+		},
+	})
+
+	for _, want := range []string{
+		"│ NAME          Odin Core",
+		"┌─ AGENTS RUNNING ",
+		"│ codex task=visual-tui project=odin-os status=running",
+		"┌─ CURRENT GOALS ",
+		"│ goal=7 status=running run=12 title=Ship visual TUI",
+		"┌─ PROJECT PRS + CI ",
+		"│ odin-os owner/odin-os#276 state=open ci=not_wired title=Visual TUI",
+		"┌─ APPROVALS WAITING ",
+		"│ approval=3 task=visual-tui project=odin-os status=pending resolver=ok",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want cockpit fragment %q", output, want)
+		}
 	}
 }

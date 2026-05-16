@@ -27,6 +27,9 @@ func RenderOverview(model Model) string {
 
 	var builder strings.Builder
 	writeBoxTop(&builder, "ODIN OBSERVABILITY")
+	if model.Name != "" {
+		writeBoxRow(&builder, labelledRow("NAME", model.Name))
+	}
 	writeBoxRow(&builder, labelledRow("HEALTH", status))
 	writeBoxRow(&builder, labelledRow("SCORE", score))
 	writeBoxRow(&builder, labelledRow("TELEMETRY", telemetry))
@@ -44,7 +47,78 @@ func RenderOverview(model Model) string {
 	writeBoxBottom(&builder)
 	builder.WriteByte('\n')
 
-	writeBoxTop(&builder, "RECENT LOGS")
+	writeBoxTop(&builder, "AGENTS RUNNING")
+	if len(model.Agents) == 0 {
+		writeBoxRow(&builder, "none")
+	} else {
+		for _, agent := range model.Agents {
+			writeBoxRow(&builder, fmt.Sprintf(
+				"%s task=%s project=%s status=%s",
+				valueOrNone(agent.Name),
+				valueOrNone(agent.Task),
+				valueOrNone(agent.Project),
+				valueOrNone(agent.Status),
+			))
+		}
+	}
+	writeBoxBottom(&builder)
+	builder.WriteByte('\n')
+
+	writeBoxTop(&builder, "CURRENT GOALS")
+	if len(model.Goals) == 0 {
+		writeBoxRow(&builder, "none")
+	} else {
+		for _, goal := range model.Goals {
+			writeBoxRow(&builder, fmt.Sprintf(
+				"goal=%d status=%s run=%s title=%s",
+				goal.ID,
+				valueOrNone(goal.Status),
+				valueOrNone(goal.CurrentRun),
+				valueOrNone(goal.Title),
+			))
+		}
+	}
+	writeBoxBottom(&builder)
+	builder.WriteByte('\n')
+
+	writeBoxTop(&builder, "PROJECT PRS + CI")
+	if len(model.PullRequests) == 0 {
+		writeBoxRow(&builder, "none")
+	} else {
+		for _, pr := range model.PullRequests {
+			writeBoxRow(&builder, fmt.Sprintf(
+				"%s %s#%d state=%s ci=%s title=%s",
+				valueOrNone(pr.Project),
+				valueOrNone(pr.Repo),
+				pr.Number,
+				valueOrNone(pr.State),
+				valueOrNone(pr.CI),
+				valueOrNone(pr.Title),
+			))
+		}
+	}
+	writeBoxBottom(&builder)
+	builder.WriteByte('\n')
+
+	writeBoxTop(&builder, "APPROVALS WAITING")
+	if len(model.Approvals) == 0 {
+		writeBoxRow(&builder, "none")
+	} else {
+		for _, approval := range model.Approvals {
+			writeBoxRow(&builder, fmt.Sprintf(
+				"approval=%d task=%s project=%s status=%s resolver=%s",
+				approval.ID,
+				valueOrNone(approval.Task),
+				valueOrNone(approval.Project),
+				valueOrNone(approval.Status),
+				valueOrNone(approval.Resolver),
+			))
+		}
+	}
+	writeBoxBottom(&builder)
+	builder.WriteByte('\n')
+
+	writeBoxTop(&builder, "ODIN LOGS")
 	if model.LogsUnavailable != "" {
 		writeBoxRow(&builder, "unavailable: "+model.LogsUnavailable)
 		writeBoxBottom(&builder)
@@ -72,6 +146,14 @@ func RenderOverview(model Model) string {
 
 func labelledRow(label string, value string) string {
 	return fmt.Sprintf("%-13s %s", label, value)
+}
+
+func valueOrNone(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "none"
+	}
+	return value
 }
 
 func writeBoxTop(builder *strings.Builder, title string) {

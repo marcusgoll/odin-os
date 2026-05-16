@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -261,6 +262,77 @@ func TestClientQueryRecentLogsParsesLokiStreams(t *testing.T) {
 	}
 }
 
+func TestRunWithProviderEnrichesRenderedFrame(t *testing.T) {
+	t.Parallel()
+
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writePrometheusQueryResponse(t, w, r.URL.Query().Get("query"))
+	}))
+	defer prometheus.Close()
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"result": []any{},
+			},
+		})
+	}))
+	defer loki.Close()
+
+	var stdout strings.Builder
+	err := RunWithProvider(context.Background(), []string{
+		"--once",
+		"--prometheus-url", prometheus.URL,
+		"--loki-url", loki.URL,
+	}, &stdout, providerFunc(func(_ context.Context, model *Model) error {
+		model.Name = "Odin Core"
+		model.Agents = []AgentRow{{Name: "codex", Task: "goal-7", Project: "odin-os", Status: "running"}}
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("RunWithProvider() error = %v", err)
+	}
+	for _, want := range []string{
+		"│ NAME          Odin Core",
+		"│ codex task=goal-7 project=odin-os status=running",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+		}
+	}
+}
+
+func TestRunWithProviderReturnsProviderError(t *testing.T) {
+	t.Parallel()
+
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writePrometheusQueryResponse(t, w, r.URL.Query().Get("query"))
+	}))
+	defer prometheus.Close()
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"result": []any{},
+			},
+		})
+	}))
+	defer loki.Close()
+
+	wantErr := fmt.Errorf("provider failed")
+	var stdout strings.Builder
+	err := RunWithProvider(context.Background(), []string{
+		"--once",
+		"--prometheus-url", prometheus.URL,
+		"--loki-url", loki.URL,
+	}, &stdout, providerFunc(func(context.Context, *Model) error {
+		return wantErr
+	}))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("RunWithProvider() error = %v, want %v", err, wantErr)
+	}
+}
+
 func writePrometheusQueryResponse(t *testing.T, w http.ResponseWriter, query string) {
 	t.Helper()
 
@@ -343,3 +415,9 @@ func (writer *cancelAfterWritesWriter) String() string {
 }
 
 var _ io.Writer = (*cancelAfterWritesWriter)(nil)
+
+type providerFunc func(context.Context, *Model) error
+
+func (fn providerFunc) EnrichModel(ctx context.Context, model *Model) error {
+	return fn(ctx, model)
+}

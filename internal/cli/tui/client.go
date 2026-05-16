@@ -25,9 +25,18 @@ type Client struct {
 	PrometheusURL string
 	LokiURL       string
 	HTTPClient    *http.Client
+	Provider      ModelProvider
+}
+
+type ModelProvider interface {
+	EnrichModel(context.Context, *Model) error
 }
 
 func Run(ctx context.Context, args []string, stdout io.Writer) error {
+	return RunWithProvider(ctx, args, stdout, nil)
+}
+
+func RunWithProvider(ctx context.Context, args []string, stdout io.Writer, provider ModelProvider) error {
 	flags := flag.NewFlagSet("tui", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	once := flags.Bool("once", false, "render once and exit")
@@ -51,6 +60,7 @@ func Run(ctx context.Context, args []string, stdout io.Writer) error {
 	client := Client{
 		PrometheusURL: *prometheusURL,
 		LokiURL:       *lokiURL,
+		Provider:      provider,
 	}
 	if *once {
 		return renderFrame(ctx, client, stdout, false)
@@ -89,6 +99,11 @@ func renderFrame(ctx context.Context, client Client, stdout io.Writer, clear boo
 		model.LogsUnavailable = err.Error()
 	} else {
 		model.Logs = logs
+	}
+	if client.Provider != nil {
+		if err := client.Provider.EnrichModel(ctx, &model); err != nil {
+			return err
+		}
 	}
 	if clear {
 		if _, err := io.WriteString(stdout, clearScreen); err != nil {
