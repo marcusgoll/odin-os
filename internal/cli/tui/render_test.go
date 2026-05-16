@@ -120,8 +120,62 @@ func TestRenderOverviewShowsUnavailableLogs(t *testing.T) {
 		LifecyclePhase:     "run",
 		LogsUnavailable:    "loki query failed",
 	})
-	if !strings.Contains(output, "┌─ ODIN LOGS ") || !strings.Contains(output, "│ unavailable: loki query failed") {
+	if !strings.Contains(output, "┌─ ODIN LOGS ") ||
+		!strings.Contains(output, "│ Loki unavailable - runtime panels continue from store projections") ||
+		!strings.Contains(output, "│ unavailable: loki query failed") {
 		t.Fatalf("output = %q, want unavailable logs", output)
+	}
+}
+
+func TestRenderOverviewUsesResponsiveColumnsOnWideTerminals(t *testing.T) {
+	t.Parallel()
+
+	output := RenderOverviewForTerminal(Model{
+		Name:               "Odin Core",
+		TelemetryAvailable: true,
+		Status:             "degraded",
+		HealthScore:        87,
+		LifecyclePhase:     "run",
+		BlockedItems:       2,
+		Agents: []AgentRow{
+			{Name: "codex", Task: "goal-7", Project: "odin-os", Status: "running"},
+		},
+		Goals: []GoalRow{
+			{ID: 7, Title: "Keep overview visible", Status: "running"},
+		},
+	}, 140, false)
+
+	if !strings.Contains(output, "┐  ┌─ ACTION REQUIRED ") {
+		t.Fatalf("output = %q, want side-by-side observability and action panels", output)
+	}
+	if !strings.Contains(output, "┐  ┌─ CURRENT GOALS ") {
+		t.Fatalf("output = %q, want side-by-side agents and goals panels", output)
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(output, "\n"), "\n") {
+		if visibleLen(line) > 140 {
+			t.Fatalf("line width = %d, want <= 140: %q", visibleLen(line), line)
+		}
+	}
+}
+
+func TestRenderOverviewAddsColorForTerminalOutput(t *testing.T) {
+	t.Parallel()
+
+	output := RenderOverviewForTerminal(Model{
+		TelemetryAvailable: true,
+		Status:             "healthy",
+		HealthScore:        100,
+		LifecyclePhase:     "run",
+	}, 76, true)
+
+	for _, want := range []string{
+		ansiCyan + "ODIN OBSERVABILITY" + ansiReset,
+		ansiGreen + "HEALTHY" + ansiReset,
+		ansiGreen + "100" + ansiReset,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want color fragment %q", output, want)
+		}
 	}
 }
 

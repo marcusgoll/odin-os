@@ -130,7 +130,8 @@ func renderFrame(ctx context.Context, client Client, stdout io.Writer, clear boo
 			return err
 		}
 	}
-	_, err = io.WriteString(stdout, RenderOverview(model))
+	width, color := renderSettings(stdout)
+	_, err = io.WriteString(stdout, RenderOverviewForTerminal(model, width, color))
 	return err
 }
 
