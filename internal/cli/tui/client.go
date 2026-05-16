@@ -92,7 +92,13 @@ func runContinuous(ctx context.Context, client Client, stdout io.Writer, interva
 func renderFrame(ctx context.Context, client Client, stdout io.Writer, clear bool) error {
 	model, err := client.QueryOverview(ctx)
 	if err != nil {
-		return err
+		if !errors.Is(err, ErrUnavailableTelemetry) {
+			return err
+		}
+		model = Model{
+			TelemetryAvailable:   false,
+			TelemetryUnavailable: err.Error(),
+		}
 	}
 	logs, err := client.QueryRecentLogs(ctx)
 	if err != nil {
