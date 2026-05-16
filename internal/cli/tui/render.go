@@ -21,7 +21,9 @@ func RenderOverview(model Model) string {
 		phase = "unknown"
 	}
 	telemetry := "fresh"
-	if model.TelemetryStale {
+	if !model.TelemetryAvailable {
+		telemetry = "unavailable"
+	} else if model.TelemetryStale {
 		telemetry = "stale"
 	}
 

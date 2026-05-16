@@ -302,6 +302,36 @@ func TestRunWithProviderEnrichesRenderedFrame(t *testing.T) {
 	}
 }
 
+func TestRunWithProviderRendersWhenTelemetryIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	var stdout strings.Builder
+	err := RunWithProvider(context.Background(), []string{
+		"--once",
+		"--prometheus-url", "http://127.0.0.1:1",
+		"--loki-url", "http://127.0.0.1:1",
+	}, &stdout, providerFunc(func(_ context.Context, model *Model) error {
+		model.Name = "Odin Core"
+		model.Goals = []GoalRow{{ID: 7, Title: "Keep overview visible", Status: "running"}}
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("RunWithProvider() error = %v", err)
+	}
+	for _, want := range []string{
+		"│ NAME          Odin Core",
+		"│ HEALTH        UNKNOWN",
+		"│ SCORE         unknown",
+		"│ TELEMETRY     unavailable",
+		"│ goal=7 status=running run=none title=Keep overview visible",
+		"unavailable: unavailable telemetry",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+		}
+	}
+}
+
 func TestRunWithProviderReturnsProviderError(t *testing.T) {
 	t.Parallel()
 

@@ -3,6 +3,7 @@ package tui
 type Model struct {
 	Name                    string
 	TelemetryAvailable      bool
+	TelemetryUnavailable    string
 	Status                  string
 	HealthScore             int
 	TelemetryStale          bool

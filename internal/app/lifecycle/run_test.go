@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,7 +19,6 @@ import (
 
 	"odin-os/internal/app/bootstrap"
 	clioverview "odin-os/internal/cli/overview"
-	"odin-os/internal/cli/tui"
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/initiatives"
 	"odin-os/internal/prompts"
@@ -427,7 +425,7 @@ func TestRunTUIOnceInvokesRunner(t *testing.T) {
 	}
 }
 
-func TestRunTUIMissingPrometheusReturnsControlledError(t *testing.T) {
+func TestRunTUIMissingPrometheusStillRendersOverviewPanels(t *testing.T) {
 	root := testRepoRoot(t)
 
 	var stdout bytes.Buffer
@@ -437,11 +435,27 @@ func TestRunTUIMissingPrometheusReturnsControlledError(t *testing.T) {
 		"--prometheus-url", "http://127.0.0.1:1",
 		"--loki-url", "http://127.0.0.1:1",
 	}, strings.NewReader(""), &stdout)
-	if !errors.Is(err, tui.ErrUnavailableTelemetry) {
-		t.Fatalf("Run(tui --once) error = %v, want ErrUnavailableTelemetry", err)
+	if err != nil {
+		t.Fatalf("Run(tui --once) error = %v", err)
 	}
 	if strings.Contains(strings.ToUpper(stdout.String()), "HEALTHY") {
 		t.Fatalf("stdout = %q, must not report healthy when Prometheus is missing", stdout.String())
+	}
+	for _, want := range []string{
+		"│ NAME          Default Workspace",
+		"│ HEALTH        UNKNOWN",
+		"│ SCORE         unknown",
+		"│ TELEMETRY     unavailable",
+		"┌─ AGENTS RUNNING ",
+		"┌─ CURRENT GOALS ",
+		"┌─ PROJECT PRS + CI ",
+		"┌─ APPROVALS WAITING ",
+		"┌─ ODIN LOGS ",
+		"unavailable: unavailable telemetry",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+		}
 	}
 }
 
