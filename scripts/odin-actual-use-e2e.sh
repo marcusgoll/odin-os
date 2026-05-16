@@ -357,6 +357,22 @@ run_odin "Work dispatch: runs list" runs --json
 json_assert "${LAST_OUT}" "any(run.get('run_id') == ${safe_run_id} and run.get('status') == 'completed' for run in data.get('runs', []))" "completed safe run must be in canonical runs list"
 
 log ""
+log "Scenario: Delivery loop"
+run_cmd "Delivery loop: raw intake to PR dry-run" env \
+  HOME="${home_root}" \
+  ODIN_ROOT="${runtime_root}" \
+  ODIN_PROJECTS_OVERLAY="${overlay}" \
+  "${odin_bin}" e2e --scenario "${repo_root}/fixtures/e2e/raw-intake-delivery-dry-run.yaml" --json
+json_assert "${LAST_OUT}" "data.get('status') == 'passed' and data.get('scenario') == 'raw-intake-delivery-dry-run'" "delivery loop fixture must pass"
+json_assert "${LAST_OUT}" "data.get('github', {}).get('mode') == 'fixture' and data.get('github', {}).get('mutated') is False" "delivery loop must not make live GitHub mutations"
+json_assert "${LAST_OUT}" "data.get('codex', {}).get('mode') == 'disabled' and data.get('codex', {}).get('invoked') is False" "delivery loop must keep live Codex disabled"
+json_assert "${LAST_OUT}" "data.get('intake', {}).get('raw_status') == 'routed' and data.get('intake', {}).get('routed_work_item_key') == 'raw-intake-1'" "delivery loop must route raw intake to a work item"
+json_assert "${LAST_OUT}" "data.get('workspace', {}).get('workspace_state') == 'stopped' and data.get('workspace', {}).get('workspace_attached', 0) == 0" "delivery loop must prove tmux/session orchestration is stopped cleanly"
+json_assert "${LAST_OUT}" "data.get('delivery', {}).get('handoff_review_state') == 'review_selected' and all(role in data.get('delivery', {}).get('handoff_review_roles', []) for role in ['reviewer', 'qa', 'security'])" "delivery loop must select worker/reviewer/security review handoff roles"
+json_assert "${LAST_OUT}" "data.get('delivery', {}).get('approval_status') == 'approved' and data.get('delivery', {}).get('approval_resolver_support') == 'supported'" "delivery loop must pass through supported approval resolution"
+json_assert "${LAST_OUT}" "data.get('delivery', {}).get('merge_verified') is True and data.get('delivery', {}).get('merge_task_status') == 'completed'" "delivery loop must verify the dry-run PR merge gate"
+
+log ""
 log "Scenario: Scheduler"
 run_odin "Scheduler: trigger upsert" trigger upsert actual-use-daily initiative="${project_key}" kind=schedule status=enabled next=2026-01-01T00:00:00Z cadence=24h title=Review_actual_use_daily intent=read_only --json
 run_odin "Scheduler: first tick" scheduler tick now="${now_first}" --json
@@ -419,6 +435,7 @@ payload = {
         "Dedupe",
         "Approval gate",
         "Work dispatch",
+        "Delivery loop",
         "Scheduler",
         "Review queue",
         "Observability",
