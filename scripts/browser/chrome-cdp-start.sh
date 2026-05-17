@@ -11,6 +11,7 @@ CHROME_DISPLAY="${ODIN_CHROME_DISPLAY:-:99}"
 CHROME_PROFILE="${ODIN_CHROME_PROFILE_DIR:-${ODIN_DIR}/browser-state/chrome-profile}"
 CHROME_PID_FILE="${ODIN_DIR}/browser-state/chrome-cdp.pid"
 XVFB_PID_FILE="${ODIN_DIR}/browser-state/xvfb.pid"
+CHROME_LOG_FILE="${ODIN_DIR}/logs/$(date +%Y-%m-%d)/chrome-cdp.log"
 ODIN_CHROME_CDP_OWNED=0
 ODIN_CHROME_XVFB_OWNED=0
 
@@ -142,9 +143,13 @@ cdp_start() {
         chrome_cdp_log "Started Xvfb on ${CHROME_DISPLAY}"
     fi
 
+    mkdir -p "$(dirname "${CHROME_LOG_FILE}")" 2>/dev/null || true
+
     DISPLAY="${CHROME_DISPLAY}" "${chrome_bin}" \
         --remote-debugging-port="${CHROME_CDP_PORT}" \
         --user-data-dir="${CHROME_PROFILE}" \
+        --no-sandbox \
+        --disable-dev-shm-usage \
         --no-first-run \
         --disable-default-apps \
         --disable-background-networking \
@@ -152,7 +157,7 @@ cdp_start() {
         --disable-translate \
         --metrics-recording-only \
         --no-default-browser-check \
-        about:blank >/dev/null 2>&1 &
+        about:blank >>"${CHROME_LOG_FILE}" 2>&1 &
     printf '%s\n' "$!" > "${CHROME_PID_FILE}"
     ODIN_CHROME_CDP_OWNED=1
 
