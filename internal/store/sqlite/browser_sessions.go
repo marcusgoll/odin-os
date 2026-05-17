@@ -198,6 +198,11 @@ type ExpireBrowserSessionLoginRequestParams struct {
 	RequestID int64
 }
 
+type RecordBrowserSessionProofParams struct {
+	SessionID int64
+	Payload   runtimeevents.BrowserSessionProofPayload
+}
+
 type CreateBrowserHandoffRunnerParams struct {
 	SessionID      int64
 	LoginRequestID int64
@@ -228,6 +233,7 @@ type UpdateBrowserHandoffRunnerStatusParams struct {
 	ErrorMessage   *string
 	Actor          string
 	Reason         string
+	ChildProcesses []runtimeevents.BrowserHandoffRunnerProcessEvidence
 }
 
 type ExpireBrowserHandoffRunnerParams struct {
@@ -1205,6 +1211,19 @@ func (store *Store) ExpireBrowserSessionLoginRequest(ctx context.Context, params
 	return updated, err
 }
 
+func (store *Store) RecordBrowserSessionProof(ctx context.Context, params RecordBrowserSessionProofParams) error {
+	if params.SessionID <= 0 {
+		return fmt.Errorf("browser session id must be positive")
+	}
+	return store.withTx(ctx, func(tx *sql.Tx) error {
+		session, err := getBrowserSessionTx(ctx, tx, params.SessionID)
+		if err != nil {
+			return err
+		}
+		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserSessionProofRecorded, params.Payload, time.Now().UTC())
+	})
+}
+
 func (store *Store) CreateBrowserHandoffRunner(ctx context.Context, params CreateBrowserHandoffRunnerParams) (BrowserHandoffRunner, error) {
 	if params.SessionID <= 0 {
 		return BrowserHandoffRunner{}, fmt.Errorf("browser session id must be positive")
@@ -1292,7 +1311,7 @@ func (store *Store) CreateBrowserHandoffRunner(ctx context.Context, params Creat
 		if err != nil {
 			return err
 		}
-		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserHandoffRunnerRequested, browserHandoffRunnerLifecyclePayload(runner, "", "", ""), now)
+		return appendBrowserSessionEventTx(ctx, tx, session, runtimeevents.EventBrowserHandoffRunnerRequested, browserHandoffRunnerLifecyclePayload(runner, "", "", "", nil), now)
 	})
 	return runner, err
 }
@@ -1422,7 +1441,7 @@ func (store *Store) UpdateBrowserHandoffRunnerStatus(ctx context.Context, params
 		if !ok {
 			return nil
 		}
-		return appendBrowserSessionEventTx(ctx, tx, session, eventType, browserHandoffRunnerLifecyclePayload(updated, current.Status, params.Actor, params.Reason), now)
+		return appendBrowserSessionEventTx(ctx, tx, session, eventType, browserHandoffRunnerLifecyclePayload(updated, current.Status, params.Actor, params.Reason, params.ChildProcesses), now)
 	})
 	return updated, err
 }
@@ -1913,7 +1932,7 @@ func browserHandoffRunnerEventType(status BrowserHandoffRunnerStatus) (runtimeev
 	}
 }
 
-func browserHandoffRunnerLifecyclePayload(runner BrowserHandoffRunner, previousStatus BrowserHandoffRunnerStatus, actor string, reason string) runtimeevents.BrowserHandoffRunnerLifecyclePayload {
+func browserHandoffRunnerLifecyclePayload(runner BrowserHandoffRunner, previousStatus BrowserHandoffRunnerStatus, actor string, reason string, childProcesses []runtimeevents.BrowserHandoffRunnerProcessEvidence) runtimeevents.BrowserHandoffRunnerLifecyclePayload {
 	return runtimeevents.BrowserHandoffRunnerLifecyclePayload{
 		ID:                  runner.ID,
 		SessionID:           runner.SessionID,
@@ -1937,6 +1956,7 @@ func browserHandoffRunnerLifecyclePayload(runner BrowserHandoffRunner, previousS
 		ErrorMessage:        stringPtrValue(runner.ErrorMessage),
 		Actor:               defaultString(actor, "operator"),
 		Reason:              strings.TrimSpace(reason),
+		ChildProcesses:      childProcesses,
 	}
 }
 

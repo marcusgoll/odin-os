@@ -109,6 +109,45 @@ func (runner *ExecCommandRunner) Wait(_ context.Context, handle ProcessHandle) (
 	}, nil
 }
 
+func (runner *ExecCommandRunner) Probe(_ context.Context, handle ProcessHandle) (ProcessResult, bool, error) {
+	if err := validateProcessHandle(handle); err != nil {
+		return ProcessResult{}, false, err
+	}
+	process, err := runner.processForHandle(handle)
+	if err != nil {
+		return ProcessResult{}, false, err
+	}
+	var waitStatus syscall.WaitStatus
+	waitedPID, err := syscall.Wait4(int(handle.PID), &waitStatus, syscall.WNOHANG, nil)
+	if err != nil {
+		return ProcessResult{}, false, err
+	}
+	if waitedPID == 0 {
+		return ProcessResult{}, false, nil
+	}
+	process.cancel()
+	runner.deleteProcess(handle.PID)
+	status := ProcessStatusExited
+	errorMessage := ""
+	if waitStatus.Signaled() {
+		status = ProcessStatusFailed
+		errorMessage = fmt.Sprintf("process exited after signal %s", waitStatus.Signal())
+	} else if waitStatus.Exited() && waitStatus.ExitStatus() != 0 {
+		status = ProcessStatusFailed
+		errorMessage = fmt.Sprintf("process exited with status %d", waitStatus.ExitStatus())
+	}
+	return ProcessResult{
+		PID:          handle.PID,
+		Role:         handle.Role,
+		CommandPath:  handle.CommandPath,
+		StartedAt:    handle.StartedAt,
+		Status:       status,
+		Stdout:       process.stdout.String(),
+		Stderr:       process.stderr.String(),
+		ErrorMessage: errorMessage,
+	}, true, nil
+}
+
 func (runner *ExecCommandRunner) Cancel(_ context.Context, handle ProcessHandle) error {
 	if err := validateProcessHandle(handle); err != nil {
 		return err

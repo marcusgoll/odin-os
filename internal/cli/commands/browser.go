@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const BrowserUsage = "usage: odin browser run (--goal-id <id>|--task-id <id>) --url <url> [--objective <text>] [--allowed-domain <domain>] [--session-id <id>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session runner create --login-request-id <id> [--json] | odin browser session runner list --login-request-id <id> [--json] | odin browser session runner show --id <id> [--json] | odin browser session runner start --id <id> [--json] | odin browser session runner plan-novnc --id <id> --browser-command <path> --browser-allowed-command <path> --display-command <path> --display-allowed-command <path> --novnc-command <path> --novnc-allowed-command <path> --bind-addr <addr> --private-base-url <url> --timeout-seconds <n> [--json] | odin browser session runner status --id <id> --status <status> [--json] | odin browser session runner cancel --id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json] | odin browser session profile retention cleanup [--session-id <id>] [--apply] [--json] | odin browser session profile artifact create-fixture --session-id <id> --name <safe-name> --plaintext-file <path> [--json] | odin browser session profile artifact create-directory --session-id <id> --name <safe-name> --source-dir <path> [--json] | odin browser session profile artifact list --session-id <id> [--json] | odin browser session profile artifact show --id <id> [--json] | odin browser session profile artifact revoke --id <id> [--json] | odin browser session profile artifact materialize --id <id> --target-dir <path> [--json] | odin browser session profile artifact materialize-directory --id <id> --target-dir <path> [--json] | odin browser session profile artifact cleanup-materialization --id <id> --target-dir <path> [--json]"
+const BrowserUsage = "usage: odin browser run (--goal-id <id>|--task-id <id>) --url <url> [--objective <text>] [--allowed-domain <domain>] [--session-id <id>] [--max-pages <n>] [--max-duration-seconds <n>] [--worker-mode <fetch|browser>] [--evidence-required] [--action <read|navigate|snapshot|extract>] [--json] | odin browser session create --name <name> --domain <domain> --permission-tier <tier> [--account-hint <hint>] [--profile-path <path>] [--json] | odin browser session list [--json] | odin browser session show --id <id> [--json] | odin browser session status --id <id> --status <status> [--json] | odin browser session revoke --id <id> [--json] | odin browser session login-request --id <id> [--handoff-base-url <url>] [--json] | odin browser session login-requests --id <id> [--json] | odin browser session handoff show --handoff-id <id> [--json] | odin browser session prove --id <id> --url <url> --expect-title <title> [--json] | odin browser session runner create --login-request-id <id> [--json] | odin browser session runner list --login-request-id <id> [--json] | odin browser session runner show --id <id> [--json] | odin browser session runner start --id <id> [--json] | odin browser session runner plan-novnc --id <id> --browser-command <path> --browser-allowed-command <path> --display-command <path> --display-allowed-command <path> --novnc-command <path> --novnc-allowed-command <path> --bind-addr <addr> --private-base-url <url> --timeout-seconds <n> [--json] | odin browser session runner status --id <id> --status <status> [--json] | odin browser session runner cancel --id <id> [--json] | odin browser session verify --id <id> [--login-request-id <id>] [--json] | odin browser session prepare-profile --id <id> [--json] | odin browser session profile retention cleanup [--session-id <id>] [--apply] [--json] | odin browser session profile artifact create-fixture --session-id <id> --name <safe-name> --plaintext-file <path> [--json] | odin browser session profile artifact create-directory --session-id <id> --name <safe-name> --source-dir <path> [--json] | odin browser session profile artifact list --session-id <id> [--json] | odin browser session profile artifact show --id <id> [--json] | odin browser session profile artifact revoke --id <id> [--json] | odin browser session profile artifact materialize --id <id> --target-dir <path> [--json] | odin browser session profile artifact materialize-directory --id <id> --target-dir <path> [--json] | odin browser session profile artifact cleanup-materialization --id <id> --target-dir <path> [--json]"
 
 type BrowserCommand struct {
 	Name                        string
@@ -43,6 +43,7 @@ type BrowserCommand struct {
 	HandoffID                   string
 	HandoffBaseURL              string
 	Status                      string
+	ExpectedTitle               string
 	NoVNCBrowserCommand         string
 	NoVNCBrowserAllowedCommands []string
 	NoVNCDisplayCommand         string
@@ -252,7 +253,7 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 		}
 	}
 	switch command.SessionAction {
-	case "create", "list", "show", "status", "revoke", "login-request", "login-requests", "verify", "prepare-profile", "handoff", "runner", "profile":
+	case "create", "list", "show", "status", "revoke", "login-request", "login-requests", "verify", "prepare-profile", "prove", "handoff", "runner", "profile":
 	default:
 		return BrowserCommand{}, fmt.Errorf("unsupported browser session subcommand: %s", args[0])
 	}
@@ -371,6 +372,20 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 			}
 			command.HandoffBaseURL = value
 			index = nextIndex
+		case "--url":
+			value, nextIndex, err := requiredValue(args, index, "--url")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.URL = value
+			index = nextIndex
+		case "--expect-title":
+			value, nextIndex, err := requiredValue(args, index, "--expect-title")
+			if err != nil {
+				return BrowserCommand{}, err
+			}
+			command.ExpectedTitle = value
+			index = nextIndex
 		case "--status":
 			value, nextIndex, err := requiredValue(args, index, "--status")
 			if err != nil {
@@ -466,6 +481,9 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 			return BrowserCommand{}, fmt.Errorf("unknown browser session argument: %s", args[index])
 		}
 	}
+	if command.SessionAction != "prove" && (strings.TrimSpace(command.URL) != "" || strings.TrimSpace(command.ExpectedTitle) != "") {
+		return BrowserCommand{}, fmt.Errorf("browser session %s does not accept --url or --expect-title", command.SessionAction)
+	}
 	switch command.SessionAction {
 	case "create":
 		if strings.TrimSpace(command.SessionName) == "" {
@@ -497,6 +515,22 @@ func parseBrowserSession(args []string, command BrowserCommand) (BrowserCommand,
 		}
 		if command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.SourceDir != "" || command.TargetDir != "" || command.ProfilePath != "" || command.HandoffID != "" || command.Status != "" || command.Apply {
 			return BrowserCommand{}, fmt.Errorf("browser session login-request only accepts --id, --handoff-base-url, and --json")
+		}
+	case "prove":
+		if command.ID <= 0 {
+			return BrowserCommand{}, fmt.Errorf("--id is required")
+		}
+		if strings.TrimSpace(command.URL) == "" {
+			return BrowserCommand{}, fmt.Errorf("--url is required")
+		}
+		if strings.TrimSpace(command.ExpectedTitle) == "" {
+			return BrowserCommand{}, fmt.Errorf("--expect-title is required")
+		}
+		if _, err := browserURLHost(command.URL); err != nil {
+			return BrowserCommand{}, err
+		}
+		if command.SessionID != 0 || command.LoginRequestID != 0 || command.HandoffAction != "" || command.ProfileAction != "" || command.RetentionAction != "" || command.ArtifactAction != "" || command.SessionName != "" || command.SessionDomain != "" || command.PermissionTier != "" || command.AccountHint != "" || command.ArtifactName != "" || command.PlaintextFile != "" || command.SourceDir != "" || command.TargetDir != "" || command.ProfilePath != "" || command.HandoffID != "" || command.HandoffBaseURL != "" || command.Status != "" || command.Apply || command.hasNoVNCPlanConfig() {
+			return BrowserCommand{}, fmt.Errorf("browser session prove only accepts --id, --url, --expect-title, and --json")
 		}
 	case "handoff":
 		if command.HandoffAction != "show" {

@@ -225,6 +225,12 @@ odin_os_telemetry_stale 0
 	client := Client{
 		PrometheusURL: defaultPrometheusURL,
 		MetricsURL:    metrics.URL,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.String() == defaultPrometheusURL+"/api/v1/query" {
+				return nil, fmt.Errorf("default prometheus unavailable")
+			}
+			return http.DefaultTransport.RoundTrip(req)
+		})},
 	}
 	model, err := client.QueryOverview(context.Background())
 	if err != nil {
@@ -236,6 +242,12 @@ odin_os_telemetry_stale 0
 	if model.ActiveRuns != 1 || model.BlockedItems != 2 || model.ApprovalsWaiting != 3 || model.ReviewQueueItems != 4 || model.FailedWorkItems != 5 || model.RecoveryRecommendations != 6 {
 		t.Fatalf("model counts = %+v, want metrics fallback counts", model)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }
 
 func TestClientQueryRecentLogsHandlesEmptyAndUnavailableLokiHonestly(t *testing.T) {

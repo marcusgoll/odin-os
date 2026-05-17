@@ -288,7 +288,8 @@ func TestNoVNCRunnerStartRejectsRealDisplayWithoutExplicitGate(t *testing.T) {
 	displayPath := writeProcessTestScript(t, "display-vnc", "#!/bin/sh\nexit 0\n")
 	supervisor := &fakeNoVNCProcessSupervisor{}
 	runner := NoVNCRunner{
-		Supervisor: supervisor,
+		Supervisor:        supervisor,
+		StartupProbeDelay: -1,
 		LoadConfig: func() (NoVNCLaunchConfig, error) {
 			return NoVNCLaunchConfig{
 				BrowserCommand:      commandPath,
@@ -662,6 +663,9 @@ func TestNoVNCRunnerStartReturnsStartedForFullRealAttendedLaunch(t *testing.T) {
 	if len(supervisor.waited) != 0 {
 		t.Fatalf("waited handles = %+v, want full real attended launch to return while viewer remains available", supervisor.waited)
 	}
+	if got := processRolesFromHandles(supervisor.probed); strings.Join(got, ",") != "display,browser,novnc/websockify" {
+		t.Fatalf("probed roles = %+v, want startup probe for display/browser/websockify", got)
+	}
 	if len(response.ChildProcesses) != 3 {
 		t.Fatalf("response.ChildProcesses = %+v, want started child process metadata", response.ChildProcesses)
 	}
@@ -669,6 +673,56 @@ func TestNoVNCRunnerStartReturnsStartedForFullRealAttendedLaunch(t *testing.T) {
 		if child.Status != ProcessStatusStarted {
 			t.Fatalf("child process = %+v, want started status", child)
 		}
+	}
+}
+
+func TestNoVNCRunnerStartFailsFullRealWhenBrowserExitsDuringStartupProbe(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	displayPath := writeProcessTestScript(t, "display-vnc", "#!/bin/sh\nsleep 30\n")
+	browserPath := writeProcessTestScript(t, "browser", "#!/bin/sh\necho browser failed >&2\nexit 7\n")
+	websockifyPath := writeProcessTestScript(t, "websockify", "#!/bin/sh\nsleep 30\n")
+	supervisor := &fakeNoVNCProcessSupervisor{
+		probeResults: map[string]ProcessStatus{
+			NoVNCBrowserCommandRole: ProcessStatusFailed,
+		},
+	}
+	runner := NoVNCRunner{
+		Supervisor:        supervisor,
+		StartupProbeDelay: -1,
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			config := validNoVNCLaunchConfig(commandPath)
+			config.DisplayCommand = displayPath
+			config.BrowserCommand = browserPath
+			config.WebsockifyCommand = websockifyPath
+			config.AllowedCommandPaths = []string{displayPath, browserPath, websockifyPath}
+			config.RealDisplayEnabled = true
+			config.RealBrowserEnabled = true
+			config.RealWebsockifyEnabled = true
+			return config, nil
+		},
+	}
+
+	response, err := runner.Start(context.Background(), validFixtureStartRequest())
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Start(full real browser startup failure) error = %v", err)
+	}
+	if response.Status != StatusFailed || response.ErrorCode != "novnc_process_failed" {
+		t.Fatalf("response = %+v, want failed novnc_process_failed", response)
+	}
+	if !strings.Contains(response.ErrorMessage, "browser") {
+		t.Fatalf("response.ErrorMessage = %q, want browser failure context", response.ErrorMessage)
+	}
+	if response.RunnerID != "novnc-real-1001-1002-1003" || response.ProcessID != 1003 || response.ViewerURL == "" {
+		t.Fatalf("response = %+v, want started metadata preserved on startup failure", response)
+	}
+	if got := processRolesFromHandles(supervisor.probed); strings.Join(got, ",") != "display,browser" {
+		t.Fatalf("probed roles = %+v, want startup probe through failed browser role", got)
+	}
+	if got := processRolesFromHandles(supervisor.cancelled); strings.Join(got, ",") != "novnc/websockify,display" {
+		t.Fatalf("cancelled roles = %v, want cleanup of remaining full-real children", got)
+	}
+	if len(response.ChildProcesses) == 0 {
+		t.Fatalf("response.ChildProcesses = %+v, want child evidence for startup failure", response.ChildProcesses)
 	}
 }
 
@@ -1389,11 +1443,13 @@ func testExecutablePath(t *testing.T, name string) string {
 }
 
 type fakeNoVNCProcessSupervisor struct {
-	started   []StartProcessRequest
-	waited    []ProcessHandle
-	cancelled []ProcessHandle
-	results   map[string]ProcessStatus
-	nextPID   int64
+	started      []StartProcessRequest
+	waited       []ProcessHandle
+	probed       []ProcessHandle
+	cancelled    []ProcessHandle
+	results      map[string]ProcessStatus
+	probeResults map[string]ProcessStatus
+	nextPID      int64
 }
 
 func (supervisor *fakeNoVNCProcessSupervisor) StartProcess(_ context.Context, request StartProcessRequest) (ProcessHandle, error) {
@@ -1439,6 +1495,33 @@ func (supervisor *fakeNoVNCProcessSupervisor) WaitProcess(_ context.Context, han
 	return result, nil
 }
 
+func (supervisor *fakeNoVNCProcessSupervisor) ProbeProcess(_ context.Context, handle ProcessHandle) (ProcessResult, bool, error) {
+	supervisor.probed = append(supervisor.probed, handle)
+	status := supervisor.probeResults[handle.Role]
+	if status == "" {
+		return ProcessResult{}, false, nil
+	}
+	exitedAt := handle.StartedAt.Add(time.Second)
+	result := ProcessResult{
+		PID:         handle.PID,
+		Role:        handle.Role,
+		CommandPath: handle.CommandPath,
+		StartedAt:   handle.StartedAt,
+		ExitedAt:    &exitedAt,
+		Status:      status,
+	}
+	switch status {
+	case ProcessStatusFailed:
+		result.Stderr = handle.Role + " failed"
+		result.ErrorMessage = handle.Role + " failed"
+	case ProcessStatusTimeout:
+		result.ErrorMessage = handle.Role + " timed out"
+	case ProcessStatusExited:
+		result.Stdout = handle.Role + " exited"
+	}
+	return result, true, nil
+}
+
 func (supervisor *fakeNoVNCProcessSupervisor) CancelProcess(_ context.Context, handle ProcessHandle, reason string) (ProcessResult, error) {
 	supervisor.cancelled = append(supervisor.cancelled, handle)
 	exitedAt := handle.StartedAt.Add(time.Second)
@@ -1457,6 +1540,14 @@ func processRoles(requests []StartProcessRequest) []string {
 	roles := make([]string, 0, len(requests))
 	for _, request := range requests {
 		roles = append(roles, request.Role)
+	}
+	return roles
+}
+
+func processRolesFromHandles(handles []ProcessHandle) []string {
+	roles := make([]string, 0, len(handles))
+	for _, handle := range handles {
+		roles = append(roles, handle.Role)
 	}
 	return roles
 }

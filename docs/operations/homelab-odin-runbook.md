@@ -66,6 +66,11 @@ Allowed public paths:
 - `/healthz` and `/readyz` expose health and fail-closed readiness
 - `/browser/session/handoff` exposes metadata-only attended browser handoff
   lookup for requested login handoffs
+- `/browser/session/handoff/viewer` exposes the protected operator viewer
+  metadata page after admin-token authorization
+- `/browser/session/handoff/viewer/proxy/*` proxies the private noVNC viewer
+  through Odin after admin-token authorization; the raw noVNC listener must stay
+  loopback-only
 - `/browser/session/handoff/complete` records admin-token-protected,
   operator-attested metadata completion for a handoff
 
@@ -84,9 +89,18 @@ The repo-owned nginx template is:
 deploy/nginx/odin-pwa-proxy.conf
 ```
 
-Before recreating `odin-overseer`, copy or otherwise sync that template to the
-runtime config path used by `run-container.sh`. Do not widen the route gate
-locally without making the same change in the repo-owned template and tests.
+The repo-owned host-network container launcher is:
+
+```bash
+deploy/docker/run-odin-overseer-host.sh
+```
+
+Use the repo-owned launcher or keep any host-local wrapper byte-for-byte aligned
+with its mount and environment contract. Do not widen the route gate locally
+without making the same change in the repo-owned template and tests.
+The launcher uses host networking for loopback Odin/noVNC proxying and grants
+only `NET_BIND_SERVICE` so non-root nginx can bind the public HTTP port; do not
+replace that with privileged mode.
 
 The active container must include these environment values:
 
@@ -132,6 +146,39 @@ same operator prerequisites used by readiness:
 /usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:ro
 /lib64/ld-linux-x86-64.so.2:/lib64/ld-linux-x86-64.so.2:ro
 ```
+
+The attended browser runner additionally needs the reviewed host-side browser
+boundary mounted into the container. These mounts keep secrets and browser
+profile keys in the host env file while allowing Odin to launch Xvfb, Chrome,
+x11vnc, and websockify under the protected viewer route:
+
+```bash
+/home/orchestrator/.config/odin:/home/orchestrator/.config/odin:ro
+/home/orchestrator/.local/bin:/home/orchestrator/.local/bin:ro
+/home/orchestrator/.local/lib:/home/orchestrator/.local/lib:ro
+/var/odin/browser-state/novnc-root:/var/odin/browser-state/novnc-root:ro
+/opt/google/chrome:/opt/google/chrome:ro
+/bin/bash:/bin/bash:ro
+/usr/bin/Xvfb:/usr/bin/Xvfb:ro
+/usr/bin/x11vnc:/usr/bin/x11vnc:ro
+/usr/bin/xwininfo:/usr/bin/xwininfo:ro
+/usr/bin/xkbcomp:/usr/bin/xkbcomp:ro
+/usr/bin/python3:/usr/bin/python3:ro
+/usr/lib/python3.12:/usr/lib/python3.12:ro
+/usr/share/X11:/usr/share/X11:ro
+/usr/share/fonts:/usr/share/fonts:ro
+```
+
+The deployed `ODIN_NOVNC_PRIVATE_BASE_URL` value must be an unquoted absolute
+URL in the Docker env file. Docker `--env-file` keeps shell quotes literally,
+which makes Odin reject the noVNC private base URL.
+
+Saved-session login-skip proof uses `odin browser session prove`. Configure
+`ODIN_BROWSER_PROOF_TITLE_COMMAND` to a reviewed absolute wrapper such as
+`/home/orchestrator/.config/odin/browser-handoff/prove-title`, and list the same
+path in `ODIN_BROWSER_PROOF_TITLE_ALLOWED_COMMANDS`. The wrapper should inspect
+the live browser display, for example with mounted `/usr/bin/xwininfo`, and
+print title evidence such as `Home / X - Google Chrome`.
 
 If the Docker-backed public PWA serve process owns the live runtime root,
 `odin-os.service` must be stopped and disabled. Do not run two `odin serve`
@@ -256,6 +303,23 @@ curl -fsS -H 'Accept: text/html' 'http://127.0.0.1:5173/browser/session/handoff?
 
 These checks must not launch a browser, collect credentials, write profile
 bytes, or prove authenticated browser reuse.
+
+After starting a protected noVNC runner, prove the viewer route through Odin,
+not by opening the raw noVNC listener:
+
+```bash
+curl -o /dev/null -w '%{http_code}\n' \
+  'http://127.0.0.1:5173/browser/session/handoff/viewer?handoff_id=<requested-handoff-id>'
+curl -fsS -H "Authorization: Bearer $ODIN_ADMIN_TOKEN" \
+  'http://127.0.0.1:5173/browser/session/handoff/viewer?handoff_id=<requested-handoff-id>'
+curl -fsS -H "Authorization: Bearer $ODIN_ADMIN_TOKEN" \
+  'http://127.0.0.1:5173/browser/session/handoff/viewer/proxy/?handoff_id=<requested-handoff-id>'
+curl --connect-timeout 2 'http://<tailnet-ip>:6083/vnc.html'
+```
+
+Expected result: the first request is `401`, the admin-token viewer and proxy
+requests return `200`, and direct noVNC access to the Tailnet IP fails because
+the raw viewer is bound to loopback.
 
 ## Backup and verify before cutover
 

@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,6 +20,7 @@ import (
 	"odin-os/internal/runtime/browserprofileartifacts"
 	"odin-os/internal/runtime/browserprofilekeys"
 	"odin-os/internal/runtime/browserprofilematerialize"
+	runtimeevents "odin-os/internal/runtime/events"
 	"odin-os/internal/store/sqlite"
 )
 
@@ -77,6 +81,10 @@ type browserSessionHandoffEnvelope struct {
 	Handoff browserSessionHandoffView `json:"handoff"`
 }
 
+type browserSessionProofEnvelope struct {
+	Proof runtimeevents.BrowserSessionProofPayload `json:"proof"`
+}
+
 type browserSessionRunnerEnvelope struct {
 	Runner browserSessionRunnerView `json:"runner"`
 }
@@ -88,6 +96,14 @@ type browserSessionRunnerListView struct {
 type browserSessionRunnerPlanEnvelope struct {
 	Plan browserSessionRunnerPlanView `json:"plan"`
 }
+
+const (
+	browserProofTitleCommandEnvVar         = "ODIN_BROWSER_PROOF_TITLE_COMMAND"
+	browserProofTitleAllowedCommandsEnvVar = "ODIN_BROWSER_PROOF_TITLE_ALLOWED_COMMANDS"
+	browserProofTitleTimeoutSecondsEnvVar  = "ODIN_BROWSER_PROOF_TITLE_TIMEOUT_SECONDS"
+	defaultBrowserProofTitleTimeout        = 5 * time.Second
+	maxBrowserProofTitleTimeout            = 30 * time.Second
+)
 
 type browserSessionProfileEnvelope struct {
 	Profile browserSessionProfileView `json:"profile"`
@@ -558,6 +574,24 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 			}
 		}
 		return nil
+	case "prove":
+		proof, err := proveBrowserSession(ctx, app, command)
+		if command.JSON {
+			if writeErr := commands.WriteJSON(stdout, browserSessionProofEnvelope{Proof: proof}); writeErr != nil {
+				return writeErr
+			}
+		} else {
+			if _, writeErr := fmt.Fprintf(stdout, "browser_session_proof session=%d status=%s url=%s checks=%d\n", proof.SessionID, proof.Status, proof.URL, len(proof.Checks)); writeErr != nil {
+				return writeErr
+			}
+		}
+		if err != nil {
+			return err
+		}
+		if proof.Status != "passed" {
+			return fmt.Errorf("browser session proof failed")
+		}
+		return nil
 	case "handoff":
 		handoff, err := app.Store.GetBrowserSessionLoginHandoff(ctx, command.HandoffID)
 		if err != nil {
@@ -576,6 +610,260 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 	default:
 		return fmt.Errorf(commands.BrowserUsage)
 	}
+}
+
+func proveBrowserSession(ctx context.Context, app bootstrap.App, command commands.BrowserCommand) (runtimeevents.BrowserSessionProofPayload, error) {
+	now := time.Now().UTC()
+	proof := runtimeevents.BrowserSessionProofPayload{
+		SessionID:     command.ID,
+		Status:        "failed",
+		URL:           strings.TrimSpace(command.URL),
+		ExpectedTitle: strings.TrimSpace(command.ExpectedTitle),
+		RecordedAt:    now.Format(time.RFC3339Nano),
+	}
+	addCheck := func(name string, ok bool, evidence string) {
+		status := "failed"
+		if ok {
+			status = "passed"
+		}
+		proof.Checks = append(proof.Checks, runtimeevents.BrowserSessionProofCheck{
+			Name:     name,
+			Status:   status,
+			Evidence: strings.TrimSpace(evidence),
+		})
+	}
+
+	session, err := app.Store.GetBrowserSession(ctx, command.ID)
+	if err != nil {
+		addCheck("session_found", false, err.Error())
+		return proof, err
+	}
+	recorded := false
+	defer func() {
+		if !recorded {
+			_ = app.Store.RecordBrowserSessionProof(context.Background(), sqlite.RecordBrowserSessionProofParams{
+				SessionID: session.ID,
+				Payload:   proof,
+			})
+		}
+	}()
+	addCheck("session_found", true, fmt.Sprintf("status=%s domain=%s", session.Status, session.Domain))
+	hostAllowed, hostEvidence := browserSessionProofURLMatchesDomain(proof.URL, session.Domain)
+	addCheck("url_matches_session_domain", hostAllowed, hostEvidence)
+	if !hostAllowed {
+		return proof, fmt.Errorf("proof URL does not match browser session domain: %s", hostEvidence)
+	}
+	if session.Status == sqlite.BrowserSessionStatusRevoked {
+		addCheck("session_not_revoked", false, "session is revoked")
+		return proof, fmt.Errorf("revoked browser session cannot be proven")
+	}
+	addCheck("session_not_revoked", true, string(session.Status))
+	titleCommandPath, err := browserProofTitleCommandPath()
+	if err != nil {
+		addCheck("title_probe_configured", false, err.Error())
+		return proof, err
+	}
+	addCheck("title_probe_configured", true, titleCommandPath)
+
+	artifacts, err := app.Store.ListBrowserEncryptedProfileArtifacts(ctx, sqlite.ListBrowserEncryptedProfileArtifactsParams{
+		SessionID: session.ID,
+		Status:    sqlite.BrowserEncryptedProfileArtifactStatusEncrypted,
+	})
+	if err != nil {
+		addCheck("encrypted_profile_available", false, err.Error())
+		return proof, err
+	}
+	if len(artifacts) == 0 {
+		addCheck("encrypted_profile_available", false, "no encrypted profile artifact found")
+		return proof, fmt.Errorf("encrypted browser profile artifact is required before proof")
+	}
+	artifact := artifacts[len(artifacts)-1]
+	proof.ArtifactID = artifact.ID
+	addCheck("encrypted_profile_available", true, fmt.Sprintf("artifact=%d path=%s", artifact.ID, artifact.EncryptedArtifactPath))
+
+	handoffBaseURL := strings.TrimSpace(os.Getenv("ODIN_BROWSER_HANDOFF_BASE_URL"))
+	loginRequest, err := app.Store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
+		SessionID:      session.ID,
+		HandoffBaseURL: handoffBaseURL,
+		ExpiresAt:      now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		addCheck("login_request_created", false, err.Error())
+		return proof, err
+	}
+	proof.LoginRequestID = loginRequest.ID
+	proof.HandoffID = loginRequest.HandoffID
+	addCheck("login_request_created", true, fmt.Sprintf("login_request=%d handoff=%s", loginRequest.ID, loginRequest.HandoffID))
+
+	runner, err := app.Store.CreateBrowserHandoffRunner(ctx, sqlite.CreateBrowserHandoffRunnerParams{
+		SessionID:      loginRequest.SessionID,
+		LoginRequestID: loginRequest.ID,
+		HandoffID:      loginRequest.HandoffID,
+		ExpiresAt:      loginRequest.ExpiresAt,
+	})
+	if err != nil {
+		addCheck("runner_created", false, err.Error())
+		return proof, err
+	}
+	proof.RunnerID = runner.ID
+	addCheck("runner_created", true, fmt.Sprintf("runner=%d", runner.ID))
+
+	started, err := startBrowserSessionRunner(ctx, app, runner.ID)
+	if err != nil {
+		addCheck("runner_started", false, err.Error())
+		return proof, err
+	}
+	view := newBrowserSessionRunnerView(started)
+	proof.ViewerURL = browserSessionStringPtrValue(started.ViewerURL)
+	proof.BindAddr = browserSessionStringPtrValue(started.BindAddr)
+	proof.PrivateBaseURL = browserSessionStringPtrValue(started.PrivateBaseURL)
+	startedOK := started.Status == sqlite.BrowserHandoffRunnerStatusStarted && view.RealBrowserEvidence
+	addCheck("runner_started", startedOK, fmt.Sprintf("status=%s real_browser_evidence=%t", started.Status, view.RealBrowserEvidence))
+	if !startedOK {
+		return proof, fmt.Errorf("browser session proof requires started real browser evidence, got status=%s real=%t", started.Status, view.RealBrowserEvidence)
+	}
+
+	materializationPath := filepath.ToSlash(filepath.Join("runtime", "browser-profile-materializations", fmt.Sprintf("runner-%d-artifact-%d", runner.ID, artifact.ID)))
+	materializedAbs := filepath.Join(app.RuntimeRoot, filepath.FromSlash(materializationPath))
+	if info, statErr := os.Stat(materializedAbs); statErr == nil && info.IsDir() {
+		addCheck("encrypted_profile_materialized", true, materializationPath)
+	} else if statErr != nil {
+		addCheck("encrypted_profile_materialized", false, statErr.Error())
+		return proof, fmt.Errorf("encrypted profile materialization missing at %s: %w", materializationPath, statErr)
+	} else {
+		addCheck("encrypted_profile_materialized", false, "materialization path is not a directory")
+		return proof, fmt.Errorf("encrypted profile materialization path %s is not a directory", materializationPath)
+	}
+
+	protectedViewer := protectedBrowserProofViewerURL(loginRequest.HandoffID)
+	protectedProxy := protectedBrowserProofProxyViewerURL(loginRequest.HandoffID)
+	addCheck("protected_viewer_route", strings.TrimSpace(protectedViewer) != "" && strings.TrimSpace(protectedProxy) != "", fmt.Sprintf("viewer=%s proxy=%s", protectedViewer, protectedProxy))
+	noDirectExposure := browserProofBindAddrIsLoopback(proof.BindAddr) && strings.TrimSpace(browserSessionStringPtrValue(started.PublicBaseURL)) == ""
+	addCheck("no_direct_novnc_exposure", noDirectExposure, fmt.Sprintf("bind_addr=%s public_base_url=%s", proof.BindAddr, browserSessionStringPtrValue(started.PublicBaseURL)))
+	if !noDirectExposure {
+		return proof, fmt.Errorf("browser runner exposes direct noVNC boundary: bind_addr=%s public_base_url=%s", proof.BindAddr, browserSessionStringPtrValue(started.PublicBaseURL))
+	}
+
+	observedTitle, titleSource, err := runBrowserProofTitleCommand(ctx)
+	proof.ObservedTitle = observedTitle
+	proof.TitleSource = titleSource
+	titleMatched := err == nil && strings.Contains(strings.ToLower(observedTitle), strings.ToLower(proof.ExpectedTitle))
+	addCheck("expected_title_observed", titleMatched, fmt.Sprintf("expected=%q observed=%q source=%s", proof.ExpectedTitle, observedTitle, titleSource))
+	if err != nil {
+		return proof, err
+	}
+	if !titleMatched {
+		return proof, fmt.Errorf("browser proof title mismatch: expected %q in %q", proof.ExpectedTitle, observedTitle)
+	}
+	addCheck("saved_session_login_skip", true, "expected authenticated title observed from saved profile")
+	addCheck("mutation_requires_approval", true, "proof command is read-only and does not apply browser mutations")
+	proof.Status = "passed"
+	if err := app.Store.RecordBrowserSessionProof(ctx, sqlite.RecordBrowserSessionProofParams{
+		SessionID: session.ID,
+		Payload:   proof,
+	}); err != nil {
+		return proof, err
+	}
+	recorded = true
+	return proof, nil
+}
+
+func browserSessionProofURLMatchesDomain(rawURL string, domain string) (bool, string) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed == nil || parsed.Hostname() == "" {
+		return false, "--url must be an absolute URL"
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	expected := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	return host == expected || strings.HasSuffix(host, "."+expected), fmt.Sprintf("url_host=%s session_domain=%s", host, expected)
+}
+
+func runBrowserProofTitleCommand(ctx context.Context) (string, string, error) {
+	commandPath, err := browserProofTitleCommandPath()
+	if err != nil {
+		return "", commandPath, err
+	}
+	timeout := browserProofTitleTimeout()
+	childCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	output, err := exec.CommandContext(childCtx, commandPath).CombinedOutput()
+	observed := strings.TrimSpace(string(output))
+	if childCtx.Err() == context.DeadlineExceeded {
+		return observed, commandPath, fmt.Errorf("browser proof title command timed out after %s", timeout)
+	}
+	if err != nil {
+		return observed, commandPath, fmt.Errorf("browser proof title command failed: %w", err)
+	}
+	if observed == "" {
+		return "", commandPath, fmt.Errorf("browser proof title command returned no title evidence")
+	}
+	return observed, commandPath, nil
+}
+
+func browserProofTitleCommandPath() (string, error) {
+	commandPath := filepath.Clean(strings.TrimSpace(os.Getenv(browserProofTitleCommandEnvVar)))
+	if commandPath == "." || commandPath == "" {
+		return "", fmt.Errorf("%s is required when --expect-title is used", browserProofTitleCommandEnvVar)
+	}
+	if !filepath.IsAbs(commandPath) {
+		return commandPath, fmt.Errorf("%s must be an absolute path", browserProofTitleCommandEnvVar)
+	}
+	if !browserProofCommandAllowlisted(commandPath, os.Getenv(browserProofTitleAllowedCommandsEnvVar)) {
+		return commandPath, fmt.Errorf("%s must be listed in %s", browserProofTitleCommandEnvVar, browserProofTitleAllowedCommandsEnvVar)
+	}
+	info, err := os.Stat(commandPath)
+	if err != nil {
+		return commandPath, fmt.Errorf("browser proof title command stat: %w", err)
+	}
+	if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+		return commandPath, fmt.Errorf("browser proof title command must be executable")
+	}
+	return commandPath, nil
+}
+
+func browserProofTitleTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(browserProofTitleTimeoutSecondsEnvVar))
+	if raw == "" {
+		return defaultBrowserProofTitleTimeout
+	}
+	seconds, err := time.ParseDuration(raw + "s")
+	if err != nil || seconds <= 0 {
+		return defaultBrowserProofTitleTimeout
+	}
+	if seconds > maxBrowserProofTitleTimeout {
+		return maxBrowserProofTitleTimeout
+	}
+	return seconds
+}
+
+func browserProofCommandAllowlisted(commandPath string, rawAllowed string) bool {
+	for _, candidate := range strings.Split(rawAllowed, ",") {
+		candidate = filepath.Clean(strings.TrimSpace(candidate))
+		if candidate == commandPath {
+			return true
+		}
+	}
+	return false
+}
+
+func browserProofBindAddrIsLoopback(bindAddr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(bindAddr))
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
+}
+
+func protectedBrowserProofViewerURL(handoffID string) string {
+	return "/browser/session/handoff/viewer?handoff_id=" + url.QueryEscape(strings.TrimSpace(handoffID))
+}
+
+func protectedBrowserProofProxyViewerURL(handoffID string) string {
+	return "/browser/session/handoff/viewer/proxy/?handoff_id=" + url.QueryEscape(strings.TrimSpace(handoffID))
 }
 
 func runBrowserSessionProfile(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
@@ -1063,14 +1351,15 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 			errorMessage = "browser handoff fixture runner failed"
 		}
 		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
-			ID:           targetRunner.ID,
-			Status:       sqlite.BrowserHandoffRunnerStatusFailed,
-			RunnerID:     nonEmptyBrowserSessionStringPtr(response.RunnerID),
-			ProcessID:    positiveBrowserSessionInt64Ptr(response.ProcessID),
-			ErrorCode:    &errorCode,
-			ErrorMessage: &errorMessage,
-			Actor:        "operator",
-			Reason:       "browser handoff fixture runner failed",
+			ID:             targetRunner.ID,
+			Status:         sqlite.BrowserHandoffRunnerStatusFailed,
+			RunnerID:       nonEmptyBrowserSessionStringPtr(response.RunnerID),
+			ProcessID:      positiveBrowserSessionInt64Ptr(response.ProcessID),
+			ErrorCode:      &errorCode,
+			ErrorMessage:   &errorMessage,
+			Actor:          "operator",
+			Reason:         "browser handoff fixture runner failed",
+			ChildProcesses: browserSessionRunnerProcessEvidence(response.ChildProcesses),
 		})
 	case browserhandoff.StatusExpired:
 		cleanupBrowserSessionRunnerManagedProfile(ctx, app, managedProfile, "browser handoff runner expired")
@@ -1091,14 +1380,15 @@ func startBrowserSessionRunner(ctx context.Context, app bootstrap.App, runnerID 
 			errorMessage = "browser handoff fixture runner timed out"
 		}
 		return app.Store.UpdateBrowserHandoffRunnerStatus(ctx, sqlite.UpdateBrowserHandoffRunnerStatusParams{
-			ID:           targetRunner.ID,
-			Status:       sqlite.BrowserHandoffRunnerStatusExpired,
-			RunnerID:     nonEmptyBrowserSessionStringPtr(response.RunnerID),
-			ProcessID:    positiveBrowserSessionInt64Ptr(response.ProcessID),
-			ErrorCode:    &errorCode,
-			ErrorMessage: &errorMessage,
-			Actor:        "operator",
-			Reason:       "browser handoff fixture runner timed out",
+			ID:             targetRunner.ID,
+			Status:         sqlite.BrowserHandoffRunnerStatusExpired,
+			RunnerID:       nonEmptyBrowserSessionStringPtr(response.RunnerID),
+			ProcessID:      positiveBrowserSessionInt64Ptr(response.ProcessID),
+			ErrorCode:      &errorCode,
+			ErrorMessage:   &errorMessage,
+			Actor:          "operator",
+			Reason:         "browser handoff fixture runner timed out",
+			ChildProcesses: browserSessionRunnerProcessEvidence(response.ChildProcesses),
 		})
 	default:
 		return sqlite.BrowserHandoffRunner{}, fmt.Errorf("unsupported browser handoff runner start status %q", response.Status)
@@ -1296,6 +1586,49 @@ func browserSessionRunnerProcessErrorMessage(result browserhandoff.ProcessResult
 		}
 	}
 	return fallback
+}
+
+func browserSessionRunnerProcessEvidence(results []browserhandoff.ProcessResult) []runtimeevents.BrowserHandoffRunnerProcessEvidence {
+	if len(results) == 0 {
+		return nil
+	}
+	evidence := make([]runtimeevents.BrowserHandoffRunnerProcessEvidence, 0, len(results))
+	for _, result := range results {
+		evidence = append(evidence, runtimeevents.BrowserHandoffRunnerProcessEvidence{
+			PID:           result.PID,
+			Role:          strings.TrimSpace(result.Role),
+			CommandPath:   strings.TrimSpace(result.CommandPath),
+			Status:        string(result.Status),
+			StartedAt:     formatBrowserSessionProcessTime(result.StartedAt),
+			ExitedAt:      formatBrowserSessionProcessTimePtr(result.ExitedAt),
+			StdoutExcerpt: browserSessionRunnerEvidenceExcerpt(result.Stdout),
+			StderrExcerpt: browserSessionRunnerEvidenceExcerpt(result.Stderr),
+			ErrorMessage:  browserSessionRunnerEvidenceExcerpt(result.ErrorMessage),
+		})
+	}
+	return evidence
+}
+
+func formatBrowserSessionProcessTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func formatBrowserSessionProcessTimePtr(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return formatBrowserSessionProcessTime(*value)
+}
+
+func browserSessionRunnerEvidenceExcerpt(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 512 {
+		return value
+	}
+	return value[:512]
 }
 
 func browserSessionRunnerTimeoutSeconds(expiresAt time.Time) int {

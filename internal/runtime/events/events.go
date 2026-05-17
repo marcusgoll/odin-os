@@ -145,6 +145,7 @@ const (
 	EventBrowserSessionLoginRequested       Type = "browser.session_login_requested"
 	EventBrowserSessionLoginCompleted       Type = "browser.session_login_completed"
 	EventBrowserSessionLoginExpired         Type = "browser.session_login_expired"
+	EventBrowserSessionProofRecorded        Type = "browser.session_proof_recorded"
 	EventBrowserHandoffRunnerRequested      Type = "browser.handoff_runner_requested"
 	EventBrowserHandoffRunnerStarted        Type = "browser.handoff_runner_started"
 	EventBrowserHandoffRunnerExpired        Type = "browser.handoff_runner_expired"
@@ -486,6 +487,30 @@ type BrowserSessionLoginExpiredPayload struct {
 	ExpiresAt      string `json:"expires_at"`
 }
 
+type BrowserSessionProofPayload struct {
+	SessionID      int64                      `json:"session_id"`
+	Status         string                     `json:"status"`
+	URL            string                     `json:"url"`
+	ExpectedTitle  string                     `json:"expected_title"`
+	ObservedTitle  string                     `json:"observed_title,omitempty"`
+	TitleSource    string                     `json:"title_source,omitempty"`
+	ArtifactID     int64                      `json:"artifact_id,omitempty"`
+	RunnerID       int64                      `json:"runner_id,omitempty"`
+	LoginRequestID int64                      `json:"login_request_id,omitempty"`
+	HandoffID      string                     `json:"handoff_id,omitempty"`
+	ViewerURL      string                     `json:"viewer_url,omitempty"`
+	BindAddr       string                     `json:"bind_addr,omitempty"`
+	PrivateBaseURL string                     `json:"private_base_url,omitempty"`
+	Checks         []BrowserSessionProofCheck `json:"checks"`
+	RecordedAt     string                     `json:"recorded_at"`
+}
+
+type BrowserSessionProofCheck struct {
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	Evidence string `json:"evidence,omitempty"`
+}
+
 type NotificationDeviceSubscribedPayload struct {
 	DeviceID      int64  `json:"device_id"`
 	WorkspaceID   int64  `json:"workspace_id"`
@@ -516,28 +541,41 @@ type NotificationCreatedPayload struct {
 }
 
 type BrowserHandoffRunnerLifecyclePayload struct {
-	ID                  int64  `json:"id"`
-	SessionID           int64  `json:"session_id"`
-	LoginRequestID      int64  `json:"login_request_id"`
-	HandoffID           string `json:"handoff_id"`
-	RunnerID            string `json:"runner_id,omitempty"`
-	ProcessID           int64  `json:"process_id,omitempty"`
-	PreviousStatus      string `json:"previous_status"`
-	Status              string `json:"status"`
-	ViewerURL           string `json:"viewer_url,omitempty"`
-	BindAddr            string `json:"bind_addr,omitempty"`
-	PrivateBaseURL      string `json:"private_base_url,omitempty"`
-	PublicBaseURL       string `json:"public_base_url,omitempty"`
-	RealBrowserEvidence bool   `json:"real_browser_evidence,omitempty"`
-	ExpiresAt           string `json:"expires_at,omitempty"`
-	StartedAt           string `json:"started_at,omitempty"`
-	ExitedAt            string `json:"exited_at,omitempty"`
-	CompletedAt         string `json:"completed_at,omitempty"`
-	CancelledAt         string `json:"cancelled_at,omitempty"`
-	ErrorCode           string `json:"error_code,omitempty"`
-	ErrorMessage        string `json:"error_message,omitempty"`
-	Actor               string `json:"actor,omitempty"`
-	Reason              string `json:"reason,omitempty"`
+	ID                  int64                                 `json:"id"`
+	SessionID           int64                                 `json:"session_id"`
+	LoginRequestID      int64                                 `json:"login_request_id"`
+	HandoffID           string                                `json:"handoff_id"`
+	RunnerID            string                                `json:"runner_id,omitempty"`
+	ProcessID           int64                                 `json:"process_id,omitempty"`
+	PreviousStatus      string                                `json:"previous_status"`
+	Status              string                                `json:"status"`
+	ViewerURL           string                                `json:"viewer_url,omitempty"`
+	BindAddr            string                                `json:"bind_addr,omitempty"`
+	PrivateBaseURL      string                                `json:"private_base_url,omitempty"`
+	PublicBaseURL       string                                `json:"public_base_url,omitempty"`
+	RealBrowserEvidence bool                                  `json:"real_browser_evidence,omitempty"`
+	ExpiresAt           string                                `json:"expires_at,omitempty"`
+	StartedAt           string                                `json:"started_at,omitempty"`
+	ExitedAt            string                                `json:"exited_at,omitempty"`
+	CompletedAt         string                                `json:"completed_at,omitempty"`
+	CancelledAt         string                                `json:"cancelled_at,omitempty"`
+	ErrorCode           string                                `json:"error_code,omitempty"`
+	ErrorMessage        string                                `json:"error_message,omitempty"`
+	Actor               string                                `json:"actor,omitempty"`
+	Reason              string                                `json:"reason,omitempty"`
+	ChildProcesses      []BrowserHandoffRunnerProcessEvidence `json:"child_processes,omitempty"`
+}
+
+type BrowserHandoffRunnerProcessEvidence struct {
+	PID           int64  `json:"pid,omitempty"`
+	Role          string `json:"role"`
+	CommandPath   string `json:"command_path,omitempty"`
+	Status        string `json:"status"`
+	StartedAt     string `json:"started_at,omitempty"`
+	ExitedAt      string `json:"exited_at,omitempty"`
+	StdoutExcerpt string `json:"stdout_excerpt,omitempty"`
+	StderrExcerpt string `json:"stderr_excerpt,omitempty"`
+	ErrorMessage  string `json:"error_message,omitempty"`
 }
 
 type TaskQueueStateChangedPayload struct {

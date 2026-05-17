@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -37,6 +38,8 @@ const (
 	NoVNCCommandErrorNotAllowlisted = "command_not_allowlisted"
 	NoVNCCommandErrorNotFound       = "command_not_found"
 	NoVNCCommandErrorNotExecutable  = "command_not_executable"
+
+	defaultNoVNCStartupProbeDelay = 500 * time.Millisecond
 )
 
 var noVNCFixtureSafeCommandNames = map[string]struct{}{
@@ -72,8 +75,9 @@ type NoVNCLaunchConfig struct {
 }
 
 type NoVNCRunner struct {
-	LoadConfig func() (NoVNCLaunchConfig, error)
-	Supervisor ProcessSupervisor
+	LoadConfig        func() (NoVNCLaunchConfig, error)
+	Supervisor        ProcessSupervisor
+	StartupProbeDelay time.Duration
 }
 
 type NoVNCPlan struct {
@@ -154,8 +158,16 @@ func (runner NoVNCRunner) Start(ctx context.Context, request StartRequest) (Star
 
 	response := newNoVNCStartResponse(request, config, handles, nil)
 	if noVNCFullRealLaunchEnabled(config) {
+		probeResults, failed := probeNoVNCStartedProcesses(ctx, supervisor, handles, runner.startupProbeDelay())
+		if failed != nil {
+			response.ChildProcesses = probeResults
+			response.Status = StatusFailed
+			response.ErrorCode = failed.errorCode
+			response.ErrorMessage = failed.errorMessage
+			return response, nil
+		}
 		response.Status = StatusStarted
-		response.ChildProcesses = noVNCStartedProcessResults(handles)
+		response.ChildProcesses = probeResults
 		return response, nil
 	}
 	results := make([]ProcessResult, 0, len(handles))
@@ -206,6 +218,16 @@ func (runner NoVNCRunner) Start(ctx context.Context, request StartRequest) (Star
 	response.ChildProcesses = results
 	response.Status = StatusCompleted
 	return response, nil
+}
+
+func (runner NoVNCRunner) startupProbeDelay() time.Duration {
+	if runner.StartupProbeDelay < 0 {
+		return 0
+	}
+	if runner.StartupProbeDelay > 0 {
+		return runner.StartupProbeDelay
+	}
+	return defaultNoVNCStartupProbeDelay
 }
 
 func noVNCProcessEnv(role string, request StartRequest) []string {
@@ -267,6 +289,69 @@ func noVNCStartedProcessResults(handles []ProcessHandle) []ProcessResult {
 		})
 	}
 	return results
+}
+
+type noVNCProbeFailure struct {
+	errorCode    string
+	errorMessage string
+}
+
+func probeNoVNCStartedProcesses(ctx context.Context, supervisor ProcessSupervisor, handles []ProcessHandle, delay time.Duration) ([]ProcessResult, *noVNCProbeFailure) {
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return cancelNoVNCProcesses(ctx, supervisor, handles, "novnc startup probe cancelled"), &noVNCProbeFailure{
+				errorCode:    "novnc_startup_probe_cancelled",
+				errorMessage: ctx.Err().Error(),
+			}
+		case <-timer.C:
+		}
+	}
+	results := make([]ProcessResult, 0, len(handles))
+	for index, handle := range handles {
+		result, done, err := supervisor.ProbeProcess(ctx, handle)
+		if err != nil {
+			results = append(results, cancelNoVNCProcesses(ctx, supervisor, handles[index:], "novnc startup probe failed")...)
+			return results, &noVNCProbeFailure{
+				errorCode:    "novnc_startup_probe_failed",
+				errorMessage: err.Error(),
+			}
+		}
+		if !done {
+			results = append(results, ProcessResult{
+				PID:         handle.PID,
+				Role:        handle.Role,
+				CommandPath: handle.CommandPath,
+				StartedAt:   handle.StartedAt,
+				Status:      ProcessStatusStarted,
+			})
+			continue
+		}
+		results = append(results, result)
+		results = append(results, cancelNoVNCProcesses(ctx, supervisor, append([]ProcessHandle{}, append(handles[:index], handles[index+1:]...)...), "novnc startup child exited")...)
+		return results, &noVNCProbeFailure{
+			errorCode:    noVNCProbeFailureCode(result),
+			errorMessage: noVNCProcessErrorMessage(result, "browser handoff NoVNC child process exited during startup probe"),
+		}
+	}
+	return results, nil
+}
+
+func noVNCProbeFailureCode(result ProcessResult) string {
+	switch result.Status {
+	case ProcessStatusExited:
+		return "novnc_process_exited_early"
+	case ProcessStatusTimeout:
+		return "novnc_timeout"
+	case ProcessStatusCancelled:
+		return "novnc_process_cancelled"
+	case ProcessStatusFailed:
+		return "novnc_process_failed"
+	default:
+		return "novnc_unsupported_process_status"
+	}
 }
 
 func validateNoVNCFixtureSafeLaunchConfig(config NoVNCLaunchConfig) error {
@@ -344,7 +429,7 @@ func cancelNoVNCProcesses(ctx context.Context, supervisor ProcessSupervisor, han
 }
 
 func noVNCProcessErrorMessage(result ProcessResult, fallback string) string {
-	for _, candidate := range []string{result.ErrorMessage, result.Stderr, result.Stdout} {
+	for _, candidate := range []string{result.Stderr, result.ErrorMessage, result.Stdout} {
 		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
 			return trimmed
 		}
