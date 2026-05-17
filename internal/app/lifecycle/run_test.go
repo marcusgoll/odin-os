@@ -6966,6 +6966,77 @@ func TestCompanionDelegateCreatesAuditableChildWork(t *testing.T) {
 	}
 }
 
+func TestCompanionDelegateAliasesProjectAndLaunchObjectiveForRegistryProfiles(t *testing.T) {
+	configureLifecycleHarnessDriver(t)
+	t.Setenv("HOME", t.TempDir())
+
+	root := testRepoRoot(t)
+	seedCfiProsDelegationAgentFixture(t, root)
+	if err := Run(context.Background(), root, []string{"project", "select", testProjectKey}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(project select) error = %v", err)
+	}
+	if err := Run(context.Background(), root, []string{"transition", "set", "cutover", "confirm", "because", "cfipros delegation input alias test"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(transition set) error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := Run(context.Background(), root, []string{
+		"companion",
+		"delegate",
+		"primary",
+		"--agent",
+		"test-cfipros-ceo-operator-agent",
+		"--portal-track",
+		"cfipros",
+		"--surface",
+		"morning-launch-health",
+		"--goal",
+		"daily_morning_launch_health",
+		"--intent",
+		"read_only",
+		"--json",
+	}, strings.NewReader(""), &output); err != nil {
+		t.Fatalf("Run(companion delegate cfipros) error = %v\nstdout:\n%s", err, output.String())
+	}
+
+	var payload struct {
+		ChildDelegations []struct {
+			ID            int64  `json:"id"`
+			DelegationKey string `json:"delegation_key"`
+		} `json:"child_delegations"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &payload); err != nil {
+		t.Fatalf("delegate json = %v\n%s", err, output.String())
+	}
+	if len(payload.ChildDelegations) != 2 {
+		t.Fatalf("child delegations len = %d, want 2\n%s", len(payload.ChildDelegations), output.String())
+	}
+	for _, child := range payload.ChildDelegations {
+		var showOutput bytes.Buffer
+		if err := Run(context.Background(), root, []string{"companion", "delegate", "show", strconv.FormatInt(child.ID, 10), "--json"}, strings.NewReader(""), &showOutput); err != nil {
+			t.Fatalf("Run(companion delegate show %d) error = %v\nstdout:\n%s", child.ID, err, showOutput.String())
+		}
+		var showPayload struct {
+			Delegation struct {
+				DetailsJSON string `json:"details_json"`
+			} `json:"delegation"`
+		}
+		if err := json.Unmarshal(showOutput.Bytes(), &showPayload); err != nil {
+			t.Fatalf("delegate show json = %v\n%s", err, showOutput.String())
+		}
+		var details map[string]string
+		if err := json.Unmarshal([]byte(showPayload.Delegation.DetailsJSON), &details); err != nil {
+			t.Fatalf("delegation details json = %v\n%s", err, showPayload.Delegation.DetailsJSON)
+		}
+		if details["project_key"] != "cfipros" {
+			t.Fatalf("details project_key = %q, want cfipros", details["project_key"])
+		}
+		if details["launch_objective"] != "daily_morning_launch_health" {
+			t.Fatalf("details launch_objective = %q, want daily_morning_launch_health", details["launch_objective"])
+		}
+	}
+}
+
 func TestCompanionDelegateCreateIsIdempotentForSameLogicalRequest(t *testing.T) {
 	configureLifecycleHarnessDriver(t)
 	t.Setenv("HOME", t.TempDir())
@@ -9471,6 +9542,80 @@ No mutation.
 Prompt includes skill content.
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile(skill fixture) error = %v", err)
+	}
+}
+
+func seedCfiProsDelegationAgentFixture(t *testing.T, root string) {
+	t.Helper()
+
+	agentDir := filepath.Join(root, "registry", "agents")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(agent dir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "test-cfipros-ceo-operator-agent.md"), []byte(`---
+kind: agent
+key: test-cfipros-ceo-operator-agent
+title: Test CFIPros CEO Operator Agent
+summary: Test fixture for CFIPros CEO delegation profile inputs.
+status: active
+role: test-cfipros-ceo-operator
+scopes:
+  - managed-project
+tools:
+  - filesystem
+delegation:
+  enabled: true
+  operator_surface: companion_delegate
+  inputs:
+    required:
+      - project_key
+      - launch_objective
+  convergence_mode: review_gate
+  children:
+    - delegation_key: launch-scorecard
+      role: launch_scorecard
+      wave: 1
+      action_class: cfipros_ceo_launch
+      action_key_template: "{{project_key}}:{{launch_objective}}"
+      mutation_mode_source: intent
+      convergence_mode: review_gate
+      artifact_target: run_detail
+      executor: codex_headless
+    - delegation_key: revenue-readiness
+      role: revenue_readiness
+      wave: 1
+      action_class: cfipros_ceo_launch
+      action_key_template: "{{project_key}}:{{launch_objective}}"
+      mutation_mode_source: intent
+      convergence_mode: review_gate
+      artifact_target: run_detail
+      executor: codex_headless
+---
+
+# Test CFIPros CEO Operator Agent
+
+## Purpose
+Test registry-backed delegation inputs.
+
+## When to Use
+Use in delegation tests.
+
+## Inputs
+Requires project_key and launch_objective.
+
+## Procedure
+Create delegated child checks.
+
+## Outputs
+Return child results.
+
+## Constraints
+No external effects.
+
+## Success Criteria
+Delegation inputs are available to child profiles.
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(cfi pros agent fixture) error = %v", err)
 	}
 }
 

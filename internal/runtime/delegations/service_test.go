@@ -168,6 +168,59 @@ func TestRegistryDelegatableAgentProfileCreatesChildWork(t *testing.T) {
 	}
 }
 
+func TestRegistryDelegatableAgentProfileRendersProjectLaunchTemplates(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	env := openDelegationEnv(t)
+	profile := testCfiProsDelegatableAgentProfile()
+	env.Delegations.RegistrySnapshot = registry.Snapshot{
+		Items: []registry.Item{profile},
+		ByKey: map[string]registry.Item{
+			profile.Key: profile,
+		},
+		ByKind: map[registry.Kind][]registry.Item{
+			registry.KindAgent: {profile},
+		},
+	}
+
+	_, _, result, err := env.Delegations.RunAgent(ctx, RunInput{
+		ResolvedScope: scope.Resolution{Kind: scope.ScopeProject, ProjectKey: "cfipros"},
+		AgentKey:      profile.Key,
+		RequestedBy:   "operator",
+		Inputs: map[string]string{
+			"portal_track":     "cfipros",
+			"surface":          "morning-launch-health",
+			"goal":             "daily_morning_launch_health",
+			"project_key":      "cfipros",
+			"launch_objective": "daily_morning_launch_health",
+			"intent":           "read_only",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunAgent(cfi pros profile) error = %v", err)
+	}
+	if len(result.ChildDelegations) != 1 {
+		t.Fatalf("child delegations = %d, want 1", len(result.ChildDelegations))
+	}
+	child := result.ChildDelegations[0]
+	if child.ActionKey != "cfipros:daily_morning_launch_health" {
+		t.Fatalf("child action key = %q, want cfipros:daily_morning_launch_health", child.ActionKey)
+	}
+	var details map[string]string
+	if err := json.Unmarshal([]byte(child.DetailsJSON), &details); err != nil {
+		t.Fatalf("json.Unmarshal(details) error = %v", err)
+	}
+	for key, want := range map[string]string{
+		"project_key":      "cfipros",
+		"launch_objective": "daily_morning_launch_health",
+	} {
+		if got := details[key]; got != want {
+			t.Fatalf("details[%q] = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestRegistryAgentWithoutDelegationProfileIsRejectedBeforePersistence(t *testing.T) {
 	t.Parallel()
 
@@ -863,6 +916,38 @@ func testDelegatableAgentProfile() registry.Item {
 					ActionKeyTemplate:  "review:{{portal_track}}:{{surface}}",
 					MutationModeSource: "intent",
 					ArtifactTarget:     "report",
+					Executor:           "codex_headless",
+				},
+			},
+		},
+	}
+}
+
+func testCfiProsDelegatableAgentProfile() registry.Item {
+	return registry.Item{
+		Kind:    registry.KindAgent,
+		Key:     "test-cfipros-ceo-operator-agent",
+		Title:   "Test CFIPros CEO Operator Agent",
+		Summary: "Exercises project launch delegation profile inputs.",
+		Status:  "active",
+		Delegation: registry.DelegationProfile{
+			Enabled:         true,
+			OperatorSurface: "companion_delegate",
+			Inputs: registry.DelegationInputs{
+				Required: []string{"project_key", "launch_objective"},
+				Optional: []string{"review_window", "intent"},
+			},
+			ConvergenceMode: "review_gate",
+			Children: []registry.DelegationChildProfile{
+				{
+					DelegationKey:      "launch-scorecard",
+					Role:               "launch_scorecard",
+					Wave:               1,
+					ActionClass:        "cfipros_ceo_launch",
+					ActionKeyTemplate:  "{{project_key}}:{{launch_objective}}",
+					MutationModeSource: "intent",
+					ConvergenceMode:    "review_gate",
+					ArtifactTarget:     "run_detail",
 					Executor:           "codex_headless",
 				},
 			},
