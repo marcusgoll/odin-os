@@ -1638,8 +1638,27 @@ func TestOperationalHandlerBrowserSessionHandoffViewerRequiresAdminAndActiveRunn
 	if err != nil {
 		t.Fatalf("ReadAll(proxy) error = %v", err)
 	}
-	if proxyRes.StatusCode != http.StatusOK || !strings.Contains(string(proxyBody), "path=/session/novnc-proof") {
+	if proxyRes.StatusCode != http.StatusOK || !strings.Contains(string(proxyBody), "path=/vnc.html") {
 		t.Fatalf("viewer proxy status=%d body=%s, want upstream content through Odin route", proxyRes.StatusCode, string(proxyBody))
+	}
+	assetReq, err := http.NewRequest(http.MethodGet, server.URL+"/browser/session/handoff/viewer/proxy/app/ui.js?handoff_id="+url.QueryEscape(loginRequest.HandoffID), nil)
+	if err != nil {
+		t.Fatalf("NewRequest(proxy asset) error = %v", err)
+	}
+	for _, cookie := range htmlRes.Cookies() {
+		assetReq.AddCookie(cookie)
+	}
+	assetRes, err := http.DefaultClient.Do(assetReq)
+	if err != nil {
+		t.Fatalf("GET viewer proxy asset error = %v", err)
+	}
+	defer assetRes.Body.Close()
+	assetBody, err := io.ReadAll(assetRes.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(proxy asset) error = %v", err)
+	}
+	if assetRes.StatusCode != http.StatusOK || !strings.Contains(string(assetBody), "path=/app/ui.js") {
+		t.Fatalf("viewer proxy asset status=%d body=%s, want root-relative noVNC asset through Odin route", assetRes.StatusCode, string(assetBody))
 	}
 	if upstreamSawAdminHeader {
 		t.Fatalf("viewer proxy forwarded Odin admin headers to upstream")

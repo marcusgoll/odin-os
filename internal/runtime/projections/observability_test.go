@@ -115,6 +115,13 @@ func TestObservabilityProjectionsExposeActiveRunsBlockedItemsIncidentsAndRecover
 	if len(blocked) != 1 {
 		t.Fatalf("blocked items len = %d, want 1 after dedupe", len(blocked))
 	}
+	blockedCount, err := projections.CountBlockedItemViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("CountBlockedItemViews() error = %v", err)
+	}
+	if blockedCount != len(blocked) {
+		t.Fatalf("blocked count = %d, want %d", blockedCount, len(blocked))
+	}
 
 	approvals, err := projections.ListPendingApprovalViews(ctx, store.DB())
 	if err != nil {
@@ -216,6 +223,13 @@ func TestObservabilityProjectionsDeduplicateTaskBlockedItems(t *testing.T) {
 	}
 	if taskEntries != 1 {
 		t.Fatalf("task blocked entries = %d, want 1; blocked=%+v", taskEntries, blocked)
+	}
+	blockedCount, err := projections.CountBlockedItemViews(ctx, store.DB())
+	if err != nil {
+		t.Fatalf("CountBlockedItemViews() error = %v", err)
+	}
+	if blockedCount != 1 {
+		t.Fatalf("blocked count = %d, want 1 after dedupe", blockedCount)
 	}
 
 	_ = project
