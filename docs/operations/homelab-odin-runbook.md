@@ -64,6 +64,10 @@ Allowed public paths:
 - `/mobile/*` serves concrete authenticated mobile/PWA API endpoints; the
   `/mobile/` root may return `404` when no root endpoint is registered
 - `/healthz` and `/readyz` expose health and fail-closed readiness
+- `/metrics` exposes Prometheus metrics only to localhost and the private
+  Tailnet ranges configured in the repo-owned nginx template; denied requests
+  are masked as `404`
+- `/webhooks/n8n/intake` exposes the exact raw n8n intake webhook route
 - `/browser/session/handoff` exposes metadata-only attended browser handoff
   lookup for requested login handoffs
 - `/browser/session/handoff/viewer` exposes the protected operator viewer
@@ -74,8 +78,8 @@ Allowed public paths:
 - `/browser/session/handoff/complete` records admin-token-protected,
   operator-attested metadata completion for a handoff
 
-All other public paths, including `/metrics` and legacy `/api/v1/*` routes, must
-return `404` at nginx before reaching Odin.
+All other public paths, including legacy `/api/v1/*`, broad `/browser/*`, and
+broad `/webhooks/*` routes, must return `404` at nginx before reaching Odin.
 
 Runtime config lives outside the repo at:
 
