@@ -329,6 +329,20 @@ func TestFollowUpMaterializeReusesSameOccurrenceTask(t *testing.T) {
 	if second.TaskID != first.TaskID {
 		t.Fatalf("TaskID = %d, want %d", second.TaskID, first.TaskID)
 	}
+
+	events, err := store.ListEvents(ctx, sqlite.ListEventsParams{})
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	materializedCount := 0
+	for _, event := range events {
+		if string(event.Type) == "follow_up.materialized" {
+			materializedCount++
+		}
+	}
+	if materializedCount != 1 {
+		t.Fatalf("follow_up.materialized event count = %d, want 1", materializedCount)
+	}
 }
 
 func TestFollowUpCompleteRecurringObligationAdvancesNextDueAt(t *testing.T) {
