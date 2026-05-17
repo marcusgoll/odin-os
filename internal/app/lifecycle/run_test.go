@@ -978,7 +978,7 @@ func TestRunIntakeRawBodyAliasPreservesRawEvidence(t *testing.T) {
 	}
 }
 
-func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
+func TestRunIntakeProcessCreatesAutonomousWorkAndReviewStatesWithoutExecution(t *testing.T) {
 	t.Parallel()
 
 	root := testRepoRoot(t)
@@ -1011,8 +1011,8 @@ func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 	if err := Run(context.Background(), root, []string{"intake", "process", "--id", "intake-1", "--json"}, strings.NewReader(""), &clearOutput); err != nil {
 		t.Fatalf("Run(intake process clear) error = %v", err)
 	}
-	if output := clearOutput.String(); !strings.Contains(output, `"status": "review_required"`) || !strings.Contains(output, `"routed_outcome": "draft_task"`) {
-		t.Fatalf("clear process output = %s, want review_required draft_task", output)
+	if output := clearOutput.String(); !strings.Contains(output, `"status": "accepted"`) || !strings.Contains(output, `"routed_outcome": "draft_task"`) || !strings.Contains(output, `"auto_promoted": true`) || !strings.Contains(output, `"work_created": true`) {
+		t.Fatalf("clear process output = %s, want auto-promoted accepted draft_task", output)
 	}
 
 	var vagueOutput bytes.Buffer
@@ -1043,8 +1043,8 @@ func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 	if err := Run(context.Background(), root, []string{"overview", "--json"}, strings.NewReader(""), &overviewOutput); err != nil {
 		t.Fatalf("Run(overview --json) error = %v", err)
 	}
-	if output := overviewOutput.String(); !strings.Contains(output, `"raw_item_count": 3`) || !strings.Contains(output, `"raw_processed_count": 3`) || !strings.Contains(output, `"open_work_item_count": 0`) {
-		t.Fatalf("overview output = %s, want processed raw intake counts without work items", output)
+	if output := overviewOutput.String(); !strings.Contains(output, `"raw_item_count": 3`) || !strings.Contains(output, `"raw_processed_count": 3`) || !strings.Contains(output, `"open_work_item_count": 1`) {
+		t.Fatalf("overview output = %s, want processed raw intake counts with one autonomous work item", output)
 	}
 
 	var logsOutput bytes.Buffer
@@ -1057,6 +1057,7 @@ func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 		`"type": "intake.dedupe_reviewed"`,
 		`"type": "intake.routed"`,
 		`"type": "intake.draft_artifact_created"`,
+		`"type": "intake.review_accepted"`,
 		`"type": "intake.clarification_needed"`,
 		`"type": "intake.duplicate_linked_or_suppressed"`,
 	} {
@@ -1064,11 +1065,19 @@ func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 			t.Fatalf("logs output = %s, want %s", logsOutput.String(), want)
 		}
 	}
-	if strings.Contains(logsOutput.String(), `"type": "task.created"`) {
-		t.Fatalf("logs output = %s, must not create task events", logsOutput.String())
+	if !strings.Contains(logsOutput.String(), `"type": "task.created"`) {
+		t.Fatalf("logs output = %s, want autonomous task creation audit event", logsOutput.String())
 	}
 
-	for _, args := range [][]string{{"jobs", "--json"}, {"runs", "--json"}, {"approvals", "all", "--json"}} {
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if output := jobsOutput.String(); strings.Count(output, `"status": "queued"`) != 1 || !strings.Contains(output, `"task_key": "intake-review-1"`) {
+		t.Fatalf("jobs output = %s, want one queued autonomous work item", output)
+	}
+
+	for _, args := range [][]string{{"runs", "--json"}, {"approvals", "all", "--json"}} {
 		var output bytes.Buffer
 		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
 			t.Fatalf("Run(%v) error = %v", args, err)
@@ -1079,7 +1088,7 @@ func TestRunIntakeProcessCreatesReviewStatesWithoutExecution(t *testing.T) {
 	}
 }
 
-func TestRunIntakeProcessLinksNearDuplicateWithoutCreatingWork(t *testing.T) {
+func TestRunIntakeProcessLinksNearDuplicateWithoutCreatingAdditionalWork(t *testing.T) {
 	t.Parallel()
 
 	root := testRepoRoot(t)
@@ -1134,7 +1143,15 @@ func TestRunIntakeProcessLinksNearDuplicateWithoutCreatingWork(t *testing.T) {
 		t.Fatalf("show output = %s, want preserved raw evidence and canonical link", output)
 	}
 
-	for _, args := range [][]string{{"jobs", "--json"}, {"runs", "--json"}, {"approvals", "all", "--json"}} {
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if output := jobsOutput.String(); strings.Count(output, `"status": "queued"`) != 1 || !strings.Contains(output, `"task_key": "intake-review-1"`) {
+		t.Fatalf("jobs output = %s, want only canonical intake work item", output)
+	}
+
+	for _, args := range [][]string{{"runs", "--json"}, {"approvals", "all", "--json"}} {
 		var output bytes.Buffer
 		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
 			t.Fatalf("Run(%v) error = %v", args, err)
@@ -1159,7 +1176,7 @@ func TestRunIntakeProcessPersistsReviewableEvidenceAndAuditsStages(t *testing.T)
 		"--source", "operator",
 		"--project", "odin-core",
 		"--title", "Build stable intake evidence",
-		"--type", "request",
+		"--type", "admin",
 		"--dedup-key", "stable-evidence:1",
 		"--requested-by", "codex",
 		"--payload-file", payloadPath,
@@ -1932,10 +1949,10 @@ func TestRunIntakeReviewPromotesOnlyOnOperatorAccept(t *testing.T) {
 			t.Fatalf("Run(intake raw create %q) error = %v", title, err)
 		}
 	}
-	createRaw("Build governed intake review queue", "review-clear")
+	createRaw("Organize governed intake review queue", "review-clear")
 	createRaw("Help with this", "review-vague")
-	createRaw("Build governed intake review queue duplicate", "review-clear")
-	createRaw("Archive governed intake review queue item", "review-archive")
+	createRaw("Organize governed intake review queue duplicate", "review-clear")
+	createRaw("Organize archived intake review queue item", "review-archive")
 
 	for _, id := range []string{"intake-1", "intake-2", "intake-3", "intake-4"} {
 		if err := Run(context.Background(), root, []string{"intake", "process", "--id", id, "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
@@ -1953,8 +1970,8 @@ func TestRunIntakeReviewPromotesOnlyOnOperatorAccept(t *testing.T) {
 	for _, want := range []string{
 		`"classification": "actionable_request"`,
 		`"dedupe_result": "unique"`,
-		`"risk": "low"`,
-		`"suggested_route": "draft_task"`,
+		`"risk": "medium"`,
+		`"suggested_route": "draft_admin_task"`,
 		`"evidence": {`,
 		`"payload_policy": "stored_in_source_facts_json"`,
 		`"payload_available": true`,
@@ -1974,8 +1991,8 @@ func TestRunIntakeReviewPromotesOnlyOnOperatorAccept(t *testing.T) {
 	for _, want := range []string{
 		`"classification": "actionable_request"`,
 		`"dedupe_result": "unique"`,
-		`"risk": "low"`,
-		`"suggested_route": "draft_task"`,
+		`"risk": "medium"`,
+		`"suggested_route": "draft_admin_task"`,
 		`"payload_included": true`,
 	} {
 		if !strings.Contains(showOutput.String(), want) {
@@ -2222,7 +2239,7 @@ func TestRunIntakeReviewAcceptRequiresApprovalForRiskyIntake(t *testing.T) {
 			t.Fatalf("Run(intake raw create %q) error = %v", title, err)
 		}
 	}
-	createRaw("Build low risk intake work", "approval-low-risk")
+	createRaw("Organize low risk intake work", "approval-low-risk")
 	createRaw("Delete production data from risky system", "approval-risky")
 
 	for _, id := range []string{"intake-1", "intake-2"} {
@@ -2583,7 +2600,7 @@ func TestRunUnifiedReviewQueueListsShowsAndRoutesExistingReviewObjects(t *testin
 		)
 	}
 
-	createRaw("Build unified review queue proof", "unified-review-clear")
+	createRaw("Organize unified review queue proof", "unified-review-clear")
 	createRaw("Delete production data through unified review", "unified-review-risky")
 	run("intake", "process", "--id", "intake-1", "--json")
 	run("intake", "process", "--id", "intake-2", "--json")
@@ -6245,8 +6262,8 @@ func TestRunWorkExecuteSurfacesRepoDriverFailure(t *testing.T) {
 		"intake", "raw", "create",
 		"--source", "operator",
 		"--project", testProjectKey,
-		"--title", "operator visible failure proof",
-		"--type", "request",
+		"--title", "Organize operator visible failure proof",
+		"--type", "admin",
 		"--dedup-key", "exact-command-failure-intake",
 		"--requested-by", "codex",
 		"--payload-file", payloadPath,

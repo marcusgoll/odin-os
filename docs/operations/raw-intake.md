@@ -57,15 +57,19 @@ Processing:
 
 - appends `intake.processing_started`, `intake.classified`,
   `intake.dedupe_reviewed`, `intake.routed`, and `intake.processed` events
-- routes clear items to `review_required` with a draft artifact, not a Work Item
+- auto-promotes low-risk read-only work into an accepted Work Item when the
+  route is clear and project-scoped
+- routes mutation, governance, destructive, unclear, duplicate, goal-like,
+  skill-bound, archive-candidate, or risk-marked items to the appropriate
+  review or clarification state instead of executable work
 - routes ambiguous items to `needs_clarification`
 - links exact duplicate dedupe-key hits and deterministic normalized-title
   near-duplicates to the earlier canonical Intake Item as
   `duplicate_linked_or_suppressed`
 - preserves every raw Intake Item and its payload evidence, including duplicate
   arrivals
-- does not create a Work Item, Run Attempt, approval, dispatch, branch, PR, or
-  external mutation
+- does not create a Run Attempt, approval, dispatch, branch, PR, or external
+  mutation during processing
 
 Goal-like raw items may create a reviewable unapproved Goal with the intake row
 linked to the created goal. Goal conversion does not approve, tick, run, or
@@ -76,5 +80,6 @@ mutate external systems.
 `odin work intake` remains the GitHub issue sync surface. It is not the raw
 inbox authority.
 
-Raw intake may later be processed, reviewed, suppressed, or accepted into work,
-but those are separate commands and explicit operator decisions.
+Raw intake may later be processed, reviewed, suppressed, or accepted into work.
+Processing can perform the low-risk read-only acceptance step itself, but all
+mutating or high-risk promotion remains an explicit operator decision.

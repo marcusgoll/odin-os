@@ -56,3 +56,4 @@ evidence.
 External adapter rule:
 
 - External adapters may create Intake Items, external event records, or read-only evidence. They must not create executable Work Items, resolve approvals, send messages, change calendar events, publish content, purchase, delete, deploy, or mutate production systems until a source-specific resolver contract and approval policy are implemented and proven through real `odin` commands.
+- Odin-owned intake processing may later promote clear low-risk read-only Intake Items into queued Work Items under core policy. That promotion is not adapter authority and still must not dispatch, execute, or mutate external systems during intake processing.
