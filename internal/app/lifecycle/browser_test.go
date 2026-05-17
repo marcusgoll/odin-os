@@ -1122,6 +1122,117 @@ func TestRunBrowserSessionProveStartsSavedProfileRunnerAndRecordsProof(t *testin
 	}
 }
 
+func TestRunBrowserSessionApplyXBioRequiresApprovalAndRecordsEvidence(t *testing.T) {
+	ctx := context.Background()
+	app := newLifecycleReviewTestApp(t, ctx)
+	app.RuntimeRoot = t.TempDir()
+	app.RepoRoot = testRepoRoot(t)
+	key := make([]byte, 32)
+	for index := range key {
+		key[index] = byte(index + 7)
+	}
+	t.Setenv(browserprofilekeys.EnvKeyB64, base64.StdEncoding.EncodeToString(key))
+
+	project, err := app.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "x-bio",
+		Name:          "X Bio",
+		Scope:         "project",
+		GitRoot:       t.TempDir(),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := app.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "x-bio-task",
+		Title:       "Apply approved X bio",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if _, _, err := app.Store.BlockTaskAndRequestApproval(ctx, sqlite.BlockTaskAndRequestApprovalParams{
+		TaskID:      task.ID,
+		RequestedBy: "operator",
+	}); err != nil {
+		t.Fatalf("BlockTaskAndRequestApproval() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runBrowser(ctx, app, []string{"session", "create", "--name", "x-main", "--domain", "x.com", "--permission-tier", "authenticated_read", "--profile-path", "browser-sessions/profiles/x-main", "--json"}, &stdout); err != nil {
+		t.Fatalf("runBrowser(session create) error = %v", err)
+	}
+	session := decodeBrowserSessionEnvelope(t, stdout.Bytes())
+	stdout.Reset()
+	if err := runBrowser(ctx, app, []string{"session", "status", "--id", int64String(session.ID), "--status", "verified", "--json"}, &stdout); err != nil {
+		t.Fatalf("runBrowser(session verify) error = %v", err)
+	}
+	sourceDir := filepath.Join(t.TempDir(), "profile")
+	if err := os.MkdirAll(filepath.Join(sourceDir, "Default"), 0o700); err != nil {
+		t.Fatalf("MkdirAll profile source error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "Default", "Preferences"), []byte("saved x session"), 0o600); err != nil {
+		t.Fatalf("WriteFile profile source error = %v", err)
+	}
+	stdout.Reset()
+	if err := runBrowser(ctx, app, []string{"session", "profile", "artifact", "create-directory", "--session-id", int64String(session.ID), "--name", "x-bio-profile", "--source-dir", sourceDir, "--json"}, &stdout); err != nil {
+		t.Fatalf("runBrowser(artifact create-directory) error = %v\n%s", err, stdout.String())
+	}
+	artifact := decodeBrowserSessionProfileArtifactEnvelope(t, stdout.Bytes())
+
+	approval, err := app.Store.GetLatestTaskApproval(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskApproval() error = %v", err)
+	}
+	stdout.Reset()
+	err = runBrowser(ctx, app, []string{"session", "apply-x-bio", "--id", int64String(session.ID), "--task-id", int64String(task.ID), "--approval-id", int64String(approval.ID), "--bio", "Daily autonomy proof via Odin OS.", "--json"}, &stdout)
+	if err == nil || !strings.Contains(err.Error(), "must be approved") {
+		t.Fatalf("runBrowser(pending approval) error = %v output=%s, want approved approval rejection", err, stdout.String())
+	}
+	if _, err := app.Store.ResolveApproval(ctx, sqlite.ResolveApprovalParams{
+		ApprovalID: approval.ID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "approved X bio mutation",
+	}); err != nil {
+		t.Fatalf("ResolveApproval() error = %v", err)
+	}
+	driverPath := writeLifecycleExecutable(t, "x-bio-driver", `#!/bin/sh
+cat >/dev/null
+test -d "$ODIN_CHROME_PROFILE_DIR" || exit 12
+printf '{"status":"completed","tool_key":"browser_x_profile_bio_update","summary":"Applied approved X profile bio change through Browser Control.","artifacts":{"final_url":"https://x.com/settings/profile","title":"X","bio":"Daily autonomy proof via Odin OS."}}'
+`)
+	t.Setenv("ODIN_X_BIO_DRIVER", driverPath)
+	t.Setenv("ODIN_X_BIO_ALLOWED_DRIVERS", driverPath)
+
+	stdout.Reset()
+	if err := runBrowser(ctx, app, []string{"session", "apply-x-bio", "--id", int64String(session.ID), "--task-id", int64String(task.ID), "--approval-id", int64String(approval.ID), "--bio", "Daily autonomy proof via Odin OS.", "--json"}, &stdout); err != nil {
+		t.Fatalf("runBrowser(apply-x-bio) error = %v\n%s", err, stdout.String())
+	}
+	result := decodeBrowserSessionXBioApplyEnvelope(t, stdout.Bytes())
+	if result.Status != "completed" || result.TaskID != task.ID || result.ApprovalID != approval.ID || result.SessionID != session.ID || result.ArtifactID != artifact.ID || result.RunID <= 0 || result.RunArtifactID <= 0 {
+		t.Fatalf("apply result = %+v, want completed task/run/artifact evidence", result)
+	}
+	updated, err := app.Store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if updated.Status != "completed" || updated.BlockedReason != "" {
+		t.Fatalf("task status=%q blocked_reason=%q, want completed with cleared block", updated.Status, updated.BlockedReason)
+	}
+	run, err := app.Store.GetRun(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if run.Status != "completed" || !strings.Contains(run.ArtifactsJSON, "browser_x_bio") {
+		t.Fatalf("run = %+v, want completed browser_x_bio artifact", run)
+	}
+}
+
 func waitForBrowserSessionMarker(t *testing.T, path string, want string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -2414,6 +2525,21 @@ type browserSessionProofJSON struct {
 	Checks         []browserSessionProofCheckJSON `json:"checks"`
 }
 
+type browserSessionXBioApplyJSON struct {
+	Status              string `json:"status"`
+	TaskID              int64  `json:"task_id"`
+	RunID               int64  `json:"run_id"`
+	RunArtifactID       int64  `json:"run_artifact_id"`
+	ApprovalID          int64  `json:"approval_id"`
+	SessionID           int64  `json:"session_id"`
+	ArtifactID          int64  `json:"artifact_id"`
+	ProfilePath         string `json:"profile_path"`
+	MaterializationPath string `json:"materialization_path"`
+	Summary             string `json:"summary"`
+	ErrorCode           string `json:"error_code,omitempty"`
+	ErrorMessage        string `json:"error_message,omitempty"`
+}
+
 type browserSessionProofCheckJSON struct {
 	Name     string `json:"name"`
 	Status   string `json:"status"`
@@ -2539,6 +2665,17 @@ func decodeBrowserSessionProofEnvelope(t *testing.T, payload []byte) browserSess
 		t.Fatalf("browser session proof json decode error = %v; output=%s", err, string(payload))
 	}
 	return envelope.Proof
+}
+
+func decodeBrowserSessionXBioApplyEnvelope(t *testing.T, payload []byte) browserSessionXBioApplyJSON {
+	t.Helper()
+	var envelope struct {
+		Result browserSessionXBioApplyJSON `json:"result"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session X bio apply json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Result
 }
 
 func browserSessionProofHasPassedCheck(proof browserSessionProofJSON, name string) bool {

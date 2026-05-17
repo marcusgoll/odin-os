@@ -2641,9 +2641,9 @@ func (store *Store) StartRun(ctx context.Context, params StartRunParams) (Run, e
 		if params.TaskStatus != "" {
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE tasks
-				SET status = ?, updated_at = ?
+				SET status = ?, blocked_reason = CASE WHEN ? = 'blocked' THEN blocked_reason ELSE '' END, updated_at = ?
 				WHERE id = ?
-			`, params.TaskStatus, formatTime(now), params.TaskID); err != nil {
+			`, params.TaskStatus, params.TaskStatus, formatTime(now), params.TaskID); err != nil {
 				return err
 			}
 		}
@@ -2992,9 +2992,9 @@ func (store *Store) FinishRunAndSetTaskStatus(ctx context.Context, params Finish
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE tasks
-			SET status = ?, current_run_id = NULL, updated_at = ?
+			SET status = ?, current_run_id = NULL, blocked_reason = CASE WHEN ? = 'blocked' THEN blocked_reason ELSE '' END, updated_at = ?
 			WHERE id = ?
-		`, params.TaskStatus, formatTime(now), currentTask.ID); err != nil {
+		`, params.TaskStatus, params.TaskStatus, formatTime(now), currentTask.ID); err != nil {
 			return err
 		}
 		if err := releaseActiveWorktreeLeaseByTaskRunTx(ctx, tx, currentTask.ID, currentRun.ID, now); err != nil {
