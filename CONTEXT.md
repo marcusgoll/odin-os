@@ -192,6 +192,7 @@ _Avoid_: analytics scrape, crawler result
 - The **Intake Inbox** receives raw signals as durable **Intake Items** that belong to a **Workspace** first, before final **Initiative** or **Scope** resolution
 - **Initiative Intake** sits above project-specific intake workflows and decides whether an **Intake Item** belongs in **Managed Project** or **Managed Domain** handling
 - An **Intake Item** may be suppressed, enriched, answered directly, re-triaged, or linked to one or more **Work Items**
+- A low-risk read-only **Intake Item** may be promoted directly into a queued **Work Item** by Odin-owned processing policy when the route is clear; unclear, mutating, governance, destructive, goal-like, duplicate, skill-bound, archive-candidate, or risk-marked intake remains governed through clarification, Review, or Approval
 - A directly answered **Intake Item** should link to a durable **Conversation Transcript** instead of creating a lightweight **Work Item**
 - One **Intake Item** may both resolve with a **Conversation Transcript** and create one or more follow-up **Work Items** when the answer itself creates durable obligations
 - Follow-up **Work Items** created from a direct-answer path should keep explicit backlinks to the originating **Intake Item** and **Conversation Transcript**

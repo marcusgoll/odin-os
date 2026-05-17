@@ -1659,12 +1659,17 @@ type rawIntakeItemListView struct {
 }
 
 type intakeProcessView struct {
-	IntakeItem     rawIntakeItemView `json:"intake_item"`
-	Outcome        string            `json:"outcome"`
-	Classification string            `json:"classification"`
-	DedupeResult   string            `json:"dedupe_result"`
-	RoutedOutcome  string            `json:"routed_outcome"`
-	GoalID         int64             `json:"goal_id,omitempty"`
+	IntakeItem     rawIntakeItemView   `json:"intake_item"`
+	Outcome        string              `json:"outcome"`
+	Classification string              `json:"classification"`
+	DedupeResult   string              `json:"dedupe_result"`
+	RoutedOutcome  string              `json:"routed_outcome"`
+	GoalID         int64               `json:"goal_id,omitempty"`
+	AutoPromoted   bool                `json:"auto_promoted,omitempty"`
+	WorkCreated    bool                `json:"work_created,omitempty"`
+	PolicyReason   string              `json:"policy_reason,omitempty"`
+	PolicyDecision string              `json:"policy_decision,omitempty"`
+	WorkItem       *reviewWorkItemView `json:"work_item,omitempty"`
 }
 
 type intakeReviewQueueView struct {
@@ -1948,6 +1953,13 @@ func runProcessIntake(ctx context.Context, app bootstrap.App, command commands.I
 	if err != nil {
 		return err
 	}
+	var promotion *intakeAutoPromotionResult
+	if promoted, result, err := autoPromoteProcessedIntake(ctx, app, processed); err != nil {
+		return err
+	} else if result != nil {
+		processed = promoted
+		promotion = result
+	}
 	view, err := rawIntakeView(processed, true)
 	if err != nil {
 		return err
@@ -1961,6 +1973,14 @@ func runProcessIntake(ctx context.Context, app bootstrap.App, command commands.I
 	}
 	if outcome.goalID != nil {
 		processView.GoalID = *outcome.goalID
+	}
+	if promotion != nil {
+		processView.Outcome = processed.Status
+		processView.AutoPromoted = true
+		processView.WorkCreated = promotion.WorkCreated
+		processView.PolicyReason = promotion.PolicyReason
+		processView.PolicyDecision = promotion.PolicyDecision
+		processView.WorkItem = promotion.WorkItem
 	}
 	if jsonOutput {
 		return commands.WriteJSON(stdout, processView)
@@ -2499,6 +2519,13 @@ type intakePromotionPolicyDecision struct {
 	Reason           string
 }
 
+type intakeAutoPromotionResult struct {
+	WorkCreated    bool
+	PolicyReason   string
+	PolicyDecision string
+	WorkItem       *reviewWorkItemView
+}
+
 func intakePromotionPolicy(item sqlite.IntakeItem) intakePromotionPolicyDecision {
 	intent := intakeExecutionIntentForTask(item)
 	switch intent.ExecutionIntent {
@@ -2524,6 +2551,82 @@ func intakePromotionPolicy(item sqlite.IntakeItem) intakePromotionPolicyDecision
 		ApprovalRequired: false,
 		Decision:         "direct_work_allowed",
 		Reason:           "low_risk_review_acceptance",
+	}
+}
+
+func autoPromoteProcessedIntake(ctx context.Context, app bootstrap.App, item sqlite.IntakeItem) (sqlite.IntakeItem, *intakeAutoPromotionResult, error) {
+	notes, err := intakeNotesFromItem(item)
+	if err != nil {
+		return item, nil, err
+	}
+	if !shouldAutoPromoteProcessedIntake(item, notes) {
+		return item, nil, nil
+	}
+	policy := intakePromotionPolicy(item)
+	if policy.ApprovalRequired {
+		return item, nil, nil
+	}
+	created, createdNow, err := createTaskFromReviewedIntake(ctx, app, item)
+	if err != nil {
+		return item, nil, err
+	}
+	policyDecision := "direct_work_allowed"
+	policyReason := "low_risk_autonomous_intake"
+	review := intakeReviewDecision{
+		Decision:       "auto_accepted",
+		WorkCreated:    createdNow,
+		PolicyDecision: policyDecision,
+		PolicyReason:   policyReason,
+		WorkItem:       &intakeReviewWork{ID: created.ID, Key: created.Key, Status: created.Status},
+	}
+	notes.Review = &review
+	notesJSON, err := json.Marshal(notes)
+	if err != nil {
+		return item, nil, err
+	}
+	workItemID := created.ID
+	updated, err := app.Store.ReviewIntakeItem(ctx, sqlite.ReviewIntakeItemParams{
+		ID:             item.ID,
+		Status:         "accepted",
+		Summary:        "Low-risk intake auto-promoted to real work item",
+		RoutingNotes:   string(notesJSON),
+		EventType:      runtimeevents.EventIntakeReviewAccepted,
+		Decision:       "auto_accepted",
+		WorkCreated:    createdNow,
+		PolicyDecision: policyDecision,
+		PolicyReason:   policyReason,
+		WorkItemID:     &workItemID,
+		WorkItemKey:    created.Key,
+	})
+	if err != nil {
+		return item, nil, err
+	}
+	return updated, &intakeAutoPromotionResult{
+		WorkCreated:    createdNow,
+		PolicyReason:   policyReason,
+		PolicyDecision: policyDecision,
+		WorkItem:       &reviewWorkItemView{ID: created.ID, Key: created.Key, Status: created.Status},
+	}, nil
+}
+
+func shouldAutoPromoteProcessedIntake(item sqlite.IntakeItem, notes intakeProcessingNotes) bool {
+	if item.Status != "review_required" || item.Scope != "project" || strings.TrimSpace(item.ScopeKey) == "" {
+		return false
+	}
+	if notes.Routing.SkillInvocation != nil {
+		return false
+	}
+	if !isAcceptableIntakeDraftArtifact(notes.DraftArtifact) || isDraftGoalArtifact(notes.DraftArtifact) {
+		return false
+	}
+	if strings.TrimSpace(notes.Routing.ExecutionIntent) != "read_only" {
+		return false
+	}
+	switch strings.TrimSpace(notes.Routing.Outcome) {
+	case "draft_task", "draft_idea", "draft_research", "draft_incident_review", "draft_routine", "draft_follow_up":
+		return true
+	default:
+		return false
 	}
 }
 
