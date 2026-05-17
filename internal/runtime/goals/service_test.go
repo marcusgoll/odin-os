@@ -128,7 +128,7 @@ func TestTickLeavesPlannedGoalUnrunAndAuditsObservation(t *testing.T) {
 	}
 }
 
-func TestTickObservesCreatedGoalWithoutRun(t *testing.T) {
+func TestTickPlansCreatedGoalWithoutRun(t *testing.T) {
 	ctx := context.Background()
 	store := openGoalServiceTestStore(t, "tick-created.db")
 	defer store.Close()
@@ -142,25 +142,32 @@ func TestTickObservesCreatedGoalWithoutRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Tick() error = %v", err)
 	}
-	if result.Observed != 1 || result.Started != 0 || result.Blocked != 0 || result.Skipped != 0 {
-		t.Fatalf("tick result = %+v, want created goal observed only", result)
+	if result.Observed != 1 || result.Planned != 1 || result.Started != 0 || result.Blocked != 0 || result.Skipped != 0 {
+		t.Fatalf("tick result = %+v, want created goal planned only", result)
 	}
-	if len(result.Results) != 1 || result.Results[0].Action != TickActionObserved || result.Results[0].Reason != TickReasonCreatedNeedsPlanning {
-		t.Fatalf("tick goal result = %+v, want created observation", result.Results)
+	if len(result.Results) != 1 || result.Results[0].Action != TickActionPlanned || result.Results[0].Reason != TickReasonPlanRecorded {
+		t.Fatalf("tick goal result = %+v, want implementation plan recorded", result.Results)
 	}
 	persisted, err := store.GetGoal(ctx, goal.ID)
 	if err != nil {
 		t.Fatalf("GetGoal() error = %v", err)
 	}
-	if persisted.Status != sqlite.GoalStatusCreated {
-		t.Fatalf("persisted.Status = %q, want created", persisted.Status)
+	if persisted.Status != sqlite.GoalStatusPlanned {
+		t.Fatalf("persisted.Status = %q, want planned", persisted.Status)
 	}
 	runs, err := store.ListGoalRunsByGoalID(ctx, goal.ID)
 	if err != nil {
 		t.Fatalf("ListGoalRunsByGoalID() error = %v", err)
 	}
 	if len(runs) != 0 {
-		t.Fatalf("runs len = %d, want no run for created goal", len(runs))
+		t.Fatalf("runs len = %d, want no run for planned goal", len(runs))
+	}
+	evidence, err := store.ListGoalEvidence(ctx, sqlite.ListGoalEvidenceParams{GoalID: goal.ID, EvidenceType: "goal_implementation_plan"})
+	if err != nil {
+		t.Fatalf("ListGoalEvidence() error = %v", err)
+	}
+	if len(evidence) != 1 || evidence[0].CreatedBy != "goal_runner" {
+		t.Fatalf("evidence = %+v, want one goal runner implementation plan", evidence)
 	}
 }
 
@@ -253,15 +260,15 @@ func TestTickKeepsMutationGoalInReview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Tick() error = %v", err)
 	}
-	if result.Observed != 1 || result.Started != 0 || result.Blocked != 0 || result.Skipped != 0 {
-		t.Fatalf("tick result = %+v, want mutation goal observed only", result)
+	if result.Observed != 1 || result.Planned != 1 || result.Started != 0 || result.Blocked != 0 || result.Skipped != 0 {
+		t.Fatalf("tick result = %+v, want mutation goal planned only", result)
 	}
 	persisted, err := store.GetGoal(ctx, goal.ID)
 	if err != nil {
 		t.Fatalf("GetGoal() error = %v", err)
 	}
-	if persisted.Status != sqlite.GoalStatusCreated || persisted.CurrentRunID != nil {
-		t.Fatalf("persisted goal = %+v, want created without run", persisted)
+	if persisted.Status != sqlite.GoalStatusPlanned || persisted.CurrentRunID != nil {
+		t.Fatalf("persisted goal = %+v, want planned without run", persisted)
 	}
 	runs, err := store.ListGoalRunsByGoalID(ctx, goal.ID)
 	if err != nil {
@@ -269,6 +276,13 @@ func TestTickKeepsMutationGoalInReview(t *testing.T) {
 	}
 	if len(runs) != 0 {
 		t.Fatalf("runs len = %d, want no run for mutation goal", len(runs))
+	}
+	evidence, err := store.ListGoalEvidence(ctx, sqlite.ListGoalEvidenceParams{GoalID: goal.ID, EvidenceType: "goal_implementation_plan"})
+	if err != nil {
+		t.Fatalf("ListGoalEvidence() error = %v", err)
+	}
+	if len(evidence) != 1 {
+		t.Fatalf("evidence len = %d, want one implementation plan", len(evidence))
 	}
 }
 
@@ -286,15 +300,22 @@ func TestTickKeepsExternalAccountGoalInReview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Tick() error = %v", err)
 	}
-	if result.Observed != 1 || result.Started != 0 || result.Blocked != 0 || result.Skipped != 0 {
-		t.Fatalf("tick result = %+v, want external account goal observed only", result)
+	if result.Observed != 1 || result.Planned != 1 || result.Started != 0 || result.Blocked != 0 || result.Skipped != 0 {
+		t.Fatalf("tick result = %+v, want external account goal planned only", result)
 	}
 	persisted, err := store.GetGoal(ctx, goal.ID)
 	if err != nil {
 		t.Fatalf("GetGoal() error = %v", err)
 	}
-	if persisted.Status != sqlite.GoalStatusCreated || persisted.CurrentRunID != nil {
-		t.Fatalf("persisted goal = %+v, want created without run", persisted)
+	if persisted.Status != sqlite.GoalStatusPlanned || persisted.CurrentRunID != nil {
+		t.Fatalf("persisted goal = %+v, want planned without run", persisted)
+	}
+	evidence, err := store.ListGoalEvidence(ctx, sqlite.ListGoalEvidenceParams{GoalID: goal.ID, EvidenceType: "goal_implementation_plan"})
+	if err != nil {
+		t.Fatalf("ListGoalEvidence() error = %v", err)
+	}
+	if len(evidence) != 1 {
+		t.Fatalf("evidence len = %d, want one implementation plan", len(evidence))
 	}
 }
 
