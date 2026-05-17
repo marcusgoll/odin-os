@@ -164,6 +164,140 @@ func TestTickObservesCreatedGoalWithoutRun(t *testing.T) {
 	}
 }
 
+func TestTickAutoStartsReadOnlyCreatedGoal(t *testing.T) {
+	ctx := context.Background()
+	store := openGoalServiceTestStore(t, "tick-read-only-created.db")
+	defer store.Close()
+
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{
+		Title:       "Review latest PBS bidding package",
+		Description: "Read the latest bid package and report improvements.",
+	})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+
+	result, err := NewService(store).Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Observed != 1 || result.Started != 1 || result.Blocked != 0 || result.Skipped != 0 {
+		t.Fatalf("tick result = %+v, want read-only goal auto-started", result)
+	}
+	if len(result.Results) != 1 || result.Results[0].Action != TickActionStarted || result.Results[0].GoalRunID == nil {
+		t.Fatalf("tick goal result = %+v, want started run id", result.Results)
+	}
+	persisted, err := store.GetGoal(ctx, goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if persisted.Status != sqlite.GoalStatusRunning || persisted.CurrentRunID == nil {
+		t.Fatalf("persisted goal = %+v, want running with current run", persisted)
+	}
+	runs, err := store.ListGoalRunsByGoalID(ctx, goal.ID)
+	if err != nil {
+		t.Fatalf("ListGoalRunsByGoalID() error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].Executor != "goal_runner" {
+		t.Fatalf("runs = %+v, want one goal_runner run", runs)
+	}
+	counts := countGoalRuntimeEvents(t, store)
+	if counts[runtimeevents.EventGoalRunStarted] != 1 {
+		t.Fatalf("goal_run.started events = %d, want 1", counts[runtimeevents.EventGoalRunStarted])
+	}
+	if counts[runtimeevents.EventGoalEvidenceRecorded] != 1 {
+		t.Fatalf("goal.evidence_recorded events = %d, want 1", counts[runtimeevents.EventGoalEvidenceRecorded])
+	}
+}
+
+func TestTickAutoStartsReadOnlyPlannedGoal(t *testing.T) {
+	ctx := context.Background()
+	store := openGoalServiceTestStore(t, "tick-read-only-planned.db")
+	defer store.Close()
+
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{Title: "Audit CFIPros staging errors"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	if _, err := store.TransitionGoal(ctx, sqlite.TransitionGoalParams{GoalID: goal.ID, Status: sqlite.GoalStatusPlanned}); err != nil {
+		t.Fatalf("TransitionGoal(planned) error = %v", err)
+	}
+
+	result, err := NewService(store).Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Observed != 1 || result.Started != 1 || result.Blocked != 0 || result.Skipped != 0 {
+		t.Fatalf("tick result = %+v, want planned read-only goal auto-started", result)
+	}
+	persisted, err := store.GetGoal(ctx, goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if persisted.Status != sqlite.GoalStatusRunning || persisted.CurrentRunID == nil {
+		t.Fatalf("persisted goal = %+v, want running with current run", persisted)
+	}
+}
+
+func TestTickKeepsMutationGoalInReview(t *testing.T) {
+	ctx := context.Background()
+	store := openGoalServiceTestStore(t, "tick-mutation-review.db")
+	defer store.Close()
+
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{Title: "Build autonomous worker shim"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+
+	result, err := NewService(store).Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Observed != 1 || result.Started != 0 || result.Blocked != 0 || result.Skipped != 0 {
+		t.Fatalf("tick result = %+v, want mutation goal observed only", result)
+	}
+	persisted, err := store.GetGoal(ctx, goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if persisted.Status != sqlite.GoalStatusCreated || persisted.CurrentRunID != nil {
+		t.Fatalf("persisted goal = %+v, want created without run", persisted)
+	}
+	runs, err := store.ListGoalRunsByGoalID(ctx, goal.ID)
+	if err != nil {
+		t.Fatalf("ListGoalRunsByGoalID() error = %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs len = %d, want no run for mutation goal", len(runs))
+	}
+}
+
+func TestTickKeepsExternalAccountGoalInReview(t *testing.T) {
+	ctx := context.Background()
+	store := openGoalServiceTestStore(t, "tick-external-review.db")
+	defer store.Close()
+
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{Title: "X attended login smoke test"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+
+	result, err := NewService(store).Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Observed != 1 || result.Started != 0 || result.Blocked != 0 || result.Skipped != 0 {
+		t.Fatalf("tick result = %+v, want external account goal observed only", result)
+	}
+	persisted, err := store.GetGoal(ctx, goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if persisted.Status != sqlite.GoalStatusCreated || persisted.CurrentRunID != nil {
+		t.Fatalf("persisted goal = %+v, want created without run", persisted)
+	}
+}
+
 func TestTickStartsApprovedGoalOnceThenKeepsExecutorBackedRunActive(t *testing.T) {
 	ctx := context.Background()
 	store := openGoalServiceTestStore(t, "tick-approved.db")
