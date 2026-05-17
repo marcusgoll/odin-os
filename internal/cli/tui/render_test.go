@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -191,6 +192,10 @@ func TestRenderOverviewShowsVisualDeliveryCockpitPanels(t *testing.T) {
 		Agents: []AgentRow{
 			{Name: "codex", Task: "visual-tui", Project: "odin-os", Status: "running"},
 		},
+		Flows: []FlowRow{
+			{Direction: "IN", Ref: "intake#8", Source: "mobile/share", Status: "received", Subject: "Review captured request"},
+			{Direction: "OUT", Ref: "run#12", Source: "codex_headless", Status: "completed", Subject: "Opened PR 42"},
+		},
 		Goals: []GoalRow{
 			{ID: 7, Title: "Ship visual TUI", Status: "running", CurrentRun: "12"},
 		},
@@ -218,6 +223,9 @@ func TestRenderOverviewShowsVisualDeliveryCockpitPanels(t *testing.T) {
 
 	for _, want := range []string{
 		"│ NAME          Odin Core",
+		"┌─ INBOX / OUTBOX ",
+		"│ IN intake#8 source=mobile/share status=received subject=Review captur...",
+		"│ OUT run#12 source=codex_headless status=completed subject=Opened PR 42",
 		"┌─ AGENTS RUNNING ",
 		"│ codex task=visual-tui project=odin-os status=running",
 		"┌─ CURRENT GOALS ",
@@ -235,5 +243,31 @@ func TestRenderOverviewShowsVisualDeliveryCockpitPanels(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output = %q, want cockpit fragment %q", output, want)
 		}
+	}
+}
+
+func TestRenderOverviewCapsScheduleRows(t *testing.T) {
+	t.Parallel()
+
+	model := Model{TelemetryAvailable: true, Status: "healthy", HealthScore: 100}
+	for index := 1; index <= 8; index++ {
+		model.Schedules = append(model.Schedules, ScheduleRoutineRow{
+			Source:    "schedule",
+			Key:       fmt.Sprintf("routine-%d", index),
+			Project:   "odin-core",
+			Status:    "enabled",
+			DueStatus: "waiting",
+		})
+	}
+
+	output := RenderOverview(model)
+	if !strings.Contains(output, "│ schedule=routine-6") {
+		t.Fatalf("output = %q, want sixth schedule visible", output)
+	}
+	if strings.Contains(output, "routine-7") {
+		t.Fatalf("output = %q, did not expect seventh schedule detail", output)
+	}
+	if !strings.Contains(output, "│ ... 2 more") {
+		t.Fatalf("output = %q, want remaining schedule count", output)
 	}
 }

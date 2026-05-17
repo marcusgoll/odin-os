@@ -497,6 +497,51 @@ func TestRunTUIOnceIncludesStoreBackedVisualPanels(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertAutomationTrigger() error = %v", err)
 	}
+	if _, err := app.Store.CreateIntakeItem(context.Background(), sqlite.CreateIntakeItemParams{
+		WorkspaceID:         "default",
+		SourceFamily:        "mobile",
+		ExternalObjectID:    "share-1",
+		EventKind:           "share",
+		Subject:             "Review captured request",
+		DedupeKey:           "mobile-share-1",
+		DedupeRecipeVersion: "v1",
+		SourceFactsJSON:     `{"source":"test"}`,
+		Status:              "received",
+		Scope:               "project",
+		ScopeKey:            "odin-core",
+		Summary:             "Review captured request",
+		ReceivedAt:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateIntakeItem() error = %v", err)
+	}
+	task, err := app.Store.CreateTask(context.Background(), sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "visual-tui-run",
+		Title:       "Open visual TUI PR",
+		Status:      "running",
+		Scope:       "project",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	run, err := app.Store.StartRun(context.Background(), sqlite.StartRunParams{
+		TaskID:   task.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "completed",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if _, err := app.Store.RecordRunArtifact(context.Background(), sqlite.RecordRunArtifactParams{
+		RunID:        run.ID,
+		ArtifactType: "pull_request",
+		Summary:      "Opened PR 42",
+		DetailsJSON:  `{"number":42}`,
+	}); err != nil {
+		t.Fatalf("RecordRunArtifact() error = %v", err)
+	}
 	if _, err := app.Store.UpsertPullRequestHandoff(context.Background(), sqlite.UpsertPullRequestHandoffParams{
 		ProjectID:   project.ID,
 		Provider:    "github",
@@ -540,6 +585,11 @@ func TestRunTUIOnceIncludesStoreBackedVisualPanels(t *testing.T) {
 	}
 	for _, want := range []string{
 		"│ NAME          Default Workspace",
+		"┌─ INBOX / OUTBOX ",
+		"IN intake#",
+		"source=mobile/share status=received subject=Review captur",
+		"OUT artifact#",
+		"source=pull_request status=completed subject=Opened PR 42",
 		"┌─ CURRENT GOALS ",
 		"Ship visual TUI",
 		"┌─ SCHEDULES + ROUTINES ",

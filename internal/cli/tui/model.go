@@ -15,6 +15,7 @@ type Model struct {
 	FailedWorkItems         int
 	RecoveryRecommendations int
 	Agents                  []AgentRow
+	Flows                   []FlowRow
 	Goals                   []GoalRow
 	Schedules               []ScheduleRoutineRow
 	PullRequests            []PullRequestRow
@@ -28,6 +29,14 @@ type AgentRow struct {
 	Task    string
 	Project string
 	Status  string
+}
+
+type FlowRow struct {
+	Direction string
+	Ref       string
+	Source    string
+	Status    string
+	Subject   string
 }
 
 type GoalRow struct {

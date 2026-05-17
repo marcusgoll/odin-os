@@ -203,6 +203,41 @@ func TestClientQueryOverviewMissingMetricReturnsUnavailableTelemetry(t *testing.
 	}
 }
 
+func TestClientQueryOverviewFallsBackToOdinMetricsWhenDefaultPrometheusIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `
+odin_active_runs 1
+odin_blocked_items 2
+odin_approvals_waiting 3
+odin_review_queue_items 4
+odin_failed_work_items 5
+odin_recovery_recommendations 6
+odin_os_health_score 100
+odin_os_status{status="healthy"} 1
+odin_os_lifecycle_phase{phase="run"} 1
+odin_os_telemetry_stale 0
+`)
+	}))
+	defer metrics.Close()
+
+	client := Client{
+		PrometheusURL: defaultPrometheusURL,
+		MetricsURL:    metrics.URL,
+	}
+	model, err := client.QueryOverview(context.Background())
+	if err != nil {
+		t.Fatalf("QueryOverview() error = %v", err)
+	}
+	if !model.TelemetryAvailable || model.Status != "healthy" || model.HealthScore != 100 || model.LifecyclePhase != "run" {
+		t.Fatalf("model = %+v, want healthy metrics fallback", model)
+	}
+	if model.ActiveRuns != 1 || model.BlockedItems != 2 || model.ApprovalsWaiting != 3 || model.ReviewQueueItems != 4 || model.FailedWorkItems != 5 || model.RecoveryRecommendations != 6 {
+		t.Fatalf("model counts = %+v, want metrics fallback counts", model)
+	}
+}
+
 func TestClientQueryRecentLogsHandlesEmptyAndUnavailableLokiHonestly(t *testing.T) {
 	t.Parallel()
 

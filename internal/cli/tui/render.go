@@ -49,6 +49,7 @@ func renderOverview(model Model, options renderOptions) string {
 	panels := []panel{
 		observabilityPanel(model, options.Color),
 		actionPanel(model, options.Color),
+		flowPanel(model),
 		agentsPanel(model),
 		goalsPanel(model),
 		schedulesPanel(model),
@@ -113,6 +114,24 @@ func actionPanel(model Model, color bool) panel {
 	}}
 }
 
+func flowPanel(model Model) panel {
+	rows := []string{"none"}
+	if len(model.Flows) > 0 {
+		rows = rows[:0]
+		for _, flow := range model.Flows {
+			rows = append(rows, fmt.Sprintf(
+				"%s %s source=%s status=%s subject=%s",
+				valueOrNone(flow.Direction),
+				valueOrNone(flow.Ref),
+				valueOrNone(flow.Source),
+				valueOrNone(flow.Status),
+				valueOrNone(flow.Subject),
+			))
+		}
+	}
+	return panel{Title: "INBOX / OUTBOX", Rows: rows, Span: true}
+}
+
 func agentsPanel(model Model) panel {
 	rows := []string{"none"}
 	if len(model.Agents) > 0 {
@@ -151,7 +170,11 @@ func schedulesPanel(model Model) panel {
 	rows := []string{"none"}
 	if len(model.Schedules) > 0 {
 		rows = rows[:0]
-		for _, schedule := range model.Schedules {
+		for index, schedule := range model.Schedules {
+			if index >= 6 {
+				rows = append(rows, fmt.Sprintf("... %d more", len(model.Schedules)-index))
+				break
+			}
 			rows = append(rows, fmt.Sprintf(
 				"%s=%s",
 				valueOrNone(schedule.Source),
