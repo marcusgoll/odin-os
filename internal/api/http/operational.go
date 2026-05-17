@@ -134,7 +134,10 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 
 	mux := http.NewServeMux()
 	healthHandler := func(writer http.ResponseWriter, request *http.Request) {
-		report, err := deps.Health.Doctor(request.Context(), deps.RegistryHealthy)
+		ctx, cancel := context.WithTimeout(request.Context(), 5*time.Second)
+		defer cancel()
+
+		report, err := deps.Health.Doctor(ctx, deps.RegistryHealthy)
 		if err != nil {
 			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
 			return
@@ -144,7 +147,10 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/readyz", func(writer http.ResponseWriter, request *http.Request) {
-		report, ready, err := deps.Health.Readiness(request.Context(), deps.RegistryHealthy)
+		ctx, cancel := context.WithTimeout(request.Context(), 5*time.Second)
+		defer cancel()
+
+		report, ready, err := deps.Health.Readiness(ctx, deps.RegistryHealthy)
 		if err != nil {
 			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
 			return
@@ -315,7 +321,10 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		handleGitHubIssuesWebhook(writer, request, deps)
 	})
 	mux.HandleFunc("/metrics", func(writer http.ResponseWriter, request *http.Request) {
-		snapshot, err := deps.Metrics.Collect(request.Context())
+		ctx, cancel := context.WithTimeout(request.Context(), 3*time.Second)
+		defer cancel()
+
+		snapshot, err := deps.Metrics.Collect(ctx)
 		if err != nil {
 			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
 			return
@@ -818,15 +827,11 @@ func browserSessionViewerCookieValue(handoffID string, adminToken string) string
 }
 
 func joinBrowserSessionViewerProxyPath(upstreamBasePath string, proxySuffix string) string {
-	upstreamBasePath = strings.TrimRight(strings.TrimSpace(upstreamBasePath), "/")
-	if upstreamBasePath == "" {
-		upstreamBasePath = "/"
-	}
 	proxySuffix = strings.TrimSpace(proxySuffix)
 	if proxySuffix == "" || proxySuffix == "/" {
-		return upstreamBasePath
+		return "/vnc.html"
 	}
-	return strings.TrimRight(upstreamBasePath, "/") + "/" + strings.TrimLeft(proxySuffix, "/")
+	return "/" + strings.TrimLeft(proxySuffix, "/")
 }
 
 func mergeBrowserSessionViewerProxyQuery(upstreamRawQuery string, query url.Values) string {

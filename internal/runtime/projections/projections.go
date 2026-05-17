@@ -1457,6 +1457,48 @@ func ListBlockedItemViews(ctx context.Context, queryer Queryer) ([]BlockedItemVi
 	return views, wakeRows.Err()
 }
 
+func CountBlockedItemViews(ctx context.Context, queryer Queryer) (int, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT COUNT(*)
+		FROM (
+			SELECT a.task_id
+			FROM approvals a
+			WHERE a.status = 'pending'
+			  AND a.task_id IS NOT NULL
+			UNION
+			SELECT r.task_id
+			FROM incidents i
+			JOIN runs r ON r.id = i.run_id
+			WHERE i.status = 'open'
+			  AND r.task_id IS NOT NULL
+			UNION
+			SELECT cp.task_id
+			FROM context_packets cp
+			WHERE cp.packet_scope = 'task_wake_packet'
+			  AND cp.status = 'active'
+			  AND cp.task_id IS NOT NULL
+			  AND cp.payload_json LIKE '%"blocking_reason"%'
+			UNION
+			SELECT t.id
+			FROM tasks t
+			WHERE t.status = 'blocked'
+			  AND t.blocked_reason <> ''
+		)
+	`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	var count int
+	if rows.Next() {
+		if err := rows.Scan(&count); err != nil {
+			return 0, err
+		}
+	}
+	return count, rows.Err()
+}
+
 func ListIncidentViews(ctx context.Context, queryer Queryer) ([]IncidentView, error) {
 	rows, err := queryer.QueryContext(ctx, `
 		SELECT

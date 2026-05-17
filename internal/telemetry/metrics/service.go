@@ -171,7 +171,7 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	blocked, err := projections.ListBlockedItemViews(ctx, service.DB)
+	blockedItems, err := projections.CountBlockedItemViews(ctx, service.DB)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -302,7 +302,7 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 	snapshot := Snapshot{
 		GeneratedAt:             now,
 		ActiveRuns:              len(activeRuns),
-		BlockedItems:            len(blocked),
+		BlockedItems:            blockedItems,
 		ApprovalsWaiting:        len(approvals),
 		OpenIncidents:           len(incidents),
 		EscalatedIncidents:      escalatedIncidents,
