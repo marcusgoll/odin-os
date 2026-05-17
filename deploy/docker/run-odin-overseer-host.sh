@@ -73,6 +73,7 @@ docker run "${docker_args[@]}" \
   -e HOME="$HOME" \
   -e PATH="$HOME/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   -e PYTHONPATH="$HOME/.local/lib/python3.12/site-packages" \
+  -e CHROME_BIN=/opt/google/chrome/chrome \
   -e GOMEMLIMIT="$gomemlimit" \
   -e GOGC="$gogc" \
   -e ODIN_ROOT="$runtime_root" \
