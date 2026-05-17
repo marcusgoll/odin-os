@@ -18,6 +18,7 @@ type Service struct {
 	RegistryRoot      string
 	ExecutorCatalog   map[string]contract.Executor
 	HealthConfig      health.Config
+	ExecutorKeys      []string
 	Logger            *logs.Logger
 	Monitor           Monitor
 	Diagnoser         Diagnoser
@@ -57,14 +58,18 @@ func (service Service) RunCycle(ctx context.Context) (CycleResult, error) {
 	if monitor.Now == nil {
 		monitor.Now = func() time.Time { return now }
 	}
-	if monitor.Config == (Config{}) {
+	if isZeroConfig(monitor.Config) {
 		monitor.Config = Config{
 			QueuePressureThreshold:      healthConfig.QueuePressureThreshold,
 			ExecutorFreshnessTTL:        healthConfig.ExecutorFreshnessTTL,
 			ProjectionFreshnessTTL:      healthConfig.ProjectionFreshnessTTL,
 			SourceFreshnessTTL:          healthConfig.SourceFreshnessTTL,
 			RepeatedRunFailureThreshold: DefaultConfig().RepeatedRunFailureThreshold,
+			ExecutorKeys:                service.ExecutorKeys,
 		}
+	}
+	if len(monitor.Config.ExecutorKeys) == 0 && len(service.ExecutorKeys) > 0 {
+		monitor.Config.ExecutorKeys = service.ExecutorKeys
 	}
 	if monitor.Config.QueuePressureThreshold == 0 {
 		monitor.Config.QueuePressureThreshold = healthConfig.QueuePressureThreshold

@@ -368,7 +368,7 @@ func TestServiceCollectReflectsRuntimeConditions(t *testing.T) {
 	}
 }
 
-func TestServiceCollectKeepsFreshIncidentRecoveryDegraded(t *testing.T) {
+func TestServiceCollectKeepsFreshIncidentRecoveryVisibleWithoutDegradingOdinOS(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -446,8 +446,11 @@ func TestServiceCollectKeepsFreshIncidentRecoveryDegraded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
-	if snapshot.OS.HealthScore != 80 || snapshot.OS.Status != "degraded" || snapshot.OS.LifecyclePhase != "run" {
-		t.Fatalf("OS snapshot = %+v, want degraded run health score 80", snapshot.OS)
+	if snapshot.OpenIncidents == 0 || snapshot.ActiveRecoveries == 0 {
+		t.Fatalf("snapshot incidents=%d recoveries=%d, want incident and recovery counts preserved", snapshot.OpenIncidents, snapshot.ActiveRecoveries)
+	}
+	if snapshot.OS.HealthScore != 100 || snapshot.OS.Status != "healthy" || snapshot.OS.LifecyclePhase != "run" {
+		t.Fatalf("OS snapshot = %+v, want healthy run health score 100", snapshot.OS)
 	}
 	if snapshot.OS.TelemetryStale {
 		t.Fatalf("OS telemetry stale = true, want false")

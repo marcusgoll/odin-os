@@ -5071,6 +5071,7 @@ func runSchedulerTick(ctx context.Context, app bootstrap.App, args []string, std
 			RegistryRoot:    filepath.Join(app.RepoRoot, "registry"),
 			ExecutorCatalog: app.Executors,
 			HealthConfig:    healthsvc.DefaultConfig(),
+			ExecutorKeys:    enabledExecutorKeys(app.ExecutorConfig),
 			Now:             func() time.Time { return now },
 		}).RunCycle(ctx)
 		if err != nil {
@@ -6236,6 +6237,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		RegistryRoot:      filepath.Join(app.RepoRoot, "registry"),
 		ExecutorCatalog:   app.Executors,
 		HealthConfig:      healthsvc.DefaultConfig(),
+		ExecutorKeys:      enabledExecutorKeys(app.ExecutorConfig),
 		Logger:            logger,
 		ShutdownRequested: &shutdownRequested,
 	}

@@ -250,6 +250,10 @@ func TestClientQueryRecentLogsParsesLokiStreams(t *testing.T) {
 						"stream": map[string]string{"job": "docker-containers"},
 						"values": [][]string{{"1714521600000000000", `{"level":"info","message":"ready"}`}},
 					},
+					map[string]any{
+						"stream": map[string]string{"job": "docker-containers"},
+						"values": [][]string{{"1714521600000000001", `level=info caller=metrics.go component=querier query="{job=\"docker-containers\"} |= \"GET /\""`}},
+					},
 				},
 			},
 		})

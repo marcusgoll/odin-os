@@ -246,6 +246,66 @@ func TestMonitorIgnoresDelayedQueuedTasksForQueuePressure(t *testing.T) {
 	_ = runnableTask
 }
 
+func TestMonitorIgnoresDisabledExecutorHealth(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "odin.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "codex_headless",
+		Status:      "healthy",
+		LatencyMS:   25,
+		DetailsJSON: `{"mode":"headless"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth(codex) error = %v", err)
+	}
+	if _, err := store.RecordExecutorHealth(ctx, sqlite.RecordExecutorHealthParams{
+		Executor:    "openrouter_api",
+		Status:      "unknown",
+		LatencyMS:   0,
+		DetailsJSON: `{"mode":"optional"}`,
+	}); err != nil {
+		t.Fatalf("RecordExecutorHealth(openrouter) error = %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE executor_health
+		SET checked_at = ?
+	`, now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("executor update error = %v", err)
+	}
+
+	monitor := recovery.Monitor{
+		DB: store.DB(),
+		Config: recovery.Config{
+			ExecutorFreshnessTTL:        time.Hour,
+			ProjectionFreshnessTTL:      time.Hour,
+			SourceFreshnessTTL:          time.Hour,
+			RepeatedRunFailureThreshold: 2,
+			ExecutorKeys:                []string{"codex_headless"},
+		},
+		Now: func() time.Time { return now },
+	}
+
+	observations, err := monitor.Observe(ctx)
+	if err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+	for _, observation := range observations {
+		if observation.FaultKey == recovery.FaultExecutorHealthStale {
+			t.Fatalf("unexpected executor health observation with disabled executor ignored: %+v", observations)
+		}
+	}
+}
+
 func assertFaultPresent(t *testing.T, observations []recovery.Observation, faultKey recovery.FaultKey, subjectKey string) {
 	t.Helper()
 	for _, observation := range observations {
