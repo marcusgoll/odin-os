@@ -57,6 +57,7 @@ type ScheduleRoutineRow struct {
 	LastWorkItem   string
 	LastWorkStatus string
 	LastWorkDetail string
+	LastWorkReview string
 }
 
 type PullRequestRow struct {

@@ -1465,7 +1465,7 @@ func reviewEntryFromGoal(goal sqlite.Goal) reviewQueueEntry {
 		Summary:        firstNonBlank(goal.Description, goal.Title),
 		Source:         "goals",
 		Risk:           "medium",
-		AllowedActions: []string{},
+		AllowedActions: []string{"approve"},
 	}
 }
 
@@ -1486,7 +1486,7 @@ func reviewEntryFromPlannedGoal(goal sqlite.Goal) reviewQueueEntry {
 		Summary:        firstNonBlank(goal.Description, goal.Title),
 		Source:         "goals",
 		Risk:           "governance",
-		AllowedActions: []string{},
+		AllowedActions: []string{"approve"},
 	}
 }
 

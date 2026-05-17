@@ -164,6 +164,7 @@ func (service Service) startApprovedGoal(ctx context.Context, goal sqlite.Goal) 
 	run, err := service.Store.CreateGoalRun(ctx, sqlite.CreateGoalRunParams{
 		GoalID:      goal.ID,
 		Status:      sqlite.GoalRunStatusRunning,
+		Executor:    "goal_runner",
 		Attempts:    1,
 		MaxAttempts: 1,
 		LeaseOwner:  "goal_tick",
@@ -194,6 +195,9 @@ func (service Service) blockRunningGoalWithoutExecutor(ctx context.Context, goal
 		runID = &activeRun.ID
 		if activeRun.NextWakeAt != nil && activeRun.NextWakeAt.After(time.Now().UTC()) {
 			return service.observe(ctx, goal, TickActionSkipped, TickReasonNextWakePending, goal.Status, runID)
+		}
+		if activeRun.Executor != "" {
+			return service.observe(ctx, goal, TickActionSkipped, TickReasonActiveRunExists, goal.Status, runID)
 		}
 		if _, err := service.Store.UpdateGoalRunStatus(ctx, sqlite.UpdateGoalRunStatusParams{
 			GoalRunID: activeRun.ID,
