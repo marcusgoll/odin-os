@@ -298,6 +298,35 @@ func TestTickKeepsExternalAccountGoalInReview(t *testing.T) {
 	}
 }
 
+func TestTickDoesNotTreatEmbeddedXAsExternalAccountGoal(t *testing.T) {
+	ctx := context.Background()
+	store := openGoalServiceTestStore(t, "tick-embedded-x.db")
+	defer store.Close()
+
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{
+		Title:       "Review latest PBS bidding package for next-month improvements",
+		Description: "May W700x open-time pairings are per-period evidence and must not be reused.",
+	})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+
+	result, err := NewService(store).Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Observed != 1 || result.Started != 1 || result.Blocked != 0 || result.Skipped != 0 {
+		t.Fatalf("tick result = %+v, want embedded x read-only goal auto-started", result)
+	}
+	persisted, err := store.GetGoal(ctx, goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if persisted.Status != sqlite.GoalStatusRunning || persisted.CurrentRunID == nil {
+		t.Fatalf("persisted goal = %+v, want running with current run", persisted)
+	}
+}
+
 func TestTickStartsApprovedGoalOnceThenKeepsExecutorBackedRunActive(t *testing.T) {
 	ctx := context.Background()
 	store := openGoalServiceTestStore(t, "tick-approved.db")
