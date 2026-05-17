@@ -14,14 +14,14 @@ import (
 	"odin-os/internal/store/sqlite"
 )
 
-const TriggerUsage = "trigger [list|show <key>|create <key>|upsert <key>|test <key>|audit <key>|materialize <key>|fire <key>|evaluate|ingest github-issue] [key=value ...] [--json]"
+const TriggerUsage = "trigger [list|show <key>|create <key>|upsert <key>|seed marcus-brand-os|test <key>|audit <key>|materialize <key>|fire <key>|evaluate|ingest github-issue] [key=value ...] [--json]"
 
 func RunTrigger(ctx context.Context, service triggers.Service, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: odin %s", TriggerUsage)
 	}
 	if args[0] == "--help" || args[0] == "help" {
-		_, err := fmt.Fprintf(stdout, "usage: odin %s\n\nScheduled triggers:\n  odin trigger create <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger upsert <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger test <key> now=<RFC3339> [--json]\n  odin trigger evaluate now=<RFC3339> [--json]\n\nManual trigger fire:\n  odin trigger materialize <key> [reason=<reason>] [--json]\n  odin trigger fire <key> [reason=<reason>] [--json]\n\nAudit:\n  odin trigger audit <key> [--json]\n\nEvent triggers:\n  odin trigger create <key> initiative=<project> kind=event event=external.github.issue [match_status=<status>] [match_previous_status=<status>] [match_task_id=<id>] [match_scope=<scope>] [match_provider=<provider>] [match_repo=<owner/repo>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger test <key> source=events [--json]\n  odin trigger evaluate source=events [--json]\n\nExternal event ingest:\n  odin trigger ingest github-issue project=<project> repo=<owner/repo> number=<n> action=<opened> title=<text> [body=<text>] [url=<url>] [labels=a,b] [--json]\n", TriggerUsage)
+		_, err := fmt.Fprintf(stdout, "usage: odin %s\n\nScheduled triggers:\n  odin trigger create <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger upsert <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger seed marcus-brand-os [initiative=marcusgoll] [workspace=default] [status=enabled] [start=<YYYY-MM-DD>] [timezone=America/New_York] [--json]\n  odin trigger test <key> now=<RFC3339> [--json]\n  odin trigger evaluate now=<RFC3339> [--json]\n\nManual trigger fire:\n  odin trigger materialize <key> [reason=<reason>] [--json]\n  odin trigger fire <key> [reason=<reason>] [--json]\n\nAudit:\n  odin trigger audit <key> [--json]\n\nEvent triggers:\n  odin trigger create <key> initiative=<project> kind=event event=external.github.issue [match_status=<status>] [match_previous_status=<status>] [match_task_id=<id>] [match_scope=<scope>] [match_provider=<provider>] [match_repo=<owner/repo>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger test <key> source=events [--json]\n  odin trigger evaluate source=events [--json]\n\nExternal event ingest:\n  odin trigger ingest github-issue project=<project> repo=<owner/repo> number=<n> action=<opened> title=<text> [body=<text>] [url=<url>] [labels=a,b] [--json]\n", TriggerUsage)
 		return err
 	}
 	jsonOutput, args, err := consumeTriggerJSONFlag(args)
@@ -37,6 +37,15 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 	}
 
 	switch strings.ToLower(args[0]) {
+	case "seed":
+		if len(args) < 2 || !strings.EqualFold(args[1], "marcus-brand-os") {
+			return fmt.Errorf("usage: odin %s", TriggerUsage)
+		}
+		options, err := parseOptionTokens(args[2:])
+		if err != nil {
+			return err
+		}
+		return runTriggerSeedMarcusBrandOS(ctx, service, options, stdout, jsonOutput)
 	case "show":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: odin %s", TriggerUsage)
@@ -344,6 +353,249 @@ func runTriggerShow(ctx context.Context, service triggers.Service, workspaceID s
 		len(auditEvents),
 	)
 	return err
+}
+
+type marcusBrandOSRoutine struct {
+	Key        string
+	SkillKey   string
+	Title      string
+	Summary    string
+	LocalTime  string
+	Cadence    string
+	QuietHours string
+	Request    string
+}
+
+var marcusBrandOSRoutines = []marcusBrandOSRoutine{
+	{
+		Key:        "marcus-brand-morning-editorial-scan",
+		SkillKey:   "marcus-editorial-strategist",
+		Title:      "Marcus brand morning editorial scan",
+		Summary:    "Review current brand inputs and choose the strongest aviation-first priorities for the day.",
+		LocalTime:  "08:30",
+		Cadence:    "24h",
+		QuietHours: "00:00-12:00",
+		Request:    "Run the morning editorial scan for the Marcus Personal Brand Operating System. Review current ideas, recent outcomes, resource gaps, and audience needs. Return the top priorities for today, any no-go topics, and which lane should draft next. Do not publish or send anything.",
+	},
+	{
+		Key:        "marcus-brand-engagement-opportunity-check",
+		SkillKey:   "marcus-engagement-research-assistant",
+		Title:      "Marcus brand engagement opportunity check",
+		Summary:    "Check for approval-safe engagement and reply opportunities without taking account actions.",
+		LocalTime:  "10:30",
+		Cadence:    "4h",
+		QuietHours: "00:00-12:00",
+		Request:    "Review operator-provided social observations, pending social research, and explicit watch inputs for useful engagement opportunities. Suggest replies or no-reply decisions only. Do not like, repost, follow, DM, reply, publish, or bypass approval.",
+	},
+	{
+		Key:        "marcus-brand-midday-writing-pass",
+		SkillKey:   "marcus-writing-partner",
+		Title:      "Marcus brand midday writing pass",
+		Summary:    "Draft or revise one approval-ready Marcus Teaching Voice asset from the current top priority.",
+		LocalTime:  "12:30",
+		Cadence:    "24h",
+		QuietHours: "00:00-12:00",
+		Request:    "Draft or revise one high-signal Marcus Teaching Voice asset from the current editorial priority. Prefer aviation training, CFI decision-making, pilot progression, or practical teaching value. Mark public outputs as approval-required and do not publish.",
+	},
+	{
+		Key:        "marcus-brand-resource-production-pass",
+		SkillKey:   "marcus-resource-producer",
+		Title:      "Marcus brand resource production pass",
+		Summary:    "Turn recurring content ideas into useful resource or lead-magnet candidates.",
+		LocalTime:  "15:00",
+		Cadence:    "24h",
+		QuietHours: "00:00-12:00",
+		Request:    "Review the strongest recurring audience problems and propose one useful resource, checklist, guide, or tool candidate. Include intended audience, conversion path, source material needed, and next production step. Do not publish or send.",
+	},
+	{
+		Key:        "marcus-brand-newsletter-editorial-pass",
+		SkillKey:   "marcus-newsletter-editor",
+		Title:      "Marcus brand newsletter editorial pass",
+		Summary:    "Prepare or revise newsletter material from approved brand assets and recent learnings.",
+		LocalTime:  "16:00",
+		Cadence:    "168h",
+		QuietHours: "00:00-12:00",
+		Request:    "Prepare the next newsletter angle from approved or reviewable Marcus brand material. Include subject direction, core lesson, source assets, missing facts, and approval notes. Do not send email or publish.",
+	},
+	{
+		Key:        "marcus-brand-evening-growth-review",
+		SkillKey:   "marcus-growth-analyst",
+		Title:      "Marcus brand evening growth review",
+		Summary:    "Review brand outcomes and feed evidence-backed adjustments into tomorrow's plan.",
+		LocalTime:  "17:30",
+		Cadence:    "24h",
+		QuietHours: "00:00-12:00",
+		Request:    "Review today's brand work, pending approvals, social outcomes, evidence, and resource progress. Return what to keep, avoid, test next, and carry into tomorrow. Use evidence where available and label unknowns.",
+	},
+}
+
+type triggerSeedView struct {
+	Seed       string                  `json:"seed"`
+	Workspace  string                  `json:"workspace"`
+	Initiative string                  `json:"initiative"`
+	Status     string                  `json:"status"`
+	Timezone   string                  `json:"timezone"`
+	StartDate  string                  `json:"start_date"`
+	Triggers   []automationTriggerView `json:"triggers"`
+}
+
+func runTriggerSeedMarcusBrandOS(ctx context.Context, service triggers.Service, options map[string]string, stdout io.Writer, jsonOutput bool) error {
+	workspaceID := triggerFirstNonEmpty(options["workspace"], "default")
+	initiativeKey := triggerFirstNonEmpty(options["initiative"], options["project"], "marcusgoll")
+	status := triggerFirstNonEmpty(options["status"], "enabled")
+	timezone := triggerFirstNonEmpty(options["timezone"], options["quiet_tz"], "America/New_York")
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		return fmt.Errorf("invalid marcus-brand-os timezone %q: %w", timezone, err)
+	}
+	explicitStart := strings.TrimSpace(options["start"]) != ""
+	startDate, err := parseMarcusBrandOSStartDate(options["start"], location)
+	if err != nil {
+		return err
+	}
+
+	views := make([]automationTriggerView, 0, len(marcusBrandOSRoutines))
+	for _, routine := range marcusBrandOSRoutines {
+		nextEligibleAt, err := nextMarcusBrandOSRoutineAt(startDate, routine.LocalTime, routine.Cadence, location, explicitStart)
+		if err != nil {
+			return err
+		}
+		ruleJSON, err := marcusBrandOSRuleJSON(routine, initiativeKey)
+		if err != nil {
+			return err
+		}
+		trigger, err := service.Upsert(ctx, triggers.UpsertParams{
+			WorkspaceID:    workspaceID,
+			Key:            routine.Key,
+			InitiativeKey:  initiativeKey,
+			Kind:           "schedule",
+			Status:         status,
+			RuleSummary:    routine.Summary,
+			RuleJSON:       ruleJSON,
+			WorkItemTitle:  routine.Title,
+			NextEligibleAt: &nextEligibleAt,
+		})
+		if err != nil {
+			return err
+		}
+		views = append(views, newAutomationTriggerView(trigger))
+	}
+
+	if jsonOutput {
+		return WriteJSON(stdout, triggerSeedView{
+			Seed:       "marcus-brand-os",
+			Workspace:  workspaceID,
+			Initiative: initiativeKey,
+			Status:     status,
+			Timezone:   timezone,
+			StartDate:  startDate.Format("2006-01-02"),
+			Triggers:   views,
+		})
+	}
+
+	if _, err := fmt.Fprintf(stdout, "seed=marcus-brand-os triggers=%d workspace=%s initiative=%s status=%s timezone=%s start=%s\n",
+		len(views),
+		workspaceID,
+		initiativeKey,
+		status,
+		timezone,
+		startDate.Format("2006-01-02"),
+	); err != nil {
+		return err
+	}
+	for _, view := range views {
+		next := "none"
+		if view.NextEligibleAt != nil {
+			next = *view.NextEligibleAt
+		}
+		if _, err := fmt.Fprintf(stdout, "trigger=%s skill_invocation=true next_run=%s cadence=%s approval_required=false\n",
+			view.Key,
+			next,
+			triggerRoutineCadence(view.Key),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func marcusBrandOSRuleJSON(routine marcusBrandOSRoutine, projectKey string) (string, error) {
+	payload := map[string]any{
+		"summary":          routine.Summary,
+		"kind":             "schedule",
+		"cadence":          routine.Cadence,
+		"quiet_hours":      routine.QuietHours,
+		"quiet_timezone":   "UTC",
+		"execution_intent": "read_only",
+		"skill_invocation": map[string]any{
+			"skill_key":               routine.SkillKey,
+			"scope":                   "project",
+			"project_key":             projectKey,
+			"execution_intent":        "read_only",
+			"execution_intent_source": "trigger",
+			"review_state":            "review_required",
+			"input_json": map[string]any{
+				"request":           routine.Request,
+				"workflow_key":      "marcus-personal-brand-operating-system",
+				"source":            "marcus-brand-os-trigger",
+				"approval_boundary": "internal drafting and analysis only; public actions require Marcus approval",
+			},
+		},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func parseMarcusBrandOSStartDate(value string, location *time.Location) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		now := time.Now().In(location)
+		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location), nil
+	}
+	parsed, err := time.ParseInLocation("2006-01-02", value, location)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid marcus-brand-os start value %q: use YYYY-MM-DD", value)
+	}
+	return parsed, nil
+}
+
+func nextMarcusBrandOSRoutineAt(startDate time.Time, localClock string, cadence string, location *time.Location, explicitStart bool) (time.Time, error) {
+	parts := strings.Split(localClock, ":")
+	if len(parts) != 2 {
+		return time.Time{}, fmt.Errorf("invalid marcus-brand-os local time %q", localClock)
+	}
+	hour, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid marcus-brand-os hour %q: %w", localClock, err)
+	}
+	minute, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid marcus-brand-os minute %q: %w", localClock, err)
+	}
+	next := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), hour, minute, 0, 0, location)
+	duration, err := time.ParseDuration(cadence)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid marcus-brand-os cadence %q: %w", cadence, err)
+	}
+	if !explicitStart {
+		now := time.Now().In(location)
+		for !next.After(now) {
+			next = next.Add(duration)
+		}
+	}
+	return next.UTC(), nil
+}
+
+func triggerRoutineCadence(key string) string {
+	for _, routine := range marcusBrandOSRoutines {
+		if routine.Key == key {
+			return routine.Cadence
+		}
+	}
+	return "unknown"
 }
 
 type triggerEnvelope struct {
