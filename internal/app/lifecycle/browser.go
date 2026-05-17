@@ -691,7 +691,7 @@ func applyXBioChange(ctx context.Context, app bootstrap.App, command commands.Br
 	if err != nil {
 		return view, err
 	}
-	if task.Status == "completed" || task.Status == "failed" {
+	if task.Status == "completed" {
 		return view, fmt.Errorf("task %d is already %s", task.ID, task.Status)
 	}
 	artifacts, err := app.Store.ListBrowserEncryptedProfileArtifacts(ctx, sqlite.ListBrowserEncryptedProfileArtifactsParams{

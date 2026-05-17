@@ -6,11 +6,23 @@ DEFAULT_BROWSER_ACCESS_SH="${SCRIPT_DIR}/../browser/browser-access.sh"
 
 emit_json() {
     local status="$1" summary="$2" artifacts_json="${3:-{}}"
+    artifacts_json="$(json_object_or_empty "${artifacts_json}")"
     jq -nc \
         --arg status "${status}" \
         --arg summary "${summary}" \
         --argjson artifacts "${artifacts_json}" \
         '{status: $status, tool_key: "browser_x_profile_bio_update", summary: $summary, artifacts: $artifacts}'
+}
+
+json_object_or_empty() {
+    local value="${1:-}"
+    local normalized=""
+    normalized="$(printf '%s' "${value}" | jq -c 'select(type == "object")' 2>/dev/null || true)"
+    if [[ -n "${normalized}" ]]; then
+        printf '%s\n' "${normalized}"
+    else
+        printf '{}\n'
+    fi
 }
 
 request_json="$(cat)"
@@ -118,7 +130,7 @@ find_bio_eval='(() => {
 bio_state='{}'
 bio_selector=""
 for _ in $(seq 1 30); do
-    bio_state="$(browser_evaluate "${find_bio_eval}" 2>/dev/null || printf '{}')"
+    bio_state="$(json_object_or_empty "$(browser_evaluate "${find_bio_eval}" 2>/dev/null || true)")"
     bio_selector="$(jq -r '.selector // empty' <<<"${bio_state}")"
     if [[ -n "${bio_selector}" ]]; then
         break
@@ -158,7 +170,7 @@ print(f"""(() => {{
 PY
 )"
 
-set_state="$(browser_evaluate "${set_bio_eval}" 2>/dev/null || printf '{}')"
+set_state="$(json_object_or_empty "$(browser_evaluate "${set_bio_eval}" 2>/dev/null || true)")"
 if [[ "$(jq -r '.ok // false' <<<"${set_state}")" != "true" ]]; then
     artifacts_json="$(jq -nc --arg reason "bio_update_failed" --argjson state "${set_state}" '{reason: $reason, state: $state}')"
     emit_json "failed" "Unable to update the X bio field." "${artifacts_json}"
@@ -184,7 +196,7 @@ save_eval='(() => {
   return {clicked: true, current_url: location.href, title: document.title};
 })()'
 
-save_state="$(browser_evaluate "${save_eval}" 2>/dev/null || printf '{}')"
+save_state="$(json_object_or_empty "$(browser_evaluate "${save_eval}" 2>/dev/null || true)")"
 if [[ "$(jq -r '.clicked // false' <<<"${save_state}")" != "true" ]]; then
     artifacts_json="$(jq -nc --arg reason "save_click_failed" --argjson state "${save_state}" '{reason: $reason, state: $state}')"
     emit_json "failed" "Unable to save the X bio change." "${artifacts_json}"
@@ -205,7 +217,7 @@ print(f"""(() => {{
 }})()""")
 PY
 )"
-verify_state="$(browser_evaluate "${verify_eval}" 2>/dev/null || printf '{}')"
+verify_state="$(json_object_or_empty "$(browser_evaluate "${verify_eval}" 2>/dev/null || true)")"
 current_url="$(jq -r '.current_url // empty' <<<"${verify_state}")"
 title="$(jq -r '.title // empty' <<<"${verify_state}")"
 updated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"

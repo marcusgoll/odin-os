@@ -1201,6 +1201,27 @@ func TestRunBrowserSessionApplyXBioRequiresApprovalAndRecordsEvidence(t *testing
 	}); err != nil {
 		t.Fatalf("ResolveApproval() error = %v", err)
 	}
+	failDriverPath := writeLifecycleExecutable(t, "x-bio-driver-fail", `#!/bin/sh
+cat >/dev/null
+test -d "$ODIN_CHROME_PROFILE_DIR" || exit 12
+printf '{"status":"failed","tool_key":"browser_x_profile_bio_update","summary":"simulated X save failure","artifacts":{"reason":"test_failure"}}'
+`)
+	t.Setenv("ODIN_X_BIO_DRIVER", failDriverPath)
+	t.Setenv("ODIN_X_BIO_ALLOWED_DRIVERS", failDriverPath)
+
+	stdout.Reset()
+	err = runBrowser(ctx, app, []string{"session", "apply-x-bio", "--id", int64String(session.ID), "--task-id", int64String(task.ID), "--approval-id", int64String(approval.ID), "--bio", "Daily autonomy proof via Odin OS.", "--json"}, &stdout)
+	if err == nil || !strings.Contains(err.Error(), "x_bio_mutation_failed") {
+		t.Fatalf("runBrowser(apply-x-bio failure) error = %v\n%s, want failed run error", err, stdout.String())
+	}
+	failedTask, err := app.Store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() after failed X bio error = %v", err)
+	}
+	if failedTask.Status != "failed" {
+		t.Fatalf("task status after failed X bio = %q, want failed", failedTask.Status)
+	}
+
 	driverPath := writeLifecycleExecutable(t, "x-bio-driver", `#!/bin/sh
 cat >/dev/null
 test -d "$ODIN_CHROME_PROFILE_DIR" || exit 12
