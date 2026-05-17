@@ -6,7 +6,18 @@ env_file="${ODIN_OVERSEER_ENV_FILE:-$HOME/.config/odin/odin-os.env}"
 release_link="${ODIN_OVERSEER_RELEASE_LINK:-$HOME/odin-os-live}"
 runtime_root="${ODIN_OVERSEER_RUNTIME_ROOT:-$HOME/.local/state/odin-os}"
 repo_root="${ODIN_OVERSEER_REPO_ROOT:-$HOME/odin-os}"
-nginx_config="${ODIN_OVERSEER_NGINX_CONFIG:-$repo_root/deploy/nginx/odin-pwa-proxy.conf}"
+nginx_config="${ODIN_OVERSEER_NGINX_CONFIG:-$release_link/deploy/nginx/odin-pwa-proxy.conf}"
+network="${ODIN_OVERSEER_NETWORK:-infrastructure_default}"
+monitoring_network="${ODIN_OVERSEER_MONITORING_NETWORK:-odin-monitoring_default}"
+container_user="${ODIN_OVERSEER_USER:-0:0}"
+memory_limit="${ODIN_OVERSEER_MEMORY:-8g}"
+memory_swap="${ODIN_OVERSEER_MEMORY_SWAP:-9g}"
+gomemlimit="${ODIN_OVERSEER_GOMEMLIMIT:-6144MiB}"
+gogc="${ODIN_OVERSEER_GOGC:-100}"
+projects_overlay="${ODIN_PROJECTS_OVERLAY:-$HOME/.config/odin/odin-os-projects.local.yaml}"
+codex_driver="${ODIN_CODEX_DRIVER:-$HOME/.config/odin/odin-codex-live-driver.sh}"
+handoff_base_url="${ODIN_BROWSER_HANDOFF_BASE_URL:-https://odin.marcusgoll.com/browser/session/handoff}"
+family_ops_worktree="${ODIN_FAMILY_OPS_CUTOVER_WORKTREE:-$HOME/.config/superpowers/worktrees/family-ops/odin-os-cutover-main}"
 
 if [[ ! -f "$env_file" ]]; then
   echo "missing env file: $env_file" >&2
@@ -25,18 +36,30 @@ if docker ps -a --format '{{.Names}}' | grep -qx "$container_name"; then
   docker rm -f "$container_name" >/dev/null
 fi
 
-docker run -d --name "$container_name" --restart unless-stopped \
-  --network host \
-  --cap-add NET_BIND_SERVICE \
+docker_args=(-d --name "$container_name" --restart unless-stopped)
+if [[ "$network" == "host" ]]; then
+  docker_args+=(--network host --cap-add NET_BIND_SERVICE)
+else
+  docker_args+=(--network "$network")
+fi
+
+docker run "${docker_args[@]}" \
   --env-file "$env_file" \
-  --user "$(id -u):$(id -g)" \
+  --user "$container_user" \
+  --memory "$memory_limit" \
+  --memory-swap "$memory_swap" \
   -w /app \
   -e HOME="$HOME" \
   -e PATH="$HOME/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   -e PYTHONPATH="$HOME/.local/lib/python3.12/site-packages" \
+  -e GOMEMLIMIT="$gomemlimit" \
+  -e GOGC="$gogc" \
   -e ODIN_ROOT="$runtime_root" \
   -e ODIN_HTTP_ADDR=127.0.0.1:9444 \
+  -e ODIN_PROJECTS_OVERLAY="$projects_overlay" \
+  -e ODIN_CODEX_DRIVER="$codex_driver" \
   -e ODIN_CORE_GIT_ROOT="$repo_root" \
+  -e ODIN_BROWSER_HANDOFF_BASE_URL="$handoff_base_url" \
   -v "$release_link:/app:ro" \
   -v "$runtime_root:$runtime_root" \
   -v "$HOME/.config/odin:$HOME/.config/odin:ro" \
@@ -48,6 +71,7 @@ docker run -d --name "$container_name" --restart unless-stopped \
   -v "$HOME/pbs:$HOME/pbs:ro" \
   -v "$HOME/cfipros:$HOME/cfipros:ro" \
   -v "$HOME/marcusgoll:$HOME/marcusgoll:ro" \
+  -v "$family_ops_worktree:$family_ops_worktree:ro" \
   -v /var/odin/browser-state/novnc-root:/var/odin/browser-state/novnc-root:ro \
   -v /opt/google/chrome:/opt/google/chrome:ro \
   -v /etc/alternatives/google-chrome:/etc/alternatives/google-chrome:ro \
@@ -73,3 +97,7 @@ docker run -d --name "$container_name" --restart unless-stopped \
   --entrypoint /bin/sh \
   nginx:alpine \
   -c 'export PATH="$HOME/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"; export PYTHONPATH="$HOME/.local/lib/python3.12/site-packages"; mkdir -p /tmp/nginx-client-body /tmp/nginx-proxy /tmp/nginx-fastcgi /tmp/nginx-uwsgi /tmp/nginx-scgi; /app/bin/odin serve & odin_pid=$!; trap "kill $odin_pid 2>/dev/null || true" TERM INT; exec nginx -c /etc/nginx/nginx.conf -g "daemon off;"'
+
+if [[ "$network" != "host" ]] && [[ -n "$monitoring_network" ]] && docker network inspect "$monitoring_network" >/dev/null 2>&1; then
+  docker network connect --alias "$container_name" "$monitoring_network" "$container_name" >/dev/null
+fi
