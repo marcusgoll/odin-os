@@ -1060,35 +1060,54 @@ func ListCompanionMemoryViews(ctx context.Context, queryer Queryer, query Compan
 
 func ListProjectTransitionViews(ctx context.Context, queryer Queryer) ([]ProjectTransitionView, error) {
 	rows, err := queryer.QueryContext(ctx, `
+		WITH task_counts AS (
+			SELECT
+				project_id,
+				COUNT(*) AS task_count,
+				COUNT(CASE WHEN status NOT IN ('completed', 'cancelled', 'dead_letter', 'timeout') THEN 1 END) AS open_task_count
+			FROM tasks
+			GROUP BY project_id
+		),
+		latest_events AS (
+			SELECT
+				project_id,
+				MAX(occurred_at) AS last_event_at
+			FROM events
+			WHERE project_id IS NOT NULL
+			GROUP BY project_id
+		),
+		latest_report_ids AS (
+			SELECT
+				project_id,
+				MAX(id) AS report_id
+			FROM project_transition_reports
+			GROUP BY project_id
+		),
+		latest_reports AS (
+			SELECT
+				ptr.project_id,
+				ptr.report_type,
+				ptr.recorded_at
+			FROM project_transition_reports ptr
+			JOIN latest_report_ids latest ON latest.report_id = ptr.id
+		)
 		SELECT
 			p.id,
 			p.key,
 			p.name,
 			p.scope,
-			COUNT(DISTINCT t.id),
-			COUNT(DISTINCT CASE WHEN t.status NOT IN ('completed', 'cancelled', 'dead_letter', 'timeout') THEN t.id END),
-			MAX(e.occurred_at),
+			COALESCE(tc.task_count, 0),
+			COALESCE(tc.open_task_count, 0),
+			le.last_event_at,
 			COALESCE(pt.state, ''),
 			COALESCE(pt.controller, ''),
-			COALESCE((
-				SELECT ptr.report_type
-				FROM project_transition_reports ptr
-				WHERE ptr.project_id = p.id
-				ORDER BY ptr.id DESC
-				LIMIT 1
-			), ''),
-			(
-				SELECT ptr.recorded_at
-				FROM project_transition_reports ptr
-				WHERE ptr.project_id = p.id
-				ORDER BY ptr.id DESC
-				LIMIT 1
-			)
+			COALESCE(lr.report_type, ''),
+			lr.recorded_at
 		FROM projects p
-		LEFT JOIN tasks t ON t.project_id = p.id
-		LEFT JOIN events e ON e.project_id = p.id
+		LEFT JOIN task_counts tc ON tc.project_id = p.id
+		LEFT JOIN latest_events le ON le.project_id = p.id
 		LEFT JOIN project_transitions pt ON pt.project_id = p.id
-		GROUP BY p.id, p.key, p.name, p.scope
+		LEFT JOIN latest_reports lr ON lr.project_id = p.id
 		ORDER BY p.id ASC
 	`)
 	if err != nil {
