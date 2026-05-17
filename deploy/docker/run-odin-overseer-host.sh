@@ -49,6 +49,9 @@ fi
 if [[ -d /etc/ssl/certs ]]; then
   email_mounts+=(-v /etc/ssl/certs:/etc/ssl/certs:ro)
 fi
+if [[ -x /usr/bin/jq ]]; then
+  email_mounts+=(-v /usr/bin/jq:/usr/bin/jq:ro)
+fi
 
 if docker ps -a --format '{{.Names}}' | grep -qx "$container_name"; then
   docker rm -f "$container_name" >/dev/null
