@@ -3375,11 +3375,22 @@ func TestRunReviewApproveGoalDerivedItems(t *testing.T) {
 
 	plannedGoalID := createGoal("Approve planned review goal")
 	run("goal", "transition", "--id", int64String(plannedGoalID), "--status", "planned", "--json")
-	plannedApproved := run("review", "approve", "--id", "goal-approval:"+int64String(plannedGoalID), "--json")
-	if !strings.Contains(plannedApproved, `"review_id": "goal-approval:`+int64String(plannedGoalID)+`"`) || !strings.Contains(plannedApproved, `"status": "approved_for_execution"`) {
-		t.Fatalf("review approve goal-approval output = %s, want approved goal", plannedApproved)
+	plannedApproved := run("review", "act", "goal-approval:"+int64String(plannedGoalID), "approve", "--json")
+	if !strings.Contains(plannedApproved, `"review_id": "goal-approval:`+int64String(plannedGoalID)+`"`) ||
+		!strings.Contains(plannedApproved, `"status": "approved_for_execution"`) ||
+		!strings.Contains(plannedApproved, `"handoff": "created_delivery_work_item"`) ||
+		!strings.Contains(plannedApproved, `"key": "goal-`+int64String(plannedGoalID)+`-approved-delivery"`) {
+		t.Fatalf("review act approve goal-approval output = %s, want approved goal with delivery work item", plannedApproved)
 	}
 	assertGoalStatus(plannedGoalID, string(sqlite.GoalStatusApprovedForExecution))
+	workStatus := run("work", "status", "--json")
+	if !strings.Contains(workStatus, `"work_items": 1`) || !strings.Contains(workStatus, `"open_work_items": 1`) {
+		t.Fatalf("work status after goal approval = %s, want one open delivery work item", workStatus)
+	}
+	plannedTick := run("goal", "tick", "--json")
+	if !strings.Contains(plannedTick, `"goal_id": `+int64String(plannedGoalID)) || !strings.Contains(plannedTick, `"action": "started"`) {
+		t.Fatalf("goal tick after planned approval = %s, want approved planned goal moved into run path", plannedTick)
+	}
 
 	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
 	if err != nil {
