@@ -5,3 +5,9 @@ service:
   http_addr: 127.0.0.1:9443
   startup_recovery: true
   admin_token_env: ODIN_ADMIN_TOKEN
+  email_actions:
+    recipient: marcusgoll@gmail.com
+    base_url: http://127.0.0.1:9443
+    secret_env: ODIN_EMAIL_ACTION_SECRET
+    sendmail_path: /usr/sbin/sendmail
+    from: odin-os@localhost

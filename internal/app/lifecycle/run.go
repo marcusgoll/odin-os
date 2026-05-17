@@ -5945,11 +5945,16 @@ func runtimeEnv() map[string]string {
 	fileEnv := runtimeEnvFile()
 	applyRuntimeEnvDefaults(fileEnv)
 	return map[string]string{
-		"ODIN_ROOT":         runtimeEnvValue(fileEnv, "ODIN_ROOT"),
-		"ODIN_HTTP_ADDR":    runtimeEnvValue(fileEnv, "ODIN_HTTP_ADDR"),
-		"ODIN_ADMIN_TOKEN":  runtimeEnvValue(fileEnv, "ODIN_ADMIN_TOKEN"),
-		"ODIN_NOW":          runtimeEnvValue(fileEnv, "ODIN_NOW"),
-		"ODIN_MEDIA_CONFIG": runtimeEnvValue(fileEnv, "ODIN_MEDIA_CONFIG"),
+		"ODIN_ROOT":                       runtimeEnvValue(fileEnv, "ODIN_ROOT"),
+		"ODIN_HTTP_ADDR":                  runtimeEnvValue(fileEnv, "ODIN_HTTP_ADDR"),
+		"ODIN_ADMIN_TOKEN":                runtimeEnvValue(fileEnv, "ODIN_ADMIN_TOKEN"),
+		"ODIN_NOW":                        runtimeEnvValue(fileEnv, "ODIN_NOW"),
+		"ODIN_MEDIA_CONFIG":               runtimeEnvValue(fileEnv, "ODIN_MEDIA_CONFIG"),
+		"ODIN_EMAIL_ACTION_SECRET":        runtimeEnvValue(fileEnv, "ODIN_EMAIL_ACTION_SECRET"),
+		"ODIN_EMAIL_ACTION_BASE_URL":      runtimeEnvValue(fileEnv, "ODIN_EMAIL_ACTION_BASE_URL"),
+		"ODIN_EMAIL_ACTION_RECIPIENT":     runtimeEnvValue(fileEnv, "ODIN_EMAIL_ACTION_RECIPIENT"),
+		"ODIN_EMAIL_ACTION_SENDMAIL_PATH": runtimeEnvValue(fileEnv, "ODIN_EMAIL_ACTION_SENDMAIL_PATH"),
+		"ODIN_EMAIL_ACTION_FROM":          runtimeEnvValue(fileEnv, "ODIN_EMAIL_ACTION_FROM"),
 	}
 }
 
@@ -5967,6 +5972,11 @@ func applyRuntimeEnvDefaults(fileEnv map[string]string) {
 		"ODIN_ADMIN_TOKEN",
 		"ODIN_NOW",
 		"ODIN_MEDIA_CONFIG",
+		"ODIN_EMAIL_ACTION_SECRET",
+		"ODIN_EMAIL_ACTION_BASE_URL",
+		"ODIN_EMAIL_ACTION_RECIPIENT",
+		"ODIN_EMAIL_ACTION_SENDMAIL_PATH",
+		"ODIN_EMAIL_ACTION_FROM",
 		"ODIN_PROJECTS_OVERLAY",
 		"ODIN_CODEX_DRIVER",
 	} {
@@ -6047,6 +6057,11 @@ func runtimeEnvKeyAllowed(key string) bool {
 		"ODIN_ADMIN_TOKEN",
 		"ODIN_NOW",
 		"ODIN_MEDIA_CONFIG",
+		"ODIN_EMAIL_ACTION_SECRET",
+		"ODIN_EMAIL_ACTION_BASE_URL",
+		"ODIN_EMAIL_ACTION_RECIPIENT",
+		"ODIN_EMAIL_ACTION_SENDMAIL_PATH",
+		"ODIN_EMAIL_ACTION_FROM",
 		"ODIN_PROJECTS_OVERLAY",
 		"ODIN_CODEX_DRIVER":
 		return true
@@ -6630,14 +6645,19 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 			Gateway:    newServeCapabilityGateway(app),
 			AdminToken: cfg.AdminToken,
 			Fallback: apihttp.NewOperationalHandler(apihttp.Dependencies{
-				Health:           healthService,
-				Metrics:          metricsService,
-				Store:            app.Store,
-				ReadModels:       app.Store.DB(),
-				RegistryHealthy:  healthDeps.RegistryHealthy,
-				RegistrySnapshot: app.RegistrySnapshot,
-				Registry:         app.Registry,
-				Now:              now,
+				Health:               healthService,
+				Metrics:              metricsService,
+				Store:                app.Store,
+				ReadModels:           app.Store.DB(),
+				RegistryHealthy:      healthDeps.RegistryHealthy,
+				RegistrySnapshot:     app.RegistrySnapshot,
+				Registry:             app.Registry,
+				Now:                  now,
+				EmailActionSecret:    cfg.EmailActionSecret,
+				EmailActionBaseURL:   cfg.Service.EmailActions.BaseURL,
+				EmailActionRecipient: cfg.Service.EmailActions.Recipient,
+				EmailActionFrom:      cfg.Service.EmailActions.From,
+				EmailActionSendmail:  cfg.Service.EmailActions.SendmailPath,
 				Tmux: apihttp.WorkspaceTmuxStatusProvider{
 					Workspaces: coreworkspace.Service{
 						Store:    app.Store,

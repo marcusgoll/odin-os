@@ -24,7 +24,16 @@ type ServiceSettings struct {
 	HTTPAddr        string                `yaml:"http_addr"`
 	StartupRecovery bool                  `yaml:"startup_recovery"`
 	AdminTokenEnv   string                `yaml:"admin_token_env"`
+	EmailActions    EmailActionSettings   `yaml:"email_actions"`
 	SocialCopilot   SocialCopilotSettings `yaml:"social_copilot"`
+}
+
+type EmailActionSettings struct {
+	Recipient    string `yaml:"recipient"`
+	BaseURL      string `yaml:"base_url"`
+	SecretEnv    string `yaml:"secret_env"`
+	SendmailPath string `yaml:"sendmail_path"`
+	From         string `yaml:"from"`
 }
 
 type SocialCopilotSettings struct {
@@ -34,12 +43,13 @@ type SocialCopilotSettings struct {
 }
 
 type Config struct {
-	Version         int
-	RuntimeRoot     string
-	Service         ServiceSettings
-	MediaConfigPath string
-	Media           *coremedia.Config
-	AdminToken      string
+	Version           int
+	RuntimeRoot       string
+	Service           ServiceSettings
+	MediaConfigPath   string
+	Media             *coremedia.Config
+	AdminToken        string
+	EmailActionSecret string
 }
 
 func Load(path string, repoRoot string, env map[string]string) (Config, error) {
@@ -60,6 +70,12 @@ func Load(path string, repoRoot string, env map[string]string) (Config, error) {
 	}
 	if cfg.Service.AdminTokenEnv == "" {
 		cfg.Service.AdminTokenEnv = "ODIN_ADMIN_TOKEN"
+	}
+	if cfg.Service.EmailActions.SecretEnv == "" {
+		cfg.Service.EmailActions.SecretEnv = "ODIN_EMAIL_ACTION_SECRET"
+	}
+	if cfg.Service.EmailActions.From == "" {
+		cfg.Service.EmailActions.From = "odin-os@localhost"
 	}
 	if !raw.Service.StartupRecovery {
 		cfg.Service.StartupRecovery = false
@@ -82,6 +98,21 @@ func Load(path string, repoRoot string, env map[string]string) (Config, error) {
 	}
 	if value := env[cfg.Service.AdminTokenEnv]; value != "" {
 		cfg.AdminToken = value
+	}
+	if value := env["ODIN_EMAIL_ACTION_RECIPIENT"]; value != "" {
+		cfg.Service.EmailActions.Recipient = value
+	}
+	if value := env["ODIN_EMAIL_ACTION_BASE_URL"]; value != "" {
+		cfg.Service.EmailActions.BaseURL = value
+	}
+	if value := env["ODIN_EMAIL_ACTION_SENDMAIL_PATH"]; value != "" {
+		cfg.Service.EmailActions.SendmailPath = value
+	}
+	if value := env["ODIN_EMAIL_ACTION_FROM"]; value != "" {
+		cfg.Service.EmailActions.From = value
+	}
+	if value := env[cfg.Service.EmailActions.SecretEnv]; value != "" {
+		cfg.EmailActionSecret = value
 	}
 
 	mediaPath, mediaConfig, err := loadMediaConfig(repoRoot, env)

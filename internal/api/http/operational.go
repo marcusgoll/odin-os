@@ -31,19 +31,24 @@ import (
 )
 
 type Dependencies struct {
-	Health              healthsvc.Service
-	Metrics             metricsvc.Service
-	Store               *sqlite.Store
-	ReadModels          projections.Queryer
-	RegistryHealthy     bool
-	Now                 func() time.Time
-	AdminToken          string
-	Admin               AdminActions
-	Tmux                TmuxStatusProvider
-	GitHubWebhookSecret string
-	GitHubIssueIngester GitHubIssueIngester
-	RegistrySnapshot    registry.Snapshot
-	Registry            coreprojects.Registry
+	Health               healthsvc.Service
+	Metrics              metricsvc.Service
+	Store                *sqlite.Store
+	ReadModels           projections.Queryer
+	RegistryHealthy      bool
+	Now                  func() time.Time
+	AdminToken           string
+	EmailActionSecret    string
+	EmailActionBaseURL   string
+	EmailActionRecipient string
+	EmailActionFrom      string
+	EmailActionSendmail  string
+	Admin                AdminActions
+	Tmux                 TmuxStatusProvider
+	GitHubWebhookSecret  string
+	GitHubIssueIngester  GitHubIssueIngester
+	RegistrySnapshot     registry.Snapshot
+	Registry             coreprojects.Registry
 }
 
 type AdminActions interface {
@@ -286,6 +291,18 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 	})
 	mux.HandleFunc("POST /notifications/test-event", func(writer http.ResponseWriter, request *http.Request) {
 		handleNotificationTestEvent(writer, request, deps)
+	})
+	mux.HandleFunc("GET /email-actions/preview", func(writer http.ResponseWriter, request *http.Request) {
+		handleEmailActionPreview(writer, request, deps, now)
+	})
+	mux.HandleFunc("POST /email-actions/send", func(writer http.ResponseWriter, request *http.Request) {
+		handleEmailActionSend(writer, request, deps, now)
+	})
+	mux.HandleFunc("GET /email-actions/open/{token}", func(writer http.ResponseWriter, request *http.Request) {
+		handleEmailActionOpen(writer, request, deps, now)
+	})
+	mux.HandleFunc("GET /email-actions/{token}", func(writer http.ResponseWriter, request *http.Request) {
+		handleEmailActionApply(writer, request, deps, now)
 	})
 	mux.HandleFunc("POST /kill-switch/on", func(writer http.ResponseWriter, request *http.Request) {
 		handleAdminAction(writer, request, deps, "kill_switch_on", func(ctx context.Context, admin AdminActions) error {
