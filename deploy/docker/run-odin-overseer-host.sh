@@ -4,9 +4,10 @@ set -euo pipefail
 container_name="${ODIN_OVERSEER_CONTAINER_NAME:-odin-overseer}"
 env_file="${ODIN_OVERSEER_ENV_FILE:-$HOME/.config/odin/odin-os.env}"
 release_link="${ODIN_OVERSEER_RELEASE_LINK:-$HOME/odin-os-live}"
+release_root="$(readlink -f "$release_link")"
 runtime_root="${ODIN_OVERSEER_RUNTIME_ROOT:-$HOME/.local/state/odin-os}"
 repo_root="${ODIN_OVERSEER_REPO_ROOT:-$HOME/odin-os}"
-nginx_config="${ODIN_OVERSEER_NGINX_CONFIG:-$release_link/deploy/nginx/odin-pwa-proxy.conf}"
+nginx_config="${ODIN_OVERSEER_NGINX_CONFIG:-$release_root/deploy/nginx/odin-pwa-proxy.conf}"
 network="${ODIN_OVERSEER_NETWORK:-infrastructure_default}"
 monitoring_network="${ODIN_OVERSEER_MONITORING_NETWORK:-odin-monitoring_default}"
 container_user="${ODIN_OVERSEER_USER:-0:0}"
@@ -23,8 +24,12 @@ if [[ ! -f "$env_file" ]]; then
   echo "missing env file: $env_file" >&2
   exit 1
 fi
-if [[ ! -x "$release_link/bin/odin" ]]; then
-  echo "missing Odin binary at $release_link/bin/odin" >&2
+if [[ -z "$release_root" || ! -d "$release_root" ]]; then
+  echo "missing release root: $release_link" >&2
+  exit 1
+fi
+if [[ ! -x "$release_root/bin/odin" ]]; then
+  echo "missing Odin binary at $release_root/bin/odin" >&2
   exit 1
 fi
 if [[ ! -f "$nginx_config" ]]; then
@@ -60,7 +65,7 @@ docker run "${docker_args[@]}" \
   -e ODIN_CODEX_DRIVER="$codex_driver" \
   -e ODIN_CORE_GIT_ROOT="$repo_root" \
   -e ODIN_BROWSER_HANDOFF_BASE_URL="$handoff_base_url" \
-  -v "$release_link:/app:ro" \
+  -v "$release_root:/app:ro" \
   -v "$runtime_root:$runtime_root" \
   -v "$HOME/.config/odin:$HOME/.config/odin:ro" \
   -v "$HOME/.config/odin:/config:ro" \

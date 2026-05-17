@@ -93,10 +93,12 @@ The repo-owned nginx template is:
 deploy/nginx/odin-pwa-proxy.conf
 ```
 
-The launcher defaults `ODIN_OVERSEER_NGINX_CONFIG` to the release copy at
-`$ODIN_OVERSEER_RELEASE_LINK/deploy/nginx/odin-pwa-proxy.conf`. Do not default
-this to the mutable checkout; live redeploys must run the proxy template that
-was shipped with the selected release.
+The launcher resolves `ODIN_OVERSEER_RELEASE_LINK` to a concrete release
+directory before mounting `/app`, and defaults `ODIN_OVERSEER_NGINX_CONFIG` to
+that resolved release copy at
+`<resolved-release>/deploy/nginx/odin-pwa-proxy.conf`. Do not default this to
+the mutable checkout or a symlink mount; live redeploys must run the proxy
+template and binary that were shipped with the selected release.
 
 The repo-owned container launcher is:
 
