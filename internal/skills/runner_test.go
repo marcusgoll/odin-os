@@ -1,7 +1,9 @@
 package skills
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +12,105 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCFIProsCEOOperatorReportsKPITruthAndApprovalBoundary(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("Abs(repo root) error = %v", err)
+	}
+	cfiprosRoot := t.TempDir()
+	writeFile(t, filepath.Join(cfiprosRoot, "docs", "integrations", "N8N.md"), "source_gsc_daily_metrics\nsource_ga4_daily_metrics\n")
+	writeFile(t, filepath.Join(cfiprosRoot, "docs", "integrations", "POSTHOG.md"), "source_gsc_daily_metrics\nsource_ga4_daily_metrics\n")
+	writeFile(t, filepath.Join(cfiprosRoot, "api", "app", "scripts", "verify_analytics_pipeline.py"), "POSTHOG_PERSONAL_API_KEY\nsource_ga4_daily_metrics\n")
+	writeFile(t, filepath.Join(cfiprosRoot, "docs", "api-reference", "endpoints", "students.md"), "student_count\nactive_students\n")
+	writeFile(t, filepath.Join(cfiprosRoot, "api", "app", "services", "organizations", "organization_service.py"), "student_count\ninstructor_count\n")
+	writeFile(t, filepath.Join(cfiprosRoot, "docs", "api-reference", "endpoints", "aktr.md"), "total_uploads\ntotal_codes_extracted\n")
+	writeFile(t, filepath.Join(cfiprosRoot, "OBSERVABILITY_VERIFICATION.md"), "/metrics\nPrometheus\naktr\nmetrics\n")
+	writeFile(t, filepath.Join(cfiprosRoot, "docs", "api-reference", "endpoints", "billing.md"), "subscriptions/status\ncheckout\nstripe_customer_id\n")
+	writeFile(t, filepath.Join(cfiprosRoot, "config", "deploy.api.yml"), "STRIPE_SECRET_KEY\nSTRIPE_WEBHOOK_SECRET\n")
+
+	approvalBoundary := "internal CEO review only; external actions require approval"
+	payload, err := json.Marshal(map[string]any{
+		"input": map[string]any{
+			"checkpoint":        "daily_morning_launch_health",
+			"project_key":       "cfipros",
+			"approval_boundary": approvalBoundary,
+			"cfipros_repo_root": cfiprosRoot,
+			"kpi_evidence": map[string]any{
+				"paid_conversion": map[string]any{
+					"value":  "subscriptions=3",
+					"source": "read-only fixture",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(payload) error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, filepath.Join(repoRoot, "scripts", "skills", "cfipros-ceo-operator.sh"))
+	cmd.Dir = repoRoot
+	cmd.Stdin = bytes.NewReader(payload)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("cfipros-ceo-operator.sh error = %v stderr=%s", err, stderr.String())
+	}
+
+	var response struct {
+		Status string         `json:"status"`
+		Output map[string]any `json:"output"`
+	}
+	if err := json.Unmarshal(stdout, &response); err != nil {
+		t.Fatalf("Unmarshal(response) error = %v\nstdout=%s", err, string(stdout))
+	}
+	if response.Status != "ok" {
+		t.Fatalf("status = %q, want ok", response.Status)
+	}
+	if response.Output["agent_key"] != "cfipros-ceo-operator-agent" {
+		t.Fatalf("agent_key = %v, want cfipros-ceo-operator-agent", response.Output["agent_key"])
+	}
+	if response.Output["approval_boundary"] != approvalBoundary {
+		t.Fatalf("approval_boundary = %v, want preserved boundary", response.Output["approval_boundary"])
+	}
+	if response.Output["approval_required"] != true || response.Output["external_side_effect"] != "none" {
+		t.Fatalf("approval fields = approval_required:%v external_side_effect:%v, want true/none", response.Output["approval_required"], response.Output["external_side_effect"])
+	}
+
+	kpiTruth, ok := response.Output["kpi_truth"].(map[string]any)
+	if !ok {
+		t.Fatalf("kpi_truth missing from output: %#v", response.Output)
+	}
+	if kpiTruth["collection_mode"] != "read_only" {
+		t.Fatalf("collection_mode = %v, want read_only", kpiTruth["collection_mode"])
+	}
+	metrics, ok := kpiTruth["metrics"].([]any)
+	if !ok || len(metrics) == 0 {
+		t.Fatalf("metrics = %#v, want non-empty KPI scorecard", kpiTruth["metrics"])
+	}
+	var sawAcquisitionSource, sawPaidMeasured bool
+	for _, rawMetric := range metrics {
+		metric, ok := rawMetric.(map[string]any)
+		if !ok {
+			t.Fatalf("metric = %#v, want object", rawMetric)
+		}
+		switch metric["key"] {
+		case "acquisition_traffic":
+			sawAcquisitionSource = metric["status"] == "source_available_value_unmeasured" && metric["value"] == "unmeasured"
+		case "paid_conversion":
+			sawPaidMeasured = metric["status"] == "measured" && metric["value"] == "subscriptions=3"
+		}
+	}
+	if !sawAcquisitionSource || !sawPaidMeasured {
+		t.Fatalf("metrics = %#v, want acquisition source truth and supplied paid-conversion measurement", metrics)
+	}
+	if _, ok := response.Output["ceo_packet"].(map[string]any); !ok {
+		t.Fatalf("ceo_packet missing from output: %#v", response.Output)
+	}
+}
 
 func TestRunRestrictedCommandUsesRepoRootCwd(t *testing.T) {
 	t.Parallel()
