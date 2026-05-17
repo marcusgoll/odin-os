@@ -252,6 +252,26 @@ func TestParseBrowserSessionVerifyCommand(t *testing.T) {
 	}
 }
 
+func TestParseBrowserSessionProveCommand(t *testing.T) {
+	command, err := ParseBrowser([]string{"session", "prove", "--id", "42", "--url", "https://x.com/", "--expect-title", "Home / X", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(session prove) error = %v", err)
+	}
+	if command.Name != "session" || command.SessionAction != "prove" || command.ID != 42 || command.URL != "https://x.com/" || command.ExpectedTitle != "Home / X" || !command.JSON {
+		t.Fatalf("prove command = %+v, want parsed proof command", command)
+	}
+
+	if _, err := ParseBrowser([]string{"session", "prove", "--id", "42", "--url", "https://x.com/", "--json"}); err == nil || !strings.Contains(err.Error(), "--expect-title is required") {
+		t.Fatalf("ParseBrowser(session prove missing title) error = %v, want title required", err)
+	}
+	if _, err := ParseBrowser([]string{"session", "prove", "--id", "42", "--url", "/relative", "--expect-title", "Home / X", "--json"}); err == nil || !strings.Contains(err.Error(), "--url must be an absolute URL") {
+		t.Fatalf("ParseBrowser(session prove relative url) error = %v, want absolute URL rejection", err)
+	}
+	if _, err := ParseBrowser([]string{"session", "show", "--id", "42", "--url", "https://x.com/", "--json"}); err == nil || !strings.Contains(err.Error(), "does not accept --url") {
+		t.Fatalf("ParseBrowser(session show with proof url) error = %v, want proof-only flag rejection", err)
+	}
+}
+
 func TestParseBrowserSessionPrepareProfileCommand(t *testing.T) {
 	command, err := ParseBrowser([]string{"session", "prepare-profile", "--id", "42", "--json"})
 	if err != nil {

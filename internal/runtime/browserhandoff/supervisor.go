@@ -54,9 +54,14 @@ type ProcessCommandRunner interface {
 	Cancel(context.Context, ProcessHandle) error
 }
 
+type ProcessProbeRunner interface {
+	Probe(context.Context, ProcessHandle) (ProcessResult, bool, error)
+}
+
 type ProcessSupervisor interface {
 	StartProcess(context.Context, StartProcessRequest) (ProcessHandle, error)
 	WaitProcess(context.Context, ProcessHandle) (ProcessResult, error)
+	ProbeProcess(context.Context, ProcessHandle) (ProcessResult, bool, error)
 	CancelProcess(context.Context, ProcessHandle, string) (ProcessResult, error)
 }
 
@@ -101,6 +106,39 @@ func (supervisor BoundedProcessSupervisor) WaitProcess(ctx context.Context, hand
 		return ProcessResult{}, err
 	}
 	return supervisor.normalizeProcessResult(handle, result), nil
+}
+
+func (supervisor BoundedProcessSupervisor) ProbeProcess(ctx context.Context, handle ProcessHandle) (ProcessResult, bool, error) {
+	if err := validateProcessHandle(handle); err != nil {
+		return ProcessResult{}, false, err
+	}
+	if supervisor.Runner == nil {
+		return ProcessResult{}, false, fmt.Errorf("process command runner is required")
+	}
+	probeRunner, ok := supervisor.Runner.(ProcessProbeRunner)
+	if !ok {
+		return ProcessResult{
+			PID:         handle.PID,
+			Role:        handle.Role,
+			CommandPath: handle.CommandPath,
+			StartedAt:   handle.StartedAt,
+			Status:      ProcessStatusStarted,
+		}, false, nil
+	}
+	result, done, err := probeRunner.Probe(ctx, handle)
+	if err != nil {
+		return ProcessResult{}, false, err
+	}
+	if !done {
+		return ProcessResult{
+			PID:         handle.PID,
+			Role:        handle.Role,
+			CommandPath: handle.CommandPath,
+			StartedAt:   handle.StartedAt,
+			Status:      ProcessStatusStarted,
+		}, false, nil
+	}
+	return supervisor.normalizeProcessResult(handle, result), true, nil
 }
 
 func (supervisor BoundedProcessSupervisor) CancelProcess(ctx context.Context, handle ProcessHandle, reason string) (ProcessResult, error) {

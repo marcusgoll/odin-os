@@ -16,13 +16,27 @@ The browser handoff runner creates and supervises one runner lifecycle for a bro
   runner with a `novnc-real-*` runner ID, private `viewer_url`, process
   metadata, and `real_browser_evidence=true`, then returns without waiting for
   the attended browser stack to exit.
+- If display, browser, or websockify exits during startup probing, `runner
+  start` records `failed` with `error_code=novnc_process_failed`, stderr/stdout
+  excerpts, child process role metadata, and a `browser.handoff_runner_failed`
+  audit event.
+- Encrypted profile artifacts can be materialized for a runner without putting
+  profile bytes in command output or logs.
+- `odin browser session prove --id <session_id> --url <url> --expect-title
+  <title> --json` creates a fresh login request and runner, starts that runner
+  from the saved encrypted profile, and records a
+  `browser.session_proof_recorded` event after checking encrypted profile
+  metadata, materialization evidence, protected viewer routing, loopback-only
+  noVNC bind, and the visible browser title.
 - Runner lifecycle changes are persisted through existing store transition paths and runtime audit events.
 - Repo-local proof uses `./bin/odin` after `make build`.
 
 ## Explicit Non-Capabilities
 
 - No automatic login, form fill, credential entry, 2FA handling, passkey handling, consent clicking, or account selection.
-- No browser profile persistence, cookie persistence, storage state persistence, profile byte writes, or credential storage.
+- No credential storage. Profile capture and reuse must go through explicit
+  encrypted profile artifact commands with the profile key supplied only by the
+  deployed environment.
 - No Tailscale service creation or public routing setup.
 - No browser args, custom environment, working directory, or profile path reuse are injected into the browser role.
 - No goal approval, policy approval, or execution authority is granted by starting a handoff runner.
@@ -44,6 +58,7 @@ export ODIN_NOVNC_ALLOWED_COMMANDS=/absolute/path/to/display-or-vnc,/absolute/pa
 export ODIN_NOVNC_BIND_ADDR=127.0.0.1:6080
 export ODIN_NOVNC_PRIVATE_BASE_URL=https://odin-handoff.tailnet.local
 export ODIN_NOVNC_TIMEOUT_SECONDS=600
+export ODIN_BROWSER_PROFILE_KEY_B64=<base64-32-byte-key-from-secret-store>
 ```
 
 `ODIN_NOVNC_BIND_ADDR` must stay loopback or an operator-approved private bind address. Do not use `0.0.0.0`. `ODIN_NOVNC_PRIVATE_BASE_URL` must be private operator routing, not a public URL.
@@ -148,6 +163,39 @@ ODIN_ROOT="$runtime_root" ./bin/odin browser session runner plan-novnc \
 10. Complete any username, password, passkey, MFA, consent, or account selection manually in the visible browser. Odin must not collect or store those values.
 11. Inspect `./bin/odin logs --json`, `/mobile/review-queue`, and `runner show --id <runner_id> --json` after the run. The mobile review item should expose `open-viewer` while the runner is `started`.
 
+## Saved Profile Login-Skip Proof
+
+Run this only after an encrypted profile artifact exists for the session. The
+proof command creates its own login request and runner, starts the configured
+real NoVNC browser handoff from the encrypted profile, records
+`browser.session_proof_recorded`, and performs no site mutation:
+
+```bash
+ODIN_BROWSER_PROOF_TITLE_COMMAND=/home/orchestrator/.config/odin/browser-handoff/prove-title \
+ODIN_BROWSER_PROOF_TITLE_ALLOWED_COMMANDS=/home/orchestrator/.config/odin/browser-handoff/prove-title \
+./bin/odin browser session prove \
+  --id "$session_id" \
+  --url "https://x.com/" \
+  --expect-title "Home / X" \
+  --json
+```
+
+`prove` expects:
+
+- an active encrypted profile artifact for the session
+- a newly started `novnc-real-*` runner
+- a materialized profile directory for the proof runner
+- protected Odin viewer and proxy routes for the handoff ID
+- a loopback-only raw noVNC bind address
+- a visible browser title containing the expected title
+
+The title check runs exactly the executable configured in
+`ODIN_BROWSER_PROOF_TITLE_COMMAND`; the path must be absolute, executable, and
+listed in `ODIN_BROWSER_PROOF_TITLE_ALLOWED_COMMANDS`. Use a reviewed host-side
+wrapper such as `/home/orchestrator/.config/odin/browser-handoff/prove-title`
+to run `xwininfo` against the live display and print the observed browser title
+or window tree. Odin does not run this through a shell.
+
 ## Rollback Steps
 
 - Stop creating new login requests or runner records.
@@ -187,4 +235,6 @@ unset ODIN_NOVNC_ALLOWED_COMMANDS ODIN_NOVNC_BIND_ADDR ODIN_NOVNC_PRIVATE_BASE_U
 - Never paste passwords, passkeys, TOTP values, backup codes, OAuth tokens, cookies, or browser profile bytes into Odin logs, evidence, issue comments, or runbooks.
 - Do not expose the viewer bind address publicly.
 - Do not add browser flags, profile directories, or environment variables outside a reviewed code change and security contract.
-- Do not claim authenticated session reuse from a successful runner start. Current runner start does not implement encrypted profile persistence or authenticated session attachment.
+- Do not claim authenticated session reuse from a successful runner start alone.
+  Require `odin browser session prove` and the resulting
+  `browser.session_proof_recorded` audit event.

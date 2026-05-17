@@ -903,9 +903,9 @@ func TestRunBrowserSessionRunnerStartFullRealNoVNCRecordsStartedEvidence(t *test
 	displayMarker := filepath.Join(t.TempDir(), "display.marker")
 	browserMarker := filepath.Join(t.TempDir(), "browser.marker")
 	websockifyMarker := filepath.Join(t.TempDir(), "websockify.marker")
-	displayPath := writeLifecycleExecutable(t, "display-vnc", "#!/bin/sh\nprintf ran > "+shellQuote(displayMarker)+"\n")
-	browserPath := writeLifecycleExecutable(t, "browser", "#!/bin/sh\nprintf ran > "+shellQuote(browserMarker)+"\n")
-	websockifyPath := writeLifecycleExecutable(t, "websockify", "#!/bin/sh\nprintf ran > "+shellQuote(websockifyMarker)+"\n")
+	displayPath := writeLifecycleExecutable(t, "display-vnc", "#!/bin/sh\nprintf ran > "+shellQuote(displayMarker)+"\nsleep 2\n")
+	browserPath := writeLifecycleExecutable(t, "browser", "#!/bin/sh\nprintf ran > "+shellQuote(browserMarker)+"\nsleep 2\n")
+	websockifyPath := writeLifecycleExecutable(t, "websockify", "#!/bin/sh\nprintf ran > "+shellQuote(websockifyMarker)+"\nsleep 2\n")
 	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "novnc")
 	t.Setenv("ODIN_NOVNC_BROWSER_COMMAND", browserPath)
 	t.Setenv("ODIN_NOVNC_DISPLAY_COMMAND", displayPath)
@@ -965,6 +965,159 @@ func TestRunBrowserSessionRunnerStartFullRealNoVNCRecordsStartedEvidence(t *test
 	for _, forbidden := range []string{"password", "totp", "backup_code", "cookie", "profile_bytes"} {
 		if strings.Contains(strings.ToLower(logs), forbidden) {
 			t.Fatalf("logs output contains forbidden credential/profile byte token %q: %s", forbidden, logs)
+		}
+	}
+}
+
+func TestRunBrowserSessionRunnerStartFullRealNoVNCFailedChildPersistsEvidence(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	displayPath := writeLifecycleExecutable(t, "display-vnc", "#!/bin/sh\nsleep 2\n")
+	browserPath := writeLifecycleExecutable(t, "browser", "#!/bin/sh\necho browser failed during startup >&2\nexit 7\n")
+	websockifyPath := writeLifecycleExecutable(t, "websockify", "#!/bin/sh\nsleep 2\n")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "novnc")
+	t.Setenv("ODIN_NOVNC_BROWSER_COMMAND", browserPath)
+	t.Setenv("ODIN_NOVNC_DISPLAY_COMMAND", displayPath)
+	t.Setenv("ODIN_NOVNC_WEBSOCKIFY_COMMAND", websockifyPath)
+	t.Setenv("ODIN_NOVNC_ALLOWED_COMMANDS", strings.Join([]string{displayPath, browserPath, websockifyPath}, ","))
+	t.Setenv("ODIN_NOVNC_BIND_ADDR", "127.0.0.1:6080")
+	t.Setenv("ODIN_NOVNC_PRIVATE_BASE_URL", "https://odin-handoff.tailnet.local")
+	t.Setenv("ODIN_NOVNC_TIMEOUT_SECONDS", "2")
+	t.Setenv("ODIN_NOVNC_REAL_DISPLAY", "true")
+	t.Setenv("ODIN_NOVNC_REAL_BROWSER", "true")
+	t.Setenv("ODIN_NOVNC_REAL_WEBSOCKIFY", "true")
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "real-novnc-failed-child",
+		"--domain", "example.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	loginRequest := decodeBrowserSessionLoginRequestEnvelope(t, []byte(run("browser", "session", "login-request", "--id", int64String(created.ID), "--json")))
+	runner := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "create", "--login-request-id", int64String(loginRequest.ID), "--json")))
+
+	failed := decodeBrowserSessionRunnerEnvelope(t, []byte(run("browser", "session", "runner", "start", "--id", int64String(runner.ID), "--json")))
+	if failed.Status != "failed" {
+		t.Fatalf("runner status = %q, want failed for startup child failure", failed.Status)
+	}
+	if failed.ErrorCode == nil || *failed.ErrorCode != "novnc_process_failed" {
+		t.Fatalf("runner error_code = %v, want novnc_process_failed", failed.ErrorCode)
+	}
+	if failed.ErrorMessage == nil || !strings.Contains(*failed.ErrorMessage, "browser failed during startup") {
+		t.Fatalf("runner error_message = %v, want browser stderr evidence", failed.ErrorMessage)
+	}
+	if failed.RunnerID == nil || !strings.HasPrefix(*failed.RunnerID, "novnc-real-") || failed.ProcessID == nil || *failed.ProcessID <= 0 || failed.StartedAt == "" || failed.ExitedAt == "" {
+		t.Fatalf("failed runner = %+v, want runner/process started and exited metadata", failed)
+	}
+
+	logs := run("logs", "--json")
+	for _, want := range []string{
+		`"type": "browser.handoff_runner_started"`,
+		`"type": "browser.handoff_runner_failed"`,
+		`"error_code": "novnc_process_failed"`,
+		`"child_processes"`,
+		`"role": "browser"`,
+		`"stderr_excerpt": "browser failed during startup`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want evidence marker %s", logs, want)
+		}
+	}
+}
+
+func TestRunBrowserSessionProveStartsSavedProfileRunnerAndRecordsProof(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	key := make([]byte, 32)
+	for index := range key {
+		key[index] = byte(index + 1)
+	}
+	t.Setenv(browserprofilekeys.EnvKeyB64, base64.StdEncoding.EncodeToString(key))
+	displayPath := writeLifecycleExecutable(t, "display-vnc", "#!/bin/sh\nsleep 2\n")
+	browserPath := writeLifecycleExecutable(t, "browser", "#!/bin/sh\nsleep 2\n")
+	websockifyPath := writeLifecycleExecutable(t, "websockify", "#!/bin/sh\nsleep 2\n")
+	titlePath := writeLifecycleExecutable(t, "prove-title", "#!/bin/sh\nprintf 'Home / X - Google Chrome\\n'\n")
+	t.Setenv("ODIN_BROWSER_HANDOFF_RUNNER", "novnc")
+	t.Setenv("ODIN_NOVNC_BROWSER_COMMAND", browserPath)
+	t.Setenv("ODIN_NOVNC_DISPLAY_COMMAND", displayPath)
+	t.Setenv("ODIN_NOVNC_WEBSOCKIFY_COMMAND", websockifyPath)
+	t.Setenv("ODIN_NOVNC_ALLOWED_COMMANDS", strings.Join([]string{displayPath, browserPath, websockifyPath}, ","))
+	t.Setenv("ODIN_NOVNC_BIND_ADDR", "127.0.0.1:6080")
+	t.Setenv("ODIN_NOVNC_PRIVATE_BASE_URL", "https://odin-handoff.tailnet.local")
+	t.Setenv("ODIN_NOVNC_TIMEOUT_SECONDS", "2")
+	t.Setenv("ODIN_NOVNC_REAL_DISPLAY", "true")
+	t.Setenv("ODIN_NOVNC_REAL_BROWSER", "true")
+	t.Setenv("ODIN_NOVNC_REAL_WEBSOCKIFY", "true")
+	t.Setenv("ODIN_BROWSER_PROOF_TITLE_COMMAND", titlePath)
+	t.Setenv("ODIN_BROWSER_PROOF_TITLE_ALLOWED_COMMANDS", titlePath)
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+	session := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "x-main",
+		"--domain", "x.com",
+		"--permission-tier", "authenticated_read",
+		"--profile-path", "browser-sessions/profiles/x-main",
+		"--json",
+	)))
+	sourceDir := filepath.Join(t.TempDir(), "profile")
+	if err := os.MkdirAll(filepath.Join(sourceDir, "Default"), 0o700); err != nil {
+		t.Fatalf("MkdirAll profile source error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "Default", "Preferences"), []byte("saved x session"), 0o600); err != nil {
+		t.Fatalf("WriteFile profile source error = %v", err)
+	}
+	artifact := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(run(
+		"browser", "session", "profile", "artifact", "create-directory",
+		"--session-id", int64String(session.ID),
+		"--name", "x-proof-profile",
+		"--source-dir", sourceDir,
+		"--json",
+	)))
+
+	proof := decodeBrowserSessionProofEnvelope(t, []byte(run(
+		"browser", "session", "prove",
+		"--id", int64String(session.ID),
+		"--url", "https://x.com/",
+		"--expect-title", "Home / X",
+		"--json",
+	)))
+	if proof.Status != "passed" || proof.ArtifactID != artifact.ID || proof.RunnerID <= 0 || proof.LoginRequestID <= 0 || proof.HandoffID == "" {
+		t.Fatalf("proof = %+v, want passed proof linked to artifact, runner, and login request", proof)
+	}
+	if proof.ObservedTitle != "Home / X - Google Chrome" || proof.TitleSource != titlePath {
+		t.Fatalf("proof title = %q source=%q, want allowlisted title command output", proof.ObservedTitle, proof.TitleSource)
+	}
+	for _, want := range []string{"encrypted_profile_materialized", "protected_viewer_route", "no_direct_novnc_exposure", "saved_session_login_skip", "mutation_requires_approval"} {
+		if !browserSessionProofHasPassedCheck(proof, want) {
+			t.Fatalf("proof checks = %+v, want passed %s", proof.Checks, want)
+		}
+	}
+	materialized := filepath.Join(root, "runtime", "browser-profile-materializations", "runner-"+int64String(proof.RunnerID)+"-artifact-"+int64String(artifact.ID))
+	if info, err := os.Stat(materialized); err != nil || !info.IsDir() {
+		t.Fatalf("materialized profile stat err=%v info=%v, want directory", err, info)
+	}
+	logs := run("logs", "--json")
+	for _, want := range []string{`"type": "browser.session_proof_recorded"`, `"saved_session_login_skip"`, `"mutation_requires_approval"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs output = %s, want proof evidence %s", logs, want)
 		}
 	}
 }
@@ -2244,6 +2397,29 @@ type browserSessionRunnerPlanCommandJSON struct {
 	Args []string `json:"args"`
 }
 
+type browserSessionProofJSON struct {
+	SessionID      int64                          `json:"session_id"`
+	Status         string                         `json:"status"`
+	URL            string                         `json:"url"`
+	ExpectedTitle  string                         `json:"expected_title"`
+	ObservedTitle  string                         `json:"observed_title"`
+	TitleSource    string                         `json:"title_source"`
+	ArtifactID     int64                          `json:"artifact_id"`
+	RunnerID       int64                          `json:"runner_id"`
+	LoginRequestID int64                          `json:"login_request_id"`
+	HandoffID      string                         `json:"handoff_id"`
+	ViewerURL      string                         `json:"viewer_url"`
+	BindAddr       string                         `json:"bind_addr"`
+	PrivateBaseURL string                         `json:"private_base_url"`
+	Checks         []browserSessionProofCheckJSON `json:"checks"`
+}
+
+type browserSessionProofCheckJSON struct {
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	Evidence string `json:"evidence"`
+}
+
 func decodeBrowserSessionPrepareProfileEnvelope(t *testing.T, payload []byte) browserSessionPrepareProfileJSON {
 	t.Helper()
 	var envelope struct {
@@ -2352,6 +2528,26 @@ func decodeBrowserSessionRunnerPlanEnvelope(t *testing.T, payload []byte) browse
 		t.Fatalf("browser session runner plan json decode error = %v; output=%s", err, string(payload))
 	}
 	return envelope.Plan
+}
+
+func decodeBrowserSessionProofEnvelope(t *testing.T, payload []byte) browserSessionProofJSON {
+	t.Helper()
+	var envelope struct {
+		Proof browserSessionProofJSON `json:"proof"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("browser session proof json decode error = %v; output=%s", err, string(payload))
+	}
+	return envelope.Proof
+}
+
+func browserSessionProofHasPassedCheck(proof browserSessionProofJSON, name string) bool {
+	for _, check := range proof.Checks {
+		if check.Name == name && check.Status == "passed" {
+			return true
+		}
+	}
+	return false
 }
 
 func novncPlanArgs(runnerID int64, commandPath string, bindAddr string) []string {

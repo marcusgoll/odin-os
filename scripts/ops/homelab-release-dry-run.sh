@@ -43,6 +43,7 @@ git worktree list
 require_file "deploy/systemd/odin-os.service"
 require_file "deploy/systemd/odin-os.env.example"
 require_file "deploy/nginx/odin-pwa-proxy.conf"
+require_executable "deploy/docker/run-odin-overseer-host.sh"
 require_executable "scripts/install-service.sh"
 require_executable "scripts/start.sh"
 require_executable "scripts/stop.sh"
