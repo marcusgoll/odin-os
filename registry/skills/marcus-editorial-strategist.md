@@ -21,18 +21,32 @@ scopes:
 permissions:
   - repo.read
 handler_type: command
-handler_ref: scripts/skills/registry-skill-stub.sh
-timeout_seconds: 15
+handler_ref: scripts/skills/marcus-editorial-strategist.sh
+timeout_seconds: 30
 input_schema:
   type: object
   properties:
     request:
+      type: string
+    workflow_key:
+      type: string
+    source:
+      type: string
+    approval_boundary:
       type: string
 output_schema:
   type: object
   properties:
     result:
       type: string
+    editorial_priorities:
+      type: array
+    recommended_next_skill:
+      type: string
+    approval_required:
+      type: boolean
+    public_action_allowed:
+      type: boolean
 ---
 
 # Marcus Editorial Strategist
@@ -55,7 +69,7 @@ Review the inputs, filter out low-signal or risky angles, rank the best opportun
 
 ## Outputs
 
-The output is a concise priority list with recommended lane, rationale, missing facts, approval sensitivity, and the next skill to invoke.
+The output is a durable, reviewable strategy artifact with a concise priority list, recommended lane, rationale, missing facts, approval sensitivity, public-action boundary, and the next skill to invoke.
 
 ## Constraints
 

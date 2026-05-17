@@ -44,6 +44,65 @@ printf '%s\n' '{"status":"ok","summary":"echo complete","output":{"message":"hel
 	}
 }
 
+func TestInvokeMarcusEditorialStrategistReturnsReviewableStrategy(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sourcePath := filepath.Join("..", "..", "scripts", "skills", "marcus-editorial-strategist.sh")
+	source, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", sourcePath, err)
+	}
+	writeExecutable(t, filepath.Join(service.RepoRoot, "scripts", "skills", "marcus-editorial-strategist.sh"), string(source))
+
+	spec := minimalSkillSpec("marcus-editorial-strategist")
+	spec.Title = "Marcus Editorial Strategist"
+	spec.Summary = "Returns a Marcus editorial strategy artifact."
+	spec.HandlerRef = "scripts/skills/marcus-editorial-strategist.sh"
+	spec.TimeoutSeconds = 30
+	if _, err := service.Create(context.Background(), spec); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	response, err := service.Invoke(context.Background(), InvokeRequest{
+		Key: "marcus-editorial-strategist",
+		Input: map[string]any{
+			"request":           "Run the morning editorial scan. Return top priorities and which lane should draft next. Do not publish.",
+			"workflow_key":      "marcus-personal-brand-operating-system",
+			"source":            "marcus-brand-os-trigger",
+			"approval_boundary": "internal drafting and analysis only; public actions require Marcus approval",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+	if response.Status != "ok" {
+		t.Fatalf("response.Status = %q, want ok", response.Status)
+	}
+	if !strings.Contains(response.Summary, "Marcus editorial strategy ready") {
+		t.Fatalf("response.Summary = %q, want Marcus strategy summary", response.Summary)
+	}
+	if response.RuntimeEffect != "command_output_only" {
+		t.Fatalf("response.RuntimeEffect = %q, want command_output_only", response.RuntimeEffect)
+	}
+	if response.Output["result"] != "marcus_editorial_strategy_ready" {
+		t.Fatalf("response.Output[result] = %v, want marcus_editorial_strategy_ready", response.Output["result"])
+	}
+	if response.Output["recommended_next_skill"] != "marcus-writing-partner" {
+		t.Fatalf("response.Output[recommended_next_skill] = %v, want marcus-writing-partner", response.Output["recommended_next_skill"])
+	}
+	if response.Output["public_action_allowed"] != false {
+		t.Fatalf("response.Output[public_action_allowed] = %v, want false", response.Output["public_action_allowed"])
+	}
+	priorities, ok := response.Output["editorial_priorities"].([]any)
+	if !ok || len(priorities) != 3 {
+		t.Fatalf("response.Output[editorial_priorities] = %#v, want 3 priorities", response.Output["editorial_priorities"])
+	}
+	if !strings.Contains(response.RawOutput, "marcus_editorial_strategy_ready") {
+		t.Fatalf("response.RawOutput = %q, want strategy payload", response.RawOutput)
+	}
+}
+
 func TestInvokeRejectsMalformedJSONResponse(t *testing.T) {
 	t.Parallel()
 
