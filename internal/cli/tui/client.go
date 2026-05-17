@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -196,6 +197,16 @@ func (c Client) QueryOverview(ctx context.Context) (Model, error) {
 }
 
 func (c Client) QueryRecentLogs(ctx context.Context) ([]LogEntry, error) {
+	if c.LokiURL == "" || c.LokiURL == "http://127.0.0.1:3100" {
+		if logs, err := queryLocalOdinContainerLogs(ctx); err == nil {
+			return logs, nil
+		}
+	}
+
+	if c.LokiURL == "" {
+		c.LokiURL = "http://127.0.0.1:3100"
+	}
+
 	baseURL, err := url.Parse(c.LokiURL)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid loki url: %v", ErrUnavailableTelemetry, err)
@@ -256,6 +267,39 @@ func (c Client) QueryRecentLogs(ctx context.Context) ([]LogEntry, error) {
 				Labels:    stream.Stream,
 			})
 		}
+	}
+	return entries, nil
+}
+
+func queryLocalOdinContainerLogs(ctx context.Context) ([]LogEntry, error) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, "docker", "logs", "--timestamps", "--tail", "10", "odin-overseer")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	entries := make([]LogEntry, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		timestamp, message, ok := strings.Cut(line, " ")
+		if !ok {
+			timestamp = ""
+			message = line
+		}
+		entries = append(entries, LogEntry{
+			Timestamp: timestamp,
+			Line:      message,
+			Labels:    map[string]string{"source": "docker", "container": "odin-overseer"},
+		})
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("no odin-overseer logs returned")
 	}
 	return entries, nil
 }
