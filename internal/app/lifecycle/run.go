@@ -584,11 +584,15 @@ func (provider tuiModelProvider) EnrichModel(ctx context.Context, model *tui.Mod
 		}
 		lastWorkStatus := ""
 		lastWorkDetail := ""
+		lastWorkReview := ""
 		if trigger.LastWorkItemID != nil {
 			task, err := provider.app.Store.GetTask(ctx, *trigger.LastWorkItemID)
 			if err == nil {
 				lastWorkStatus = task.Status
 				lastWorkDetail = firstNonEmpty(task.LastError, task.BlockedReason, task.TerminalReason)
+				if task.Status == "failed" {
+					lastWorkReview = fmt.Sprintf("failed-work:%d", task.ID)
+				}
 			} else if !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
@@ -604,6 +608,7 @@ func (provider tuiModelProvider) EnrichModel(ctx context.Context, model *tui.Mod
 			LastWorkItem:   trigger.LastWorkItemKey,
 			LastWorkStatus: lastWorkStatus,
 			LastWorkDetail: lastWorkDetail,
+			LastWorkReview: lastWorkReview,
 		})
 	}
 	followUps, err := projections.ListFollowUpSummaryViews(ctx, provider.app.Store.DB(), workspaces.DefaultWorkspaceKey, now)

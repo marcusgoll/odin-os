@@ -164,7 +164,7 @@ func TestTickObservesCreatedGoalWithoutRun(t *testing.T) {
 	}
 }
 
-func TestTickStartsApprovedGoalOnceThenBlocksRunningGoalWithoutExecutor(t *testing.T) {
+func TestTickStartsApprovedGoalOnceThenKeepsExecutorBackedRunActive(t *testing.T) {
 	ctx := context.Background()
 	store := openGoalServiceTestStore(t, "tick-approved.db")
 	defer store.Close()
@@ -209,25 +209,28 @@ func TestTickStartsApprovedGoalOnceThenBlocksRunningGoalWithoutExecutor(t *testi
 	if err != nil {
 		t.Fatalf("Tick(second) error = %v", err)
 	}
-	if second.Observed != 1 || second.Started != 0 || second.Blocked != 1 || second.Skipped != 0 {
-		t.Fatalf("second tick result = %+v, want running goal blocked", second)
+	if second.Observed != 1 || second.Started != 0 || second.Blocked != 0 || second.Skipped != 1 {
+		t.Fatalf("second tick result = %+v, want active executor-backed run skipped", second)
 	}
-	if len(second.Results) != 1 || second.Results[0].Action != TickActionBlocked || second.Results[0].Reason != TickReasonNoExecutor {
-		t.Fatalf("second tick goal result = %+v, want no-executor block", second.Results)
+	if len(second.Results) != 1 || second.Results[0].Action != TickActionSkipped || second.Results[0].Reason != TickReasonActiveRunExists {
+		t.Fatalf("second tick goal result = %+v, want active run exists", second.Results)
 	}
-	afterBlock, err := store.GetGoal(ctx, goal.ID)
+	afterSecond, err := store.GetGoal(ctx, goal.ID)
 	if err != nil {
-		t.Fatalf("GetGoal(after block) error = %v", err)
+		t.Fatalf("GetGoal(after second tick) error = %v", err)
 	}
-	if afterBlock.Status != sqlite.GoalStatusBlocked {
-		t.Fatalf("afterBlock.Status = %q, want blocked", afterBlock.Status)
+	if afterSecond.Status != sqlite.GoalStatusRunning {
+		t.Fatalf("afterSecond.Status = %q, want running", afterSecond.Status)
 	}
 	runs, err = store.ListGoalRunsByGoalID(ctx, goal.ID)
 	if err != nil {
-		t.Fatalf("ListGoalRunsByGoalID(after block) error = %v", err)
+		t.Fatalf("ListGoalRunsByGoalID(after second tick) error = %v", err)
 	}
 	if len(runs) != 1 {
 		t.Fatalf("runs len after second tick = %d, want no duplicate active run", len(runs))
+	}
+	if runs[0].Executor != "goal_runner" {
+		t.Fatalf("run.Executor = %q, want goal_runner", runs[0].Executor)
 	}
 	counts := countGoalRuntimeEvents(t, store)
 	if counts[runtimeevents.EventGoalRunnerObserved] != 2 {
@@ -236,14 +239,58 @@ func TestTickStartsApprovedGoalOnceThenBlocksRunningGoalWithoutExecutor(t *testi
 	if counts[runtimeevents.EventGoalRunStarted] != 1 {
 		t.Fatalf("goal_run.started events = %d, want 1", counts[runtimeevents.EventGoalRunStarted])
 	}
-	if counts[runtimeevents.EventGoalStatusChanged] != 4 {
-		t.Fatalf("goal.status_changed events = %d, want planned/approved/running/blocked transitions", counts[runtimeevents.EventGoalStatusChanged])
+	if counts[runtimeevents.EventGoalStatusChanged] != 3 {
+		t.Fatalf("goal.status_changed events = %d, want planned/approved/running transitions", counts[runtimeevents.EventGoalStatusChanged])
 	}
-	if counts[runtimeevents.EventGoalBlockerRecorded] != 1 {
-		t.Fatalf("goal.blocker_recorded events = %d, want 1", counts[runtimeevents.EventGoalBlockerRecorded])
+	if counts[runtimeevents.EventGoalBlockerRecorded] != 0 {
+		t.Fatalf("goal.blocker_recorded events = %d, want no missing-executor blocker", counts[runtimeevents.EventGoalBlockerRecorded])
 	}
-	if counts[runtimeevents.EventGoalEvidenceRecorded] != 1 {
-		t.Fatalf("goal.evidence_recorded events = %d, want 1", counts[runtimeevents.EventGoalEvidenceRecorded])
+	if counts[runtimeevents.EventGoalEvidenceRecorded] != 0 {
+		t.Fatalf("goal.evidence_recorded events = %d, want no missing-executor evidence", counts[runtimeevents.EventGoalEvidenceRecorded])
+	}
+}
+
+func TestTickBlocksLegacyRunningGoalWithoutExecutor(t *testing.T) {
+	ctx := context.Background()
+	store := openGoalServiceTestStore(t, "tick-legacy-no-executor.db")
+	defer store.Close()
+
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{Title: "Legacy blank executor run"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	for _, status := range []sqlite.GoalStatus{sqlite.GoalStatusPlanned, sqlite.GoalStatusApprovedForExecution} {
+		if _, err := store.TransitionGoal(ctx, sqlite.TransitionGoalParams{GoalID: goal.ID, Status: status}); err != nil {
+			t.Fatalf("TransitionGoal(%s) error = %v", status, err)
+		}
+	}
+	run, err := store.CreateGoalRun(ctx, sqlite.CreateGoalRunParams{
+		GoalID: goal.ID,
+		Status: sqlite.GoalRunStatusRunning,
+	})
+	if err != nil {
+		t.Fatalf("CreateGoalRun() error = %v", err)
+	}
+	if _, err := store.TransitionGoal(ctx, sqlite.TransitionGoalParams{GoalID: goal.ID, Status: sqlite.GoalStatusRunning}); err != nil {
+		t.Fatalf("TransitionGoal(running) error = %v", err)
+	}
+
+	result, err := NewService(store).Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Observed != 1 || result.Blocked != 1 || len(result.Results) != 1 || result.Results[0].Reason != TickReasonNoExecutor {
+		t.Fatalf("Tick() = %+v, want one missing-executor block", result)
+	}
+	if result.Results[0].GoalRunID == nil || *result.Results[0].GoalRunID != run.ID {
+		t.Fatalf("GoalRunID = %v, want %d", result.Results[0].GoalRunID, run.ID)
+	}
+	persisted, err := store.GetGoal(ctx, goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if persisted.Status != sqlite.GoalStatusBlocked {
+		t.Fatalf("persisted.Status = %q, want blocked", persisted.Status)
 	}
 }
 

@@ -497,6 +497,22 @@ func TestRunTUIOnceIncludesStoreBackedVisualPanels(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertAutomationTrigger() error = %v", err)
 	}
+	fire, err := app.Store.FireAutomationTrigger(context.Background(), sqlite.FireAutomationTriggerParams{
+		WorkspaceID: "default",
+		Key:         "daily-proof",
+		Reason:      "test",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("FireAutomationTrigger() error = %v", err)
+	}
+	if _, err := app.Store.UpdateTaskQueueState(context.Background(), sqlite.UpdateTaskQueueStateParams{
+		TaskID:    fire.WorkItem.ID,
+		Status:    "failed",
+		LastError: "test failure",
+	}); err != nil {
+		t.Fatalf("UpdateTaskQueueState(failed trigger work) error = %v", err)
+	}
 	if _, err := app.Store.CreateIntakeItem(context.Background(), sqlite.CreateIntakeItemParams{
 		WorkspaceID:         "default",
 		SourceFamily:        "mobile",
@@ -595,6 +611,9 @@ func TestRunTUIOnceIncludesStoreBackedVisualPanels(t *testing.T) {
 		"┌─ SCHEDULES + ROUTINES ",
 		"schedule=daily-proof",
 		"project=odin-core status=enabled",
+		"work_status=failed detail=test failure",
+		"review=odin review show failed-work:",
+		"retry=odin review act failed-work:",
 		"┌─ PROJECT PRS + CI ",
 		"odin-core acme/odin-os#42 state=open ci=not_wired title=Visual TUI",
 		"┌─ APPROVALS WAITING ",
@@ -3182,10 +3201,7 @@ func TestRunReviewQueueIncludesGoalReviewItems(t *testing.T) {
 	plannedID := createGoal("Planned goal awaiting approval")
 	run("goal", "transition", "--id", int64String(plannedID), "--status", "planned", "--json")
 	blockedID := createGoal("Blocked goal needs human action")
-	run("goal", "transition", "--id", int64String(blockedID), "--status", "planned", "--json")
-	run("goal", "transition", "--id", int64String(blockedID), "--status", "approved_for_execution", "--json")
-	run("goal", "tick", "--json")
-	run("goal", "tick", "--json")
+	run("review", "reject", "--id", "goal:"+int64String(blockedID), "--reason", "not ready", "--json")
 
 	list := run("review", "list", "--json")
 	for _, want := range []string{
@@ -3209,8 +3225,9 @@ func TestRunReviewQueueIncludesGoalReviewItems(t *testing.T) {
 
 	var listed struct {
 		Items []struct {
-			ReviewID   string `json:"review_id"`
-			SourceType string `json:"source_type"`
+			ReviewID       string   `json:"review_id"`
+			SourceType     string   `json:"source_type"`
+			AllowedActions []string `json:"allowed_actions"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal([]byte(list), &listed); err != nil {
@@ -3225,6 +3242,19 @@ func TestRunReviewQueueIncludesGoalReviewItems(t *testing.T) {
 	}
 	if convertedReviewID == "" {
 		t.Fatalf("review list items = %+v, want converted intake goal review item", listed.Items)
+	}
+	var createdGoalActionable bool
+	var plannedGoalActionable bool
+	for _, item := range listed.Items {
+		switch item.ReviewID {
+		case "goal:" + int64String(manualCreatedID):
+			createdGoalActionable = containsString(item.AllowedActions, "approve")
+		case "goal-approval:" + int64String(plannedID):
+			plannedGoalActionable = containsString(item.AllowedActions, "approve")
+		}
+	}
+	if !createdGoalActionable || !plannedGoalActionable {
+		t.Fatalf("review list items = %+v, want created and planned goals to expose approve actions", listed.Items)
 	}
 
 	show := run("review", "show", "--id", convertedReviewID, "--json")

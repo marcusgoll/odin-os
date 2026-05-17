@@ -211,6 +211,7 @@ func TestRenderOverviewShowsVisualDeliveryCockpitPanels(t *testing.T) {
 				LastWorkItem:   "automation-daily-proof",
 				LastWorkStatus: "blocked",
 				LastWorkDetail: "previous service instance stopped during execution",
+				LastWorkReview: "failed-work:158",
 			},
 		},
 		PullRequests: []PullRequestRow{
@@ -235,6 +236,8 @@ func TestRenderOverviewShowsVisualDeliveryCockpitPanels(t *testing.T) {
 		"│   project=odin-core status=enabled due=waiting",
 		"│   next=2026-05-17T15:00:00Z last_run=2026-05-17T00:02:14Z",
 		"│   work_status=blocked detail=previous service instance stopped during...",
+		"│   review=odin review show failed-work:158",
+		"│   retry=odin review act failed-work:158 retry",
 		"┌─ PROJECT PRS + CI ",
 		"│ odin-os owner/odin-os#276 state=open ci=not_wired title=Visual TUI",
 		"┌─ APPROVALS WAITING ",

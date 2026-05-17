@@ -197,6 +197,16 @@ func schedulesPanel(model Model) panel {
 				valueOrNone(schedule.LastWorkDetail),
 				valueOrNone(schedule.LastWorkItem),
 			))
+			if schedule.LastWorkReview != "" {
+				rows = append(rows, fmt.Sprintf(
+					"  review=odin review show %s",
+					valueOrNone(schedule.LastWorkReview),
+				))
+				rows = append(rows, fmt.Sprintf(
+					"  retry=odin review act %s retry",
+					valueOrNone(schedule.LastWorkReview),
+				))
+			}
 		}
 	}
 	return panel{Title: "SCHEDULES + ROUTINES", Rows: rows, Span: true}
