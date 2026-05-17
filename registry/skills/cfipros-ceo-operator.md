@@ -42,6 +42,10 @@ input_schema:
       type: string
     approval_boundary:
       type: string
+    cfipros_repo_root:
+      type: string
+    kpi_evidence:
+      type: object
 output_schema:
   type: object
   properties:
@@ -53,15 +57,19 @@ output_schema:
       type: string
     approval_required:
       type: boolean
+    kpi_truth:
+      type: object
+    ceo_packet:
+      type: object
 ---
 
 # CFIPros CEO Operator Routine
 
 ## Purpose
 
-Prepare a bounded, approval-gated operating request for the CFIPros CEO operator
-agent so scheduled CEO work can be materialized by Odin without taking external
-business action.
+Prepare a bounded, approval-gated operating packet for the CFIPros CEO operator
+agent so scheduled CEO work can be materialized by Odin with truthful KPI
+readback and without taking external business action.
 
 ## When to Use
 
@@ -72,19 +80,27 @@ closeout, or CEO packet preparation.
 ## Inputs
 
 The skill receives the checkpoint request, project key, `cfipros-ceo-operator-agent`
-handoff key, workflow key, launch document path, review window, and approval
-boundary.
+handoff key, workflow key, launch document path, review window, approval
+boundary, optional CFIPros repo root, and optional operator-supplied KPI
+evidence.
 
 ## Procedure
 
 Normalize the request into a CEO operator handoff contract, preserve the
-approval boundary, and return structured evidence that the CFIPros CEO operator
-agent is the intended reviewer for the scheduled Work Item.
+approval boundary, collect read-only KPI source truth from the CFIPros repo, and
+return structured evidence that the CFIPros CEO operator agent is the intended
+reviewer for the scheduled Work Item.
+
+KPI values must be marked `unmeasured` unless a read-only value is supplied as
+KPI evidence. Missing KPI data is not zero. Production DB, PostHog, Stripe,
+customer, billing, deploy, and merge actions remain outside this skill unless
+the operator supplies explicit read-only evidence for the packet.
 
 ## Outputs
 
-The output is a structured handoff record with the CEO agent key, workflow key,
-checkpoint, approval-required flag, and external side-effect status.
+The output is a structured CEO packet with the CEO agent key, workflow key,
+checkpoint, approval-required flag, external side-effect status, `kpi_truth`,
+and the ten CEO packet sections expected by `cfipros-ceo-operator-agent`.
 
 ## Constraints
 
