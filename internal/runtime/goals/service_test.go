@@ -457,6 +457,63 @@ func TestTickBlocksLegacyRunningGoalWithoutExecutor(t *testing.T) {
 	}
 }
 
+func TestTickRecoversBlockedExecutorBackedGoal(t *testing.T) {
+	ctx := context.Background()
+	store := openGoalServiceTestStore(t, "tick-recover-executor-backed.db")
+	defer store.Close()
+
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{Title: "Recover executor backed run"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	for _, status := range []sqlite.GoalStatus{sqlite.GoalStatusPlanned, sqlite.GoalStatusApprovedForExecution} {
+		if _, err := store.TransitionGoal(ctx, sqlite.TransitionGoalParams{GoalID: goal.ID, Status: status}); err != nil {
+			t.Fatalf("TransitionGoal(%s) error = %v", status, err)
+		}
+	}
+	run, err := store.CreateGoalRun(ctx, sqlite.CreateGoalRunParams{
+		GoalID:   goal.ID,
+		Status:   sqlite.GoalRunStatusWaitingForExternal,
+		Executor: "goal_runner",
+	})
+	if err != nil {
+		t.Fatalf("CreateGoalRun() error = %v", err)
+	}
+	for _, status := range []sqlite.GoalStatus{sqlite.GoalStatusRunning, sqlite.GoalStatusBlocked} {
+		if _, err := store.TransitionGoal(ctx, sqlite.TransitionGoalParams{GoalID: goal.ID, Status: status}); err != nil {
+			t.Fatalf("TransitionGoal(%s) error = %v", status, err)
+		}
+	}
+
+	result, err := NewService(store).Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Observed != 1 || result.Blocked != 0 || result.Skipped != 1 || len(result.Results) != 1 {
+		t.Fatalf("Tick() = %+v, want one recovered active run", result)
+	}
+	if result.Results[0].Action != TickActionSkipped || result.Results[0].Reason != TickReasonActiveRunExists {
+		t.Fatalf("Tick result = %+v, want active run exists", result.Results[0])
+	}
+	if result.Results[0].GoalRunID == nil || *result.Results[0].GoalRunID != run.ID {
+		t.Fatalf("GoalRunID = %v, want %d", result.Results[0].GoalRunID, run.ID)
+	}
+	persisted, err := store.GetGoal(ctx, goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if persisted.Status != sqlite.GoalStatusRunning {
+		t.Fatalf("persisted.Status = %q, want running", persisted.Status)
+	}
+	runs, err := store.ListGoalRunsByGoalID(ctx, goal.ID)
+	if err != nil {
+		t.Fatalf("ListGoalRunsByGoalID() error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].Status != sqlite.GoalRunStatusRunning || runs[0].Executor != "goal_runner" {
+		t.Fatalf("runs = %+v, want one running goal_runner run", runs)
+	}
+}
+
 func TestTickRespectsFutureNextWakeAt(t *testing.T) {
 	ctx := context.Background()
 	store := openGoalServiceTestStore(t, "tick-next-wake.db")
