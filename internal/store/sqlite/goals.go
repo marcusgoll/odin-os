@@ -147,6 +147,11 @@ type ListGoalBlockersParams struct {
 	Status string
 }
 
+type ListGoalEvidenceParams struct {
+	GoalID       int64
+	EvidenceType string
+}
+
 type RecordReviewApprovedParams struct {
 	ReviewID   string
 	SourceType string
@@ -479,6 +484,38 @@ func (store *Store) ListGoalBlockers(ctx context.Context, params ListGoalBlocker
 		blockers = append(blockers, blocker)
 	}
 	return blockers, rows.Err()
+}
+
+func (store *Store) ListGoalEvidence(ctx context.Context, params ListGoalEvidenceParams) ([]GoalEvidence, error) {
+	query := `
+		SELECT id, goal_id, goal_run_id, evidence_type, summary, uri, payload_json, created_by, created_at
+		FROM goal_evidence
+		WHERE 1 = 1
+	`
+	var args []any
+	if params.GoalID > 0 {
+		query += ` AND goal_id = ?`
+		args = append(args, params.GoalID)
+	}
+	if strings.TrimSpace(params.EvidenceType) != "" {
+		query += ` AND evidence_type = ?`
+		args = append(args, strings.TrimSpace(params.EvidenceType))
+	}
+	query += ` ORDER BY id ASC`
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	evidence := make([]GoalEvidence, 0)
+	for rows.Next() {
+		item, err := scanGoalEvidence(rows)
+		if err != nil {
+			return nil, err
+		}
+		evidence = append(evidence, item)
+	}
+	return evidence, rows.Err()
 }
 
 func (store *Store) RecordReviewApproved(ctx context.Context, params RecordReviewApprovedParams) error {
@@ -1149,6 +1186,32 @@ func scanGoalBlocker(scanner goalScanner) (GoalBlocker, error) {
 		return GoalBlocker{}, err
 	}
 	return blocker, nil
+}
+
+func scanGoalEvidence(scanner goalScanner) (GoalEvidence, error) {
+	var evidence GoalEvidence
+	var goalRunID sql.NullInt64
+	var createdAt string
+	if err := scanner.Scan(
+		&evidence.ID,
+		&evidence.GoalID,
+		&goalRunID,
+		&evidence.EvidenceType,
+		&evidence.Summary,
+		&evidence.URI,
+		&evidence.PayloadJSON,
+		&evidence.CreatedBy,
+		&createdAt,
+	); err != nil {
+		return GoalEvidence{}, err
+	}
+	evidence.GoalRunID = nullableInt64Ptr(goalRunID)
+	parsedCreatedAt, err := parseTime(createdAt)
+	if err != nil {
+		return GoalEvidence{}, err
+	}
+	evidence.CreatedAt = parsedCreatedAt
+	return evidence, nil
 }
 
 func scanGoalRun(scanner goalScanner) (GoalRun, error) {

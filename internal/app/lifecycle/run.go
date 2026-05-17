@@ -4091,9 +4091,12 @@ func runGoal(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		if err != nil {
 			return err
 		}
-		view := newGoalView(goal)
 		if command.JSON {
-			return commands.WriteJSON(stdout, commands.GoalEnvelope{Goal: view})
+			envelope, err := newGoalEnvelopeWithEvidence(ctx, app.Store, goal)
+			if err != nil {
+				return err
+			}
+			return commands.WriteJSON(stdout, envelope)
 		}
 		_, err = fmt.Fprintf(stdout, "goal=%d status=%s title=%q\n", goal.ID, goal.Status, goal.Title)
 		return err
@@ -4140,7 +4143,7 @@ func runGoal(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		if command.JSON {
 			return commands.WriteJSON(stdout, result)
 		}
-		_, err = fmt.Fprintf(stdout, "observed=%d started=%d blocked=%d skipped=%d\n", result.Observed, result.Started, result.Blocked, result.Skipped)
+		_, err = fmt.Fprintf(stdout, "observed=%d planned=%d started=%d blocked=%d skipped=%d\n", result.Observed, result.Planned, result.Started, result.Blocked, result.Skipped)
 		return err
 	default:
 		return fmt.Errorf(commands.GoalUsage)
@@ -4158,6 +4161,35 @@ func newGoalView(goal sqlite.Goal) commands.GoalView {
 		CurrentRunID: goal.CurrentRunID,
 		CreatedAt:    goal.CreatedAt,
 		UpdatedAt:    goal.UpdatedAt,
+	}
+}
+
+func newGoalEnvelopeWithEvidence(ctx context.Context, store *sqlite.Store, goal sqlite.Goal) (commands.GoalEnvelope, error) {
+	evidence, err := store.ListGoalEvidence(ctx, sqlite.ListGoalEvidenceParams{GoalID: goal.ID})
+	if err != nil {
+		return commands.GoalEnvelope{}, err
+	}
+	view := commands.GoalEnvelope{
+		Goal:     newGoalView(goal),
+		Evidence: make([]commands.GoalEvidenceView, 0, len(evidence)),
+	}
+	for _, item := range evidence {
+		view.Evidence = append(view.Evidence, newGoalEvidenceView(item))
+	}
+	return view, nil
+}
+
+func newGoalEvidenceView(evidence sqlite.GoalEvidence) commands.GoalEvidenceView {
+	return commands.GoalEvidenceView{
+		ID:           evidence.ID,
+		GoalID:       evidence.GoalID,
+		GoalRunID:    evidence.GoalRunID,
+		EvidenceType: evidence.EvidenceType,
+		Summary:      evidence.Summary,
+		URI:          evidence.URI,
+		PayloadJSON:  []byte(evidence.PayloadJSON),
+		CreatedBy:    evidence.CreatedBy,
+		CreatedAt:    evidence.CreatedAt,
 	}
 }
 

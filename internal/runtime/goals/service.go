@@ -32,8 +32,10 @@ const (
 	TickActionSkipped  = "skipped"
 	TickActionStarted  = "started"
 	TickActionBlocked  = "blocked"
+	TickActionPlanned  = "planned"
 
 	TickReasonCreatedNeedsPlanning = "created_goal_requires_planning"
+	TickReasonPlanRecorded         = "implementation_plan_recorded"
 	TickReasonApprovalRequired     = "approval_required"
 	TickReasonApprovedStarted      = "approved_for_execution_started"
 	TickReasonAutonomousApproved   = "autonomous_policy_approved"
@@ -45,6 +47,7 @@ const (
 
 type TickResult struct {
 	Observed int              `json:"observed"`
+	Planned  int              `json:"planned,omitempty"`
 	Started  int              `json:"started"`
 	Blocked  int              `json:"blocked"`
 	Skipped  int              `json:"skipped"`
@@ -126,6 +129,8 @@ func (service Service) Tick(ctx context.Context) (TickResult, error) {
 		}
 		result.Observed++
 		switch goalResult.Action {
+		case TickActionPlanned:
+			result.Planned++
 		case TickActionStarted:
 			result.Started++
 		case TickActionBlocked:
@@ -141,10 +146,11 @@ func (service Service) Tick(ctx context.Context) (TickResult, error) {
 func (service Service) tickGoal(ctx context.Context, goal sqlite.Goal) (TickGoalResult, error) {
 	switch goal.Status {
 	case sqlite.GoalStatusCreated:
-		if decision := ClassifyAutoPolicy(goal); decision.AutoStart {
+		decision := ClassifyAutoPolicy(goal)
+		if decision.AutoStart {
 			return service.approveAndStartAutonomousGoal(ctx, goal, decision)
 		}
-		return service.observe(ctx, goal, TickActionObserved, TickReasonCreatedNeedsPlanning, goal.Status, nil)
+		return service.planCreatedGoal(ctx, goal, decision)
 	case sqlite.GoalStatusPlanned:
 		if decision := ClassifyAutoPolicy(goal); decision.AutoStart {
 			return service.approveAndStartAutonomousGoal(ctx, goal, decision)
@@ -169,6 +175,39 @@ func (service Service) approveAndStartAutonomousGoal(ctx context.Context, goal s
 		return TickGoalResult{}, err
 	}
 	return service.startApprovedGoal(ctx, approved)
+}
+
+func (service Service) planCreatedGoal(ctx context.Context, goal sqlite.Goal, decision AutoPolicyDecision) (TickGoalResult, error) {
+	payload, err := json.Marshal(map[string]any{
+		"reason":              decision.Reason,
+		"project_key":         decision.ProjectKey,
+		"execution_intent":    "approval_gated",
+		"approval_review_id":  fmt.Sprintf("goal-approval:%d", goal.ID),
+		"generated_by":        "goal_runner",
+		"implementation_plan": defaultGoalImplementationPlan(goal, decision),
+	})
+	if err != nil {
+		return TickGoalResult{}, err
+	}
+	if _, err := service.Store.AddGoalEvidence(ctx, sqlite.AddGoalEvidenceParams{
+		GoalID:       goal.ID,
+		EvidenceType: "goal_implementation_plan",
+		Summary:      "goal runner recorded approval-gated implementation plan",
+		PayloadJSON:  string(payload),
+		CreatedBy:    "goal_runner",
+	}); err != nil {
+		return TickGoalResult{}, err
+	}
+	planned, err := service.Store.TransitionGoal(ctx, sqlite.TransitionGoalParams{
+		GoalID: goal.ID,
+		Status: sqlite.GoalStatusPlanned,
+		Actor:  "goal_runner",
+		Reason: TickReasonPlanRecorded,
+	})
+	if err != nil {
+		return TickGoalResult{}, err
+	}
+	return service.observe(ctx, goal, TickActionPlanned, TickReasonPlanRecorded, planned.Status, nil)
 }
 
 func (service Service) approveAutonomousGoal(ctx context.Context, goal sqlite.Goal, decision AutoPolicyDecision) (sqlite.Goal, error) {
@@ -214,6 +253,17 @@ func (service Service) approveAutonomousGoal(ctx context.Context, goal sqlite.Go
 		return sqlite.Goal{}, err
 	}
 	return current, nil
+}
+
+func defaultGoalImplementationPlan(goal sqlite.Goal, decision AutoPolicyDecision) []string {
+	reviewID := fmt.Sprintf("goal-approval:%d", goal.ID)
+	return []string{
+		fmt.Sprintf("Treat this as %s and keep execution approval-gated.", decision.Reason),
+		"Audit the target repo authority docs, existing commands, tests, and runtime contracts before implementation.",
+		"Implement the smallest change that satisfies the goal while preserving approval and governance boundaries.",
+		"Run repo-owned verification plus real odin proof for the affected operator path.",
+		fmt.Sprintf("Keep execution blocked until an operator approves %s.", reviewID),
+	}
 }
 
 func (service Service) startApprovedGoal(ctx context.Context, goal sqlite.Goal) (TickGoalResult, error) {

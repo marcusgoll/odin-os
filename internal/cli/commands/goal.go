@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -37,8 +38,21 @@ type GoalView struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+type GoalEvidenceView struct {
+	ID           int64           `json:"id"`
+	GoalID       int64           `json:"goal_id"`
+	GoalRunID    *int64          `json:"goal_run_id,omitempty"`
+	EvidenceType string          `json:"evidence_type"`
+	Summary      string          `json:"summary"`
+	URI          string          `json:"uri,omitempty"`
+	PayloadJSON  json.RawMessage `json:"payload_json"`
+	CreatedBy    string          `json:"created_by,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
+}
+
 type GoalEnvelope struct {
-	Goal GoalView `json:"goal"`
+	Goal     GoalView           `json:"goal"`
+	Evidence []GoalEvidenceView `json:"evidence,omitempty"`
 }
 
 type GoalListView struct {

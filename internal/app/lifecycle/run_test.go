@@ -3263,6 +3263,69 @@ func TestRunReviewQueueIncludesGoalReviewItems(t *testing.T) {
 	}
 }
 
+func TestRunGoalTickPlansCreatedGoalWithReviewVisibleEvidence(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeGoalEnvelope(t, []byte(run("goal", "create", "--title", "Build autonomous worker shim", "--json")))
+	tick := run("goal", "tick", "--json")
+	for _, want := range []string{
+		`"planned": 1`,
+		`"action": "planned"`,
+		`"reason": "implementation_plan_recorded"`,
+	} {
+		if !strings.Contains(tick, want) {
+			t.Fatalf("goal tick output = %s, want %s", tick, want)
+		}
+	}
+
+	show := run("goal", "show", "--id", int64String(created.ID), "--json")
+	for _, want := range []string{
+		`"status": "planned"`,
+		`"evidence_type": "goal_implementation_plan"`,
+		`"approval_review_id": "goal-approval:` + int64String(created.ID) + `"`,
+	} {
+		if !strings.Contains(show, want) {
+			t.Fatalf("goal show output = %s, want %s", show, want)
+		}
+	}
+
+	list := run("review", "list", "--json")
+	for _, want := range []string{
+		`"review_id": "goal-approval:` + int64String(created.ID) + `"`,
+		`"reason": "goal_planned_awaiting_approval"`,
+		`"allowed_actions": [`,
+		`"approve"`,
+	} {
+		if !strings.Contains(list, want) {
+			t.Fatalf("review list output = %s, want %s", list, want)
+		}
+	}
+	if strings.Contains(list, `"review_id": "goal:`+int64String(created.ID)+`"`) {
+		t.Fatalf("review list output = %s, want planned goal approval item only", list)
+	}
+
+	reviewShow := run("review", "show", "--id", "goal-approval:"+int64String(created.ID), "--json")
+	for _, want := range []string{
+		`"review_id": "goal-approval:` + int64String(created.ID) + `"`,
+		`"evidence_type": "goal_implementation_plan"`,
+		`"implementation_plan"`,
+	} {
+		if !strings.Contains(reviewShow, want) {
+			t.Fatalf("review show output = %s, want %s", reviewShow, want)
+		}
+	}
+}
+
 func TestRunReviewApproveGoalDerivedItems(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)
