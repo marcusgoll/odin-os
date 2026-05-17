@@ -89,7 +89,12 @@ The repo-owned nginx template is:
 deploy/nginx/odin-pwa-proxy.conf
 ```
 
-The repo-owned host-network container launcher is:
+The launcher defaults `ODIN_OVERSEER_NGINX_CONFIG` to the release copy at
+`$ODIN_OVERSEER_RELEASE_LINK/deploy/nginx/odin-pwa-proxy.conf`. Do not default
+this to the mutable checkout; live redeploys must run the proxy template that
+was shipped with the selected release.
+
+The repo-owned container launcher is:
 
 ```bash
 deploy/docker/run-odin-overseer-host.sh
@@ -98,18 +103,23 @@ deploy/docker/run-odin-overseer-host.sh
 Use the repo-owned launcher or keep any host-local wrapper byte-for-byte aligned
 with its mount and environment contract. Do not widen the route gate locally
 without making the same change in the repo-owned template and tests.
-The launcher uses host networking for loopback Odin/noVNC proxying and grants
-only `NET_BIND_SERVICE` so non-root nginx can bind the public HTTP port; do not
-replace that with privileged mode.
+The launcher defaults to the live Docker bridge topology:
+`infrastructure_default` as the primary network, then `odin-monitoring_default`
+as an optional monitoring attachment. Host networking remains an explicit
+override only; it is not the homelab default because host port 80 is owned by the
+front proxy.
 
 The active container must include these environment values:
 
 ```bash
 PATH=/home/orchestrator/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ODIN_ROOT=/state
+PYTHONPATH=/home/orchestrator/.local/lib/python3.12/site-packages
+GOMEMLIMIT=6144MiB
+GOGC=100
+ODIN_ROOT=/home/orchestrator/.local/state/odin-os
 ODIN_HTTP_ADDR=127.0.0.1:9444
-ODIN_PROJECTS_OVERLAY=/config/odin-os-projects.local.yaml
-ODIN_CODEX_DRIVER=/config/odin-codex-live-driver.sh
+ODIN_PROJECTS_OVERLAY=/home/orchestrator/.config/odin/odin-os-projects.local.yaml
+ODIN_CODEX_DRIVER=/home/orchestrator/.config/odin/odin-codex-live-driver.sh
 ODIN_CORE_GIT_ROOT=/home/orchestrator/odin-os
 ODIN_BROWSER_HANDOFF_BASE_URL=https://odin.marcusgoll.com/browser/session/handoff
 ```
@@ -134,6 +144,11 @@ so registry validation sees the same repositories the host sees:
 /home/orchestrator/marcusgoll:/home/orchestrator/marcusgoll:ro
 /home/orchestrator/.config/superpowers/worktrees/family-ops/odin-os-cutover-main:/home/orchestrator/.config/superpowers/worktrees/family-ops/odin-os-cutover-main:ro
 ```
+
+The family-ops mount follows `ODIN_FAMILY_OPS_CUTOVER_WORKTREE`. Keep that
+default aligned with `/home/orchestrator/.config/odin/odin-os-projects.local.yaml`;
+otherwise registry diagnostics will pause dispatch even when the browser runner
+itself is healthy.
 
 Because workspace-ready projects are registered, the container must expose the
 same operator prerequisites used by readiness:
