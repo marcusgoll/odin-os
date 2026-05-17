@@ -2,6 +2,7 @@ package goals
 
 import (
 	"strings"
+	"unicode"
 
 	"odin-os/internal/store/sqlite"
 )
@@ -34,12 +35,11 @@ func ClassifyAutoPolicy(goal sqlite.Goal) AutoPolicyDecision {
 		"login",
 		"mfa",
 		"captcha",
-		"x ",
 		"twitter",
 		"publish",
 		"social",
 		"browser",
-	}) {
+	}) || hasStandaloneWord(text, "x") {
 		return AutoPolicyDecision{Reason: AutoPolicyReasonExternalAccountReview, ProjectKey: projectKey}
 	}
 	if containsAnyToken(text, []string{
@@ -116,6 +116,17 @@ func startsWithAny(text string, prefixes []string) bool {
 	text = strings.TrimSpace(text)
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasStandaloneWord(text string, want string) bool {
+	for _, word := range strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		if word == want {
 			return true
 		}
 	}
