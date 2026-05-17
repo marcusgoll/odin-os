@@ -397,6 +397,8 @@ func (service Service) runChildDelegation(ctx context.Context, parentTask sqlite
 		"portal_track":            cleanInput(input.Inputs["portal_track"]),
 		"surface":                 cleanInput(input.Inputs["surface"]),
 		"goal":                    cleanInput(input.Inputs["goal"]),
+		"project_key":             cleanInput(input.Inputs["project_key"]),
+		"launch_objective":        cleanInput(input.Inputs["launch_objective"]),
 		"skill_key":               spec.SkillKey,
 		"role":                    spec.Role,
 		"execution_intent":        delegationExecutionIntent(spec.MutationMode),

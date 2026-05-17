@@ -155,6 +155,8 @@ func renderDelegationTemplate(template string, inputs map[string]string) string 
 		"{{portal_track}}", cleanInput(inputs["portal_track"]),
 		"{{surface}}", cleanInput(inputs["surface"]),
 		"{{goal}}", cleanInput(inputs["goal"]),
+		"{{project_key}}", cleanInput(inputs["project_key"]),
+		"{{launch_objective}}", cleanInput(inputs["launch_objective"]),
 		"{{intent}}", delegationRunIntent(inputs["intent"]),
 	)
 	return cleanInput(replacer.Replace(template))

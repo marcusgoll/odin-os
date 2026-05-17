@@ -4524,12 +4524,7 @@ func runCompanion(ctx context.Context, app bootstrap.App, args []string, stdout 
 			RequestedBy:   "companion:" + companion.Key,
 			CompanionID:   companion.ID,
 			Intent:        command.Intent,
-			Inputs: map[string]string{
-				"portal_track": command.PortalTrack,
-				"surface":      command.Surface,
-				"goal":         command.Goal,
-				"intent":       command.Intent,
-			},
+			Inputs:        companionDelegateInputs(command),
 		})
 		if err != nil {
 			return err
@@ -4550,6 +4545,22 @@ func runCompanion(ctx context.Context, app bootstrap.App, args []string, stdout 
 	default:
 		return fmt.Errorf("unsupported companion subcommand: %s", command.Name)
 	}
+}
+
+func companionDelegateInputs(command commands.CompanionCommand) map[string]string {
+	inputs := map[string]string{
+		"portal_track": command.PortalTrack,
+		"surface":      command.Surface,
+		"goal":         command.Goal,
+		"intent":       command.Intent,
+	}
+	if inputs["project_key"] == "" {
+		inputs["project_key"] = command.PortalTrack
+	}
+	if inputs["launch_objective"] == "" {
+		inputs["launch_objective"] = firstNonEmpty(command.Goal, command.Surface)
+	}
+	return inputs
 }
 
 func companionDelegationListView(ctx context.Context, store *sqlite.Store, resolved cliscope.Resolution) (commands.CompanionDelegationListView, error) {
