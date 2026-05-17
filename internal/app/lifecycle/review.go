@@ -13,6 +13,7 @@ import (
 	"odin-os/internal/adapters/web"
 	"odin-os/internal/app/bootstrap"
 	commands "odin-os/internal/cli/commands"
+	cliscope "odin-os/internal/cli/scope"
 	"odin-os/internal/core/followups"
 	"odin-os/internal/core/workspaces"
 	browserexecutor "odin-os/internal/executors/browser"
@@ -48,6 +49,19 @@ type reviewApproveView struct {
 	Status      string            `json:"status"`
 	Transitions []string          `json:"transitions"`
 	Goal        commands.GoalView `json:"goal"`
+	WorkItem    *goalWorkItemView `json:"work_item,omitempty"`
+	Handoff     string            `json:"handoff,omitempty"`
+}
+
+type goalWorkItemView struct {
+	ID                    int64  `json:"id"`
+	Key                   string `json:"key"`
+	Status                string `json:"status"`
+	ProjectKey            string `json:"project_key"`
+	WorkKind              string `json:"work_kind"`
+	ExecutionIntent       string `json:"execution_intent"`
+	ExecutionIntentSource string `json:"execution_intent_source"`
+	Created               bool   `json:"created"`
 }
 
 type reviewRejectView struct {
@@ -831,7 +845,7 @@ func runReviewApprove(ctx context.Context, app bootstrap.App, queueID string, js
 	if ref.Kind == "goal-blocker" && jsonOutput {
 		return writeUnsupportedGoalBlockerReviewAction(ctx, app.Store, ref, "approve", stdout)
 	}
-	view, err := approveGoalReviewItem(ctx, app.Store, ref)
+	view, err := approveGoalReviewItem(ctx, app, ref)
 	if err != nil {
 		return err
 	}
@@ -955,7 +969,8 @@ func rejectGoalReviewItem(ctx context.Context, store *sqlite.Store, ref reviewQu
 	}, nil
 }
 
-func approveGoalReviewItem(ctx context.Context, store *sqlite.Store, ref reviewQueueRef) (reviewApproveView, error) {
+func approveGoalReviewItem(ctx context.Context, app bootstrap.App, ref reviewQueueRef) (reviewApproveView, error) {
+	store := app.Store
 	reviewID := fmt.Sprintf("%s:%d", ref.Kind, ref.ID)
 	sourceType := ""
 	sourceID := ref.ID
@@ -1007,6 +1022,10 @@ func approveGoalReviewItem(ctx context.Context, store *sqlite.Store, ref reviewQ
 	}); err != nil {
 		return reviewApproveView{}, err
 	}
+	workItem, handoff, err := createApprovedGoalWorkItem(ctx, app, ref, approved, reviewID)
+	if err != nil {
+		return reviewApproveView{}, err
+	}
 
 	return reviewApproveView{
 		ReviewID:    reviewID,
@@ -1017,7 +1036,63 @@ func approveGoalReviewItem(ctx context.Context, store *sqlite.Store, ref reviewQ
 		Status:      string(approved.Status),
 		Transitions: transitions,
 		Goal:        newGoalView(approved),
+		WorkItem:    workItem,
+		Handoff:     handoff,
 	}, nil
+}
+
+func createApprovedGoalWorkItem(ctx context.Context, app bootstrap.App, ref reviewQueueRef, goal sqlite.Goal, reviewID string) (*goalWorkItemView, string, error) {
+	if ref.Kind != "goal-approval" {
+		return nil, "", nil
+	}
+	title := strings.TrimSpace(goal.Title)
+	if title == "" {
+		title = fmt.Sprintf("goal %d", goal.ID)
+	}
+	artifactsJSON := fmt.Sprintf(
+		`{"handoff":"approved_planned_goal","goal_id":%d,"review_id":%q,"source_type":"goal_approval"}`,
+		goal.ID,
+		reviewID,
+	)
+	result, err := jobsvc.Service{
+		Store:    app.Store,
+		Registry: app.Registry,
+	}.CreateTaskOnce(ctx, jobsvc.CreateTaskParams{
+		Resolved: cliscope.Resolve(cliscope.ResolveInput{
+			ExplicitTarget: &cliscope.Target{
+				ProjectKey:    "odin-core",
+				SystemProject: true,
+			},
+		}),
+		Title:                 "Execute approved goal: " + title,
+		Key:                   fmt.Sprintf("goal-%d-approved-delivery", goal.ID),
+		AcceptanceCriteria:    []string{"Review evidence " + reviewID + " exists before execution.", "Work remains governed by project delivery and run evidence."},
+		RequestedBy:           "review",
+		WorkKind:              "delivery",
+		ArtifactsJSON:         artifactsJSON,
+		ExecutionIntent:       goalExecutionIntent(goal),
+		ExecutionIntentSource: "review:goal_approval",
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return &goalWorkItemView{
+		ID:                    result.Task.ID,
+		Key:                   result.Task.Key,
+		Status:                result.Task.Status,
+		ProjectKey:            "odin-core",
+		WorkKind:              result.Task.WorkKind,
+		ExecutionIntent:       result.Task.ExecutionIntent,
+		ExecutionIntentSource: result.Task.ExecutionIntentSource,
+		Created:               result.Created,
+	}, "created_delivery_work_item", nil
+}
+
+func goalExecutionIntent(goal sqlite.Goal) string {
+	if strings.EqualFold(strings.TrimSpace(goal.Source), "read_only") {
+		return "read_only"
+	}
+	return "mutation"
 }
 
 func approveGoalThroughReview(ctx context.Context, store *sqlite.Store, goal sqlite.Goal, reviewID string) (sqlite.Goal, []string, error) {
