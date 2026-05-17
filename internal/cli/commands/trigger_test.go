@@ -26,6 +26,7 @@ func TestRunTriggerHelpPrintsUsage(t *testing.T) {
 	for _, want := range []string{
 		"event=external.github.issue",
 		"odin trigger test <key> source=events",
+		"odin trigger seed cfipros-ceo-day-routine",
 	} {
 		if got := stdout.String(); !strings.Contains(got, want) {
 			t.Fatalf("stdout = %q, want %q", got, want)
@@ -213,6 +214,102 @@ func TestRunTriggerSeedMarcusBrandOSCreatesSkillInvocationSchedules(t *testing.T
 	}
 
 	fireOutput := run("fire", "marcus-brand-morning-editorial-scan", "reason=seed-proof", "--json")
+	for _, want := range []string{
+		`"work_kind": "skill_invocation"`,
+		`"execution_intent": "read_only"`,
+		`"execution_intent_source": "skill_binding:trigger"`,
+		`"created_work_item": true`,
+	} {
+		if !strings.Contains(fireOutput, want) {
+			t.Fatalf("fire output = %s, want %s", fireOutput, want)
+		}
+	}
+}
+
+func TestRunTriggerSeedCFIProsCEODayRoutineCreatesCEOAgentRoutineSchedules(t *testing.T) {
+	ctx := context.Background()
+	store := openWorkspaceCommandTestStore(t)
+	defer store.Close()
+
+	repoRoot := createWorkspaceCommandGitRepo(t, "main")
+	service := triggers.Service{
+		Store:    store,
+		Registry: writeWorkspaceCommandRegistry(t, map[string]string{"cfipros": repoRoot}),
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := RunTrigger(ctx, service, args, &stdout); err != nil {
+			t.Fatalf("RunTrigger(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	output := run("seed", "cfipros-ceo-day-routine", "start=2026-05-18", "--json")
+	var seed struct {
+		Seed       string `json:"seed"`
+		Workspace  string `json:"workspace"`
+		Initiative string `json:"initiative"`
+		Status     string `json:"status"`
+		Timezone   string `json:"timezone"`
+		Triggers   []struct {
+			Key            string  `json:"key"`
+			Status         string  `json:"status"`
+			Kind           string  `json:"kind"`
+			RuleJSON       string  `json:"rule_json"`
+			NextEligibleAt *string `json:"next_eligible_at"`
+		} `json:"triggers"`
+	}
+	if err := json.Unmarshal([]byte(output), &seed); err != nil {
+		t.Fatalf("json.Unmarshal(seed) error = %v\n%s", err, output)
+	}
+	if seed.Seed != "cfipros-ceo-day-routine" || seed.Initiative != "cfipros" || seed.Status != "enabled" || seed.Timezone != "America/New_York" {
+		t.Fatalf("seed output = %+v, want CFIPros CEO defaults", seed)
+	}
+	if len(seed.Triggers) != len(cfiprosCEORoutines) {
+		t.Fatalf("seed triggers = %d, want %d", len(seed.Triggers), len(cfiprosCEORoutines))
+	}
+
+	rulesByKey := map[string]string{}
+	for _, trigger := range seed.Triggers {
+		rulesByKey[trigger.Key] = trigger.RuleJSON
+		if trigger.Status != "enabled" || trigger.Kind != "schedule" || trigger.NextEligibleAt == nil {
+			t.Fatalf("seed trigger = %+v, want enabled schedule with next run", trigger)
+		}
+		var rule struct {
+			ExecutionIntent string `json:"execution_intent"`
+			QuietTimezone   string `json:"quiet_timezone"`
+			SkillInvocation struct {
+				SkillKey              string `json:"skill_key"`
+				ProjectKey            string `json:"project_key"`
+				ExecutionIntent       string `json:"execution_intent"`
+				ExecutionIntentSource string `json:"execution_intent_source"`
+				ReviewState           string `json:"review_state"`
+				InputJSON             struct {
+					AgentKey         string `json:"agent_key"`
+					WorkflowKey      string `json:"workflow_key"`
+					ApprovalBoundary string `json:"approval_boundary"`
+				} `json:"input_json"`
+			} `json:"skill_invocation"`
+		}
+		if err := json.Unmarshal([]byte(trigger.RuleJSON), &rule); err != nil {
+			t.Fatalf("json.Unmarshal(rule_json) error = %v\n%s", err, trigger.RuleJSON)
+		}
+		if rule.ExecutionIntent != "read_only" || rule.QuietTimezone != "UTC" || rule.SkillInvocation.SkillKey != "cfipros-ceo-operator" || rule.SkillInvocation.ProjectKey != "cfipros" || rule.SkillInvocation.ExecutionIntent != "read_only" || rule.SkillInvocation.ExecutionIntentSource != "trigger" || rule.SkillInvocation.ReviewState != "review_required" {
+			t.Fatalf("rule = %+v, want read-only review-required CFIPros CEO skill binding", rule)
+		}
+		if rule.SkillInvocation.InputJSON.AgentKey != "cfipros-ceo-operator-agent" || rule.SkillInvocation.InputJSON.WorkflowKey != "cfipros-ceo-operating-routine" {
+			t.Fatalf("rule input = %+v, want CEO agent and workflow handoff", rule.SkillInvocation.InputJSON)
+		}
+		if !strings.Contains(rule.SkillInvocation.InputJSON.ApprovalBoundary, "customer contact") || !strings.Contains(rule.SkillInvocation.InputJSON.ApprovalBoundary, "billing") {
+			t.Fatalf("approval boundary = %q, want customer and billing limits", rule.SkillInvocation.InputJSON.ApprovalBoundary)
+		}
+	}
+	if got, ok := rulesByKey["cfipros-ceo-morning-launch-health"]; !ok || !strings.Contains(got, `"agent_key":"cfipros-ceo-operator-agent"`) {
+		t.Fatalf("morning launch rule = %s, want CEO agent handoff", got)
+	}
+
+	fireOutput := run("fire", "cfipros-ceo-morning-launch-health", "reason=seed-proof", "--json")
 	for _, want := range []string{
 		`"work_kind": "skill_invocation"`,
 		`"execution_intent": "read_only"`,
