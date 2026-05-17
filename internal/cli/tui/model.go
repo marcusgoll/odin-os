@@ -16,6 +16,7 @@ type Model struct {
 	RecoveryRecommendations int
 	Agents                  []AgentRow
 	Goals                   []GoalRow
+	Schedules               []ScheduleRoutineRow
 	PullRequests            []PullRequestRow
 	Approvals               []ApprovalRow
 	Logs                    []LogEntry
@@ -34,6 +35,19 @@ type GoalRow struct {
 	Title      string
 	Status     string
 	CurrentRun string
+}
+
+type ScheduleRoutineRow struct {
+	Source         string
+	Key            string
+	Project        string
+	Status         string
+	DueStatus      string
+	NextDueAt      string
+	LastRanAt      string
+	LastWorkItem   string
+	LastWorkStatus string
+	LastWorkDetail string
 }
 
 type PullRequestRow struct {

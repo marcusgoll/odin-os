@@ -565,6 +565,57 @@ func (provider tuiModelProvider) EnrichModel(ctx context.Context, model *tui.Mod
 		}
 	}
 
+	now := time.Now()
+	triggers, err := provider.app.Store.ListAutomationTriggers(ctx, sqlite.ListAutomationTriggersParams{WorkspaceID: workspaces.DefaultWorkspaceKey})
+	if err != nil {
+		return err
+	}
+	projectKeys := make(map[int64]string)
+	for _, trigger := range triggers {
+		projectKey, err := provider.projectKey(ctx, trigger.ProjectID, projectKeys)
+		if err != nil {
+			return err
+		}
+		lastWorkStatus := ""
+		lastWorkDetail := ""
+		if trigger.LastWorkItemID != nil {
+			task, err := provider.app.Store.GetTask(ctx, *trigger.LastWorkItemID)
+			if err == nil {
+				lastWorkStatus = task.Status
+				lastWorkDetail = firstNonEmpty(task.LastError, task.BlockedReason, task.TerminalReason)
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		model.Schedules = append(model.Schedules, tui.ScheduleRoutineRow{
+			Source:         "schedule",
+			Key:            trigger.Key,
+			Project:        firstNonEmpty(projectKey, trigger.InitiativeKey),
+			Status:         trigger.Status,
+			DueStatus:      tuiAutomationTriggerDueStatus(trigger, now),
+			NextDueAt:      formatTUITimePtr(trigger.NextEligibleAt),
+			LastRanAt:      formatTUITimePtr(trigger.LastMaterializedAt),
+			LastWorkItem:   trigger.LastWorkItemKey,
+			LastWorkStatus: lastWorkStatus,
+			LastWorkDetail: lastWorkDetail,
+		})
+	}
+	followUps, err := projections.ListFollowUpSummaryViews(ctx, provider.app.Store.DB(), workspaces.DefaultWorkspaceKey, now)
+	if err != nil {
+		return err
+	}
+	for _, followUp := range followUps {
+		model.Schedules = append(model.Schedules, tui.ScheduleRoutineRow{
+			Source:    "routine",
+			Key:       fmt.Sprintf("%d", followUp.ObligationID),
+			Project:   followUp.TargetProjectKey,
+			Status:    followUp.Status,
+			DueStatus: followUp.DueStatus,
+			NextDueAt: followUp.NextDueAt.UTC().Format(time.RFC3339),
+			LastRanAt: formatTUITimePtr(followUp.LastCompletedAt),
+		})
+	}
+
 	handoffs, err := provider.app.Store.ListPullRequestHandoffs(ctx, sqlite.ListPullRequestHandoffsParams{})
 	if err != nil {
 		return err
@@ -596,6 +647,48 @@ func (provider tuiModelProvider) EnrichModel(ctx context.Context, model *tui.Mod
 		}
 	}
 	return nil
+}
+
+func (provider tuiModelProvider) projectKey(ctx context.Context, projectID int64, cache map[int64]string) (string, error) {
+	if projectID == 0 {
+		return "", nil
+	}
+	if key, ok := cache[projectID]; ok {
+		return key, nil
+	}
+	project, err := provider.app.Store.GetProject(ctx, projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		cache[projectID] = ""
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	cache[projectID] = firstNonEmpty(project.Key, project.Name)
+	return cache[projectID], nil
+}
+
+func formatTUITimePtr(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func tuiAutomationTriggerDueStatus(trigger sqlite.AutomationTrigger, now time.Time) string {
+	if trigger.Status != "enabled" {
+		return trigger.Status
+	}
+	if trigger.NextEligibleAt == nil {
+		return "manual"
+	}
+	if trigger.NextEligibleAt.After(now.UTC()) {
+		if trigger.LastEvaluatedAt != nil && (trigger.LastMaterializedAt == nil || trigger.LastEvaluatedAt.After(*trigger.LastMaterializedAt)) {
+			return "deferred"
+		}
+		return "waiting"
+	}
+	return "due"
 }
 
 func firstNonEmpty(values ...string) string {
