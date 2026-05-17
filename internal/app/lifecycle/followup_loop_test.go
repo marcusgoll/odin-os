@@ -73,10 +73,12 @@ service:
 		t.Fatalf("ListEvents() error = %v", err)
 	}
 	foundMaterialized := false
+	materializedCount := 0
 	for _, event := range events {
 		if string(event.Type) != "follow_up.materialized" {
 			continue
 		}
+		materializedCount++
 		foundMaterialized = true
 		var payload struct {
 			TaskStatus string `json:"task_status"`
@@ -90,6 +92,9 @@ service:
 	}
 	if !foundMaterialized {
 		t.Fatal("expected follow_up.materialized event")
+	}
+	if materializedCount != 1 {
+		t.Fatalf("follow_up.materialized event count = %d, want 1", materializedCount)
 	}
 }
 

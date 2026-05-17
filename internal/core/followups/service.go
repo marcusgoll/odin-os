@@ -310,16 +310,16 @@ func (service Service) Materialize(ctx context.Context, params MaterializeParams
 		if err != nil {
 			return MaterializationResult{}, err
 		}
-	}
 
-	if err := service.recordRuntimeEvent(ctx, runtimeevents.EventFollowUpMaterialized, obligation, task.ID, runtimeevents.FollowUpMaterializedPayload{
-		ObligationID:  obligation.ID,
-		TaskID:        task.ID,
-		OccurrenceKey: obligation.OccurrenceKey(),
-		TaskStatus:    task.Status,
-		Reused:        reused,
-	}); err != nil {
-		return MaterializationResult{}, err
+		if err := service.recordRuntimeEvent(ctx, runtimeevents.EventFollowUpMaterialized, obligation, task.ID, runtimeevents.FollowUpMaterializedPayload{
+			ObligationID:  obligation.ID,
+			TaskID:        task.ID,
+			OccurrenceKey: obligation.OccurrenceKey(),
+			TaskStatus:    task.Status,
+			Reused:        reused,
+		}); err != nil {
+			return MaterializationResult{}, err
+		}
 	}
 
 	return MaterializationResult{
