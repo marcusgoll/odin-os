@@ -448,6 +448,7 @@ func TestRunTUIMissingPrometheusStillRendersOverviewPanels(t *testing.T) {
 		"│ TELEMETRY     unavailable",
 		"┌─ AGENTS RUNNING ",
 		"┌─ CURRENT GOALS ",
+		"┌─ SCHEDULES + ROUTINES ",
 		"┌─ PROJECT PRS + CI ",
 		"┌─ APPROVALS WAITING ",
 		"┌─ ODIN LOGS ",
@@ -480,6 +481,21 @@ func TestRunTUIOnceIncludesStoreBackedVisualPanels(t *testing.T) {
 	}
 	if _, err := app.Store.CreateGoal(context.Background(), sqlite.CreateGoalParams{Title: "Ship visual TUI"}); err != nil {
 		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	nextEligibleAt := time.Date(2026, 5, 17, 15, 0, 0, 0, time.UTC)
+	if _, err := app.Store.UpsertAutomationTrigger(context.Background(), sqlite.UpsertAutomationTriggerParams{
+		WorkspaceID:    "default",
+		Key:            "daily-proof",
+		ProjectID:      project.ID,
+		InitiativeKey:  "odin-core",
+		Kind:           "schedule",
+		Status:         "enabled",
+		RuleJSON:       `{"kind":"schedule","cadence":"24h","execution_intent":"read_only"}`,
+		RuleSummary:    "daily proof",
+		WorkItemTitle:  "Daily proof",
+		NextEligibleAt: &nextEligibleAt,
+	}); err != nil {
+		t.Fatalf("UpsertAutomationTrigger() error = %v", err)
 	}
 	if _, err := app.Store.UpsertPullRequestHandoff(context.Background(), sqlite.UpsertPullRequestHandoffParams{
 		ProjectID:   project.ID,
@@ -526,6 +542,9 @@ func TestRunTUIOnceIncludesStoreBackedVisualPanels(t *testing.T) {
 		"│ NAME          Default Workspace",
 		"┌─ CURRENT GOALS ",
 		"Ship visual TUI",
+		"┌─ SCHEDULES + ROUTINES ",
+		"schedule=daily-proof",
+		"project=odin-core status=enabled",
 		"┌─ PROJECT PRS + CI ",
 		"odin-core acme/odin-os#42 state=open ci=not_wired title=Visual TUI",
 		"┌─ APPROVALS WAITING ",

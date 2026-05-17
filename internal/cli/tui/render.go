@@ -51,6 +51,7 @@ func renderOverview(model Model, options renderOptions) string {
 		actionPanel(model, options.Color),
 		agentsPanel(model),
 		goalsPanel(model),
+		schedulesPanel(model),
 		pullRequestsPanel(model),
 		approvalsPanel(model),
 		logsPanel(model),
@@ -144,6 +145,38 @@ func goalsPanel(model Model) panel {
 		}
 	}
 	return panel{Title: "CURRENT GOALS", Rows: rows}
+}
+
+func schedulesPanel(model Model) panel {
+	rows := []string{"none"}
+	if len(model.Schedules) > 0 {
+		rows = rows[:0]
+		for _, schedule := range model.Schedules {
+			rows = append(rows, fmt.Sprintf(
+				"%s=%s",
+				valueOrNone(schedule.Source),
+				valueOrNone(schedule.Key),
+			))
+			rows = append(rows, fmt.Sprintf(
+				"  project=%s status=%s due=%s",
+				valueOrNone(schedule.Project),
+				valueOrNone(schedule.Status),
+				valueOrNone(schedule.DueStatus),
+			))
+			rows = append(rows, fmt.Sprintf(
+				"  next=%s last_run=%s",
+				valueOrNone(schedule.NextDueAt),
+				valueOrNone(schedule.LastRanAt),
+			))
+			rows = append(rows, fmt.Sprintf(
+				"  work_status=%s detail=%s work=%s",
+				valueOrNone(schedule.LastWorkStatus),
+				valueOrNone(schedule.LastWorkDetail),
+				valueOrNone(schedule.LastWorkItem),
+			))
+		}
+	}
+	return panel{Title: "SCHEDULES + ROUTINES", Rows: rows, Span: true}
 }
 
 func pullRequestsPanel(model Model) panel {

@@ -194,6 +194,20 @@ func TestRenderOverviewShowsVisualDeliveryCockpitPanels(t *testing.T) {
 		Goals: []GoalRow{
 			{ID: 7, Title: "Ship visual TUI", Status: "running", CurrentRun: "12"},
 		},
+		Schedules: []ScheduleRoutineRow{
+			{
+				Source:         "schedule",
+				Key:            "daily-proof",
+				Project:        "odin-core",
+				Status:         "enabled",
+				DueStatus:      "waiting",
+				NextDueAt:      "2026-05-17T15:00:00Z",
+				LastRanAt:      "2026-05-17T00:02:14Z",
+				LastWorkItem:   "automation-daily-proof",
+				LastWorkStatus: "blocked",
+				LastWorkDetail: "previous service instance stopped during execution",
+			},
+		},
 		PullRequests: []PullRequestRow{
 			{Project: "odin-os", Repo: "owner/odin-os", Number: 276, Title: "Visual TUI", State: "open", CI: "not_wired"},
 		},
@@ -208,6 +222,11 @@ func TestRenderOverviewShowsVisualDeliveryCockpitPanels(t *testing.T) {
 		"│ codex task=visual-tui project=odin-os status=running",
 		"┌─ CURRENT GOALS ",
 		"│ goal=7 status=running run=12 title=Ship visual TUI",
+		"┌─ SCHEDULES + ROUTINES ",
+		"│ schedule=daily-proof",
+		"│   project=odin-core status=enabled due=waiting",
+		"│   next=2026-05-17T15:00:00Z last_run=2026-05-17T00:02:14Z",
+		"│   work_status=blocked detail=previous service instance stopped during...",
 		"┌─ PROJECT PRS + CI ",
 		"│ odin-os owner/odin-os#276 state=open ci=not_wired title=Visual TUI",
 		"┌─ APPROVALS WAITING ",
