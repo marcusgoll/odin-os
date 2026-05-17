@@ -317,19 +317,8 @@ func (service Service) Collect(ctx context.Context) (Snapshot, error) {
 		MediaOpenIncidents:      mediaOpenIncidents,
 		MediaCandidates:         mediaCandidates,
 	}
-	snapshot.OS = deriveOSSnapshot(snapshot, executorSamples == 0 || sourceSamples == 0 || projectionSamples == 0 || staleExecutorTelemetry > 0, countActiveIncidents(incidents))
+	snapshot.OS = deriveOSSnapshot(snapshot, executorSamples == 0 || sourceSamples == 0 || projectionSamples == 0 || staleExecutorTelemetry > 0)
 	return snapshot, nil
-}
-
-func countActiveIncidents(views []projections.IncidentView) int {
-	count := 0
-	for _, view := range views {
-		switch view.Status {
-		case "open", "escalated":
-			count++
-		}
-	}
-	return count
 }
 
 func countActiveRecoveries(views []projections.RecoveryView) int {
@@ -414,9 +403,8 @@ func (service Service) executorTelemetryStaleCount(ctx context.Context, config C
 	return count, nil
 }
 
-func deriveOSSnapshot(snapshot Snapshot, telemetryMissing bool, activeIncidents int) OSSnapshot {
+func deriveOSSnapshot(snapshot Snapshot, telemetryMissing bool) OSSnapshot {
 	telemetryStale := telemetryMissing || snapshot.StaleSources > 0 || snapshot.StaleProjections > 0
-	degraded := activeIncidents > 0 || snapshot.ActiveRecoveries > 0
 
 	osSnapshot := OSSnapshot{
 		HealthScore:    100,
@@ -428,10 +416,6 @@ func deriveOSSnapshot(snapshot Snapshot, telemetryMissing bool, activeIncidents 
 		osSnapshot.HealthScore = 80
 		osSnapshot.Status = "unknown"
 		return osSnapshot
-	}
-	if degraded {
-		osSnapshot.HealthScore = 80
-		osSnapshot.Status = "degraded"
 	}
 	return osSnapshot
 }

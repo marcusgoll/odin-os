@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -67,12 +68,30 @@ func (monitor Monitor) executorHealthObservation(ctx context.Context, now time.T
 	var executor string
 	var status string
 	var checkedAt string
-	err := monitor.DB.QueryRowContext(ctx, `
+	query := `
 		SELECT executor, status, checked_at
-		FROM executor_health
-		ORDER BY checked_at DESC, id DESC
+		FROM (
+			SELECT eh.executor, eh.status, eh.checked_at, eh.id
+			FROM executor_health eh
+			JOIN (
+				SELECT executor, MAX(id) AS max_id
+				FROM executor_health
+				GROUP BY executor
+			) latest ON latest.max_id = eh.id
+		)
+	`
+	args := []any{}
+	if len(config.ExecutorKeys) > 0 {
+		query += ` WHERE executor IN (` + placeholders(len(config.ExecutorKeys)) + `)`
+		for _, key := range config.ExecutorKeys {
+			args = append(args, key)
+		}
+	}
+	query += `
+		ORDER BY CASE WHEN status = 'healthy' THEN 0 ELSE 1 END, checked_at DESC, id DESC
 		LIMIT 1
-	`).Scan(&executor, &status, &checkedAt)
+	`
+	err := monitor.DB.QueryRowContext(ctx, query, args...).Scan(&executor, &status, &checkedAt)
 	switch err {
 	case sql.ErrNoRows:
 		return &Observation{
@@ -259,4 +278,15 @@ func (monitor Monitor) repeatedRunFailureObservations(ctx context.Context, confi
 	}
 
 	return observations, rows.Err()
+}
+
+func placeholders(count int) string {
+	if count <= 0 {
+		return ""
+	}
+	values := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		values = append(values, "?")
+	}
+	return strings.Join(values, ", ")
 }

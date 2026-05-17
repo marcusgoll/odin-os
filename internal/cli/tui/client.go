@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -18,7 +19,7 @@ var ErrUnavailableTelemetry = errors.New("unavailable telemetry")
 
 var defaultHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
-const recentLogsQuery = `{job="docker-containers"} |= "odin"`
+const recentLogsQuery = `{job="docker-containers"} |= "GET /"`
 
 const (
 	enterAlternateScreen = "\x1b[?1049h\x1b[?25l"
@@ -246,6 +247,9 @@ func (c Client) QueryRecentLogs(ctx context.Context) ([]LogEntry, error) {
 			if err := json.Unmarshal(value[1], &line); err != nil {
 				continue
 			}
+			if isTelemetryQueryLog(line) {
+				continue
+			}
 			entries = append(entries, LogEntry{
 				Timestamp: ts,
 				Line:      line,
@@ -254,6 +258,14 @@ func (c Client) QueryRecentLogs(ctx context.Context) ([]LogEntry, error) {
 		}
 	}
 	return entries, nil
+}
+
+func isTelemetryQueryLog(line string) bool {
+	return strings.Contains(line, "component=querier") ||
+		strings.Contains(line, "component=frontend") ||
+		strings.Contains(line, "caller=metrics.go") ||
+		strings.Contains(line, "caller=engine.go") ||
+		strings.Contains(line, "caller=roundtrip.go")
 }
 
 func (c Client) queryPrometheusScalar(ctx context.Context, query string) (float64, error) {

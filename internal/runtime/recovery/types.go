@@ -69,6 +69,7 @@ type Config struct {
 	ProjectionFreshnessTTL      time.Duration
 	SourceFreshnessTTL          time.Duration
 	RepeatedRunFailureThreshold int
+	ExecutorKeys                []string
 }
 
 type Monitor struct {
@@ -85,6 +86,15 @@ func DefaultConfig() Config {
 		SourceFreshnessTTL:          30 * time.Minute,
 		RepeatedRunFailureThreshold: 2,
 	}
+}
+
+func isZeroConfig(config Config) bool {
+	return config.QueuePressureThreshold == 0 &&
+		config.ExecutorFreshnessTTL == 0 &&
+		config.ProjectionFreshnessTTL == 0 &&
+		config.SourceFreshnessTTL == 0 &&
+		config.RepeatedRunFailureThreshold == 0 &&
+		len(config.ExecutorKeys) == 0
 }
 
 func applyDefaults(config Config) Config {
