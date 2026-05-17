@@ -3,6 +3,7 @@ package goals
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -35,6 +36,7 @@ const (
 	TickReasonCreatedNeedsPlanning = "created_goal_requires_planning"
 	TickReasonApprovalRequired     = "approval_required"
 	TickReasonApprovedStarted      = "approved_for_execution_started"
+	TickReasonAutonomousApproved   = "autonomous_policy_approved"
 	TickReasonActiveRunExists      = "active_goal_run_exists"
 	TickReasonNextWakePending      = "next_wake_pending"
 	TickReasonNoExecutor           = "no_executor"
@@ -139,8 +141,14 @@ func (service Service) Tick(ctx context.Context) (TickResult, error) {
 func (service Service) tickGoal(ctx context.Context, goal sqlite.Goal) (TickGoalResult, error) {
 	switch goal.Status {
 	case sqlite.GoalStatusCreated:
+		if decision := ClassifyAutoPolicy(goal); decision.AutoStart {
+			return service.approveAndStartAutonomousGoal(ctx, goal, decision)
+		}
 		return service.observe(ctx, goal, TickActionObserved, TickReasonCreatedNeedsPlanning, goal.Status, nil)
 	case sqlite.GoalStatusPlanned:
+		if decision := ClassifyAutoPolicy(goal); decision.AutoStart {
+			return service.approveAndStartAutonomousGoal(ctx, goal, decision)
+		}
 		return service.observe(ctx, goal, TickActionSkipped, TickReasonApprovalRequired, goal.Status, nil)
 	case sqlite.GoalStatusApprovedForExecution:
 		return service.startApprovedGoal(ctx, goal)
@@ -151,6 +159,59 @@ func (service Service) tickGoal(ctx context.Context, goal sqlite.Goal) (TickGoal
 	default:
 		return service.observe(ctx, goal, TickActionSkipped, TickReasonStatusSkipped, goal.Status, nil)
 	}
+}
+
+func (service Service) approveAndStartAutonomousGoal(ctx context.Context, goal sqlite.Goal, decision AutoPolicyDecision) (TickGoalResult, error) {
+	approved, err := service.approveAutonomousGoal(ctx, goal, decision)
+	if err != nil {
+		return TickGoalResult{}, err
+	}
+	return service.startApprovedGoal(ctx, approved)
+}
+
+func (service Service) approveAutonomousGoal(ctx context.Context, goal sqlite.Goal, decision AutoPolicyDecision) (sqlite.Goal, error) {
+	current := goal
+	var err error
+	if goal.Status == sqlite.GoalStatusCreated {
+		current, err = service.Store.TransitionGoal(ctx, sqlite.TransitionGoalParams{
+			GoalID: goal.ID,
+			Status: sqlite.GoalStatusPlanned,
+			Actor:  "goal_runner",
+			Reason: TickReasonAutonomousApproved,
+		})
+		if err != nil {
+			return sqlite.Goal{}, err
+		}
+	}
+	if current.Status == sqlite.GoalStatusPlanned {
+		current, err = service.Store.TransitionGoal(ctx, sqlite.TransitionGoalParams{
+			GoalID: current.ID,
+			Status: sqlite.GoalStatusApprovedForExecution,
+			Actor:  "goal_runner",
+			Reason: TickReasonAutonomousApproved,
+		})
+		if err != nil {
+			return sqlite.Goal{}, err
+		}
+	}
+	payload, err := json.Marshal(map[string]string{
+		"reason":           decision.Reason,
+		"project_key":      decision.ProjectKey,
+		"execution_intent": decision.ExecutionIntent,
+	})
+	if err != nil {
+		return sqlite.Goal{}, err
+	}
+	if _, err := service.Store.AddGoalEvidence(ctx, sqlite.AddGoalEvidenceParams{
+		GoalID:       current.ID,
+		EvidenceType: "goal_auto_policy",
+		Summary:      "goal runner auto-approved low-risk read-only goal",
+		PayloadJSON:  string(payload),
+		CreatedBy:    "goal_runner",
+	}); err != nil {
+		return sqlite.Goal{}, err
+	}
+	return current, nil
 }
 
 func (service Service) startApprovedGoal(ctx context.Context, goal sqlite.Goal) (TickGoalResult, error) {
