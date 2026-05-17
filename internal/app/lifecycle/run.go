@@ -522,6 +522,12 @@ func (provider tuiModelProvider) EnrichModel(ctx context.Context, model *tui.Mod
 		}
 	}
 
+	flows, err := listTUIFlowRows(ctx, provider.app.Store.DB())
+	if err != nil {
+		return err
+	}
+	model.Flows = append(model.Flows, flows...)
+
 	approvals, err := projections.ListPendingApprovalViews(ctx, provider.app.Store.DB())
 	if err != nil {
 		return err
@@ -689,6 +695,115 @@ func tuiAutomationTriggerDueStatus(trigger sqlite.AutomationTrigger, now time.Ti
 		return "waiting"
 	}
 	return "due"
+}
+
+func listTUIFlowRows(ctx context.Context, db *sql.DB) ([]tui.FlowRow, error) {
+	inbox, err := listTUIInboxRows(ctx, db, 3)
+	if err != nil {
+		return nil, err
+	}
+	outbox, err := listTUIOutboxRows(ctx, db, 3)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]tui.FlowRow, 0, len(inbox)+len(outbox))
+	rows = append(rows, inbox...)
+	rows = append(rows, outbox...)
+	if len(rows) > 6 {
+		return rows[:6], nil
+	}
+	return rows, nil
+}
+
+func listTUIInboxRows(ctx context.Context, db *sql.DB, limit int) ([]tui.FlowRow, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT 'intake#' || id, source_family || '/' || event_kind, status, COALESCE(NULLIF(summary, ''), subject)
+		FROM intake_items
+		ORDER BY received_at DESC, id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	flows := make([]tui.FlowRow, 0, limit)
+	for rows.Next() {
+		var flow tui.FlowRow
+		flow.Direction = "IN"
+		if err := rows.Scan(&flow.Ref, &flow.Source, &flow.Status, &flow.Subject); err != nil {
+			return nil, err
+		}
+		flows = append(flows, flow)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(flows) >= limit {
+		return flows, nil
+	}
+
+	taskRows, err := db.QueryContext(ctx, `
+		SELECT 'task-intake#' || ti.id, ti.source || '/' || ti.intake_type, t.status, COALESCE(NULLIF(t.summary, ''), t.title)
+		FROM task_intakes ti
+		JOIN tasks t ON t.id = ti.task_id
+		ORDER BY ti.created_at DESC, ti.id DESC
+		LIMIT ?
+	`, limit-len(flows))
+	if err != nil {
+		return nil, err
+	}
+	defer taskRows.Close()
+	for taskRows.Next() {
+		var flow tui.FlowRow
+		flow.Direction = "IN"
+		if err := taskRows.Scan(&flow.Ref, &flow.Source, &flow.Status, &flow.Subject); err != nil {
+			return nil, err
+		}
+		flows = append(flows, flow)
+	}
+	return flows, taskRows.Err()
+}
+
+func listTUIOutboxRows(ctx context.Context, db *sql.DB, limit int) ([]tui.FlowRow, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT ref, source, status, subject
+		FROM (
+			SELECT 'artifact#' || ra.id AS ref,
+				ra.artifact_type AS source,
+				r.status AS status,
+				COALESCE(NULLIF(ra.summary, ''), NULLIF(r.summary, ''), t.title) AS subject,
+				ra.created_at AS observed_at
+			FROM run_artifacts ra
+			JOIN runs r ON r.id = ra.run_id
+			JOIN tasks t ON t.id = r.task_id
+			UNION ALL
+			SELECT 'run#' || r.id AS ref,
+				r.executor AS source,
+				r.status AS status,
+				COALESCE(NULLIF(r.summary, ''), NULLIF(t.summary, ''), t.title) AS subject,
+				COALESCE(r.finished_at, r.started_at) AS observed_at
+			FROM runs r
+			JOIN tasks t ON t.id = r.task_id
+		)
+		ORDER BY observed_at DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	flows := make([]tui.FlowRow, 0, limit)
+	for rows.Next() {
+		var flow tui.FlowRow
+		flow.Direction = "OUT"
+		if err := rows.Scan(&flow.Ref, &flow.Source, &flow.Status, &flow.Subject); err != nil {
+			return nil, err
+		}
+		flows = append(flows, flow)
+	}
+	return flows, rows.Err()
 }
 
 func firstNonEmpty(values ...string) string {

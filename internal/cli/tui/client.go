@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -19,7 +20,11 @@ var ErrUnavailableTelemetry = errors.New("unavailable telemetry")
 
 var defaultHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
-const recentLogsQuery = `{job="docker-containers"} |= "GET /"`
+const (
+	defaultPrometheusURL = "http://127.0.0.1:9090"
+	defaultMetricsURL    = "http://127.0.0.1:9444/metrics"
+	recentLogsQuery      = `{job="docker-containers"} |= "GET /"`
+)
 
 const (
 	enterAlternateScreen = "\x1b[?1049h\x1b[?25l"
@@ -29,6 +34,7 @@ const (
 
 type Client struct {
 	PrometheusURL string
+	MetricsURL    string
 	LokiURL       string
 	HTTPClient    *http.Client
 	Provider      ModelProvider
@@ -48,7 +54,8 @@ func RunWithProvider(ctx context.Context, args []string, stdout io.Writer, provi
 	once := flags.Bool("once", false, "render once and exit")
 	interval := flags.Duration("interval", 5*time.Second, "refresh interval for continuous mode")
 	noClear := flags.Bool("no-clear", false, "do not clear the terminal between continuous refresh frames")
-	prometheusURL := flags.String("prometheus-url", "http://127.0.0.1:9090", "Prometheus base URL")
+	prometheusURL := flags.String("prometheus-url", defaultPrometheusURL, "Prometheus base URL")
+	metricsURL := flags.String("metrics-url", defaultMetricsURL, "Odin metrics URL fallback")
 	lokiURL := flags.String("loki-url", "http://127.0.0.1:3100", "Loki base URL")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -65,6 +72,7 @@ func RunWithProvider(ctx context.Context, args []string, stdout io.Writer, provi
 
 	client := Client{
 		PrometheusURL: *prometheusURL,
+		MetricsURL:    *metricsURL,
 		LokiURL:       *lokiURL,
 		Provider:      provider,
 	}
@@ -137,6 +145,17 @@ func renderFrame(ctx context.Context, client Client, stdout io.Writer, clear boo
 }
 
 func (c Client) QueryOverview(ctx context.Context) (Model, error) {
+	model, err := c.queryPrometheusOverview(ctx)
+	if err != nil {
+		if c.prometheusURL() == defaultPrometheusURL && strings.TrimSpace(c.MetricsURL) != "" {
+			return c.queryMetricsOverview(ctx)
+		}
+		return Model{}, err
+	}
+	return model, nil
+}
+
+func (c Client) queryPrometheusOverview(ctx context.Context) (Model, error) {
 	healthScore, err := c.queryPrometheusScalar(ctx, "odin_os_health_score")
 	if err != nil {
 		return Model{}, err
@@ -196,6 +215,16 @@ func (c Client) QueryOverview(ctx context.Context) (Model, error) {
 }
 
 func (c Client) QueryRecentLogs(ctx context.Context) ([]LogEntry, error) {
+	if c.LokiURL == "" || c.LokiURL == "http://127.0.0.1:3100" {
+		if logs, err := queryLocalOdinContainerLogs(ctx); err == nil {
+			return logs, nil
+		}
+	}
+
+	if c.LokiURL == "" {
+		c.LokiURL = "http://127.0.0.1:3100"
+	}
+
 	baseURL, err := url.Parse(c.LokiURL)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid loki url: %v", ErrUnavailableTelemetry, err)
@@ -260,12 +289,192 @@ func (c Client) QueryRecentLogs(ctx context.Context) ([]LogEntry, error) {
 	return entries, nil
 }
 
+func queryLocalOdinContainerLogs(ctx context.Context) ([]LogEntry, error) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, "docker", "logs", "--timestamps", "--tail", "10", "odin-overseer")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	entries := make([]LogEntry, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		timestamp, message, ok := strings.Cut(line, " ")
+		if !ok {
+			timestamp = ""
+			message = line
+		}
+		entries = append(entries, LogEntry{
+			Timestamp: timestamp,
+			Line:      message,
+			Labels:    map[string]string{"source": "docker", "container": "odin-overseer"},
+		})
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("no odin-overseer logs returned")
+	}
+	return entries, nil
+}
+
 func isTelemetryQueryLog(line string) bool {
 	return strings.Contains(line, "component=querier") ||
 		strings.Contains(line, "component=frontend") ||
 		strings.Contains(line, "caller=metrics.go") ||
 		strings.Contains(line, "caller=engine.go") ||
 		strings.Contains(line, "caller=roundtrip.go")
+}
+
+func (c Client) queryMetricsOverview(ctx context.Context) (Model, error) {
+	values, err := c.queryMetricsEndpoint(ctx)
+	if err != nil {
+		return Model{}, err
+	}
+	healthScore, err := metricsScalar(values, "odin_os_health_score")
+	if err != nil {
+		return Model{}, err
+	}
+	telemetryStale, err := metricsScalar(values, "odin_os_telemetry_stale")
+	if err != nil {
+		return Model{}, err
+	}
+	status, err := metricsActiveLabel(values, "odin_os_status", "status")
+	if err != nil {
+		return Model{}, err
+	}
+	lifecyclePhase, err := metricsActiveLabel(values, "odin_os_lifecycle_phase", "phase")
+	if err != nil {
+		return Model{}, err
+	}
+	activeRuns, err := metricsScalar(values, "odin_active_runs")
+	if err != nil {
+		return Model{}, err
+	}
+	blockedItems, err := metricsScalar(values, "odin_blocked_items")
+	if err != nil {
+		return Model{}, err
+	}
+	approvalsWaiting, err := metricsScalar(values, "odin_approvals_waiting")
+	if err != nil {
+		return Model{}, err
+	}
+	reviewQueueItems, err := metricsScalar(values, "odin_review_queue_items")
+	if err != nil {
+		return Model{}, err
+	}
+	failedWorkItems, err := metricsScalar(values, "odin_failed_work_items")
+	if err != nil {
+		return Model{}, err
+	}
+	recoveryRecommendations, err := metricsScalar(values, "odin_recovery_recommendations")
+	if err != nil {
+		return Model{}, err
+	}
+
+	return Model{
+		TelemetryAvailable:      true,
+		Status:                  status,
+		HealthScore:             int(math.Round(healthScore)),
+		TelemetryStale:          telemetryStale >= 1,
+		LifecyclePhase:          lifecyclePhase,
+		ActiveRuns:              int(math.Round(activeRuns)),
+		BlockedItems:            int(math.Round(blockedItems)),
+		ApprovalsWaiting:        int(math.Round(approvalsWaiting)),
+		ReviewQueueItems:        int(math.Round(reviewQueueItems)),
+		FailedWorkItems:         int(math.Round(failedWorkItems)),
+		RecoveryRecommendations: int(math.Round(recoveryRecommendations)),
+	}, nil
+}
+
+func (c Client) queryMetricsEndpoint(ctx context.Context) (map[string][]metricsSample, error) {
+	baseURL, err := url.Parse(c.MetricsURL)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid metrics url: %v", ErrUnavailableTelemetry, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: metrics request: %v", ErrUnavailableTelemetry, err)
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: metrics endpoint failed: %v", ErrUnavailableTelemetry, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("%w: metrics endpoint returned HTTP %d", ErrUnavailableTelemetry, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	if err != nil {
+		return nil, fmt.Errorf("%w: metrics endpoint read failed: %v", ErrUnavailableTelemetry, err)
+	}
+	return parseMetricsSamples(string(body)), nil
+}
+
+type metricsSample struct {
+	Labels map[string]string
+	Value  float64
+}
+
+func parseMetricsSamples(body string) map[string][]metricsSample {
+	samples := map[string][]metricsSample{}
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		nameAndLabels, rawValue, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		value, err := strconv.ParseFloat(strings.TrimSpace(rawValue), 64)
+		if err != nil {
+			continue
+		}
+		name := nameAndLabels
+		labels := map[string]string{}
+		if before, after, ok := strings.Cut(nameAndLabels, "{"); ok {
+			name = before
+			labels = parseMetricLabels(strings.TrimSuffix(after, "}"))
+		}
+		samples[name] = append(samples[name], metricsSample{Labels: labels, Value: value})
+	}
+	return samples
+}
+
+func parseMetricLabels(raw string) map[string]string {
+	labels := map[string]string{}
+	for _, part := range strings.Split(raw, ",") {
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		labels[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), `"`)
+	}
+	return labels
+}
+
+func metricsScalar(samples map[string][]metricsSample, name string) (float64, error) {
+	values := samples[name]
+	if len(values) == 0 {
+		return 0, fmt.Errorf("%w: metrics endpoint missing %q", ErrUnavailableTelemetry, name)
+	}
+	return values[0].Value, nil
+}
+
+func metricsActiveLabel(samples map[string][]metricsSample, name string, label string) (string, error) {
+	for _, sample := range samples[name] {
+		if sample.Value > 0 {
+			if got := sample.Labels[label]; got != "" {
+				return got, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("%w: metrics endpoint %q returned no active %s label", ErrUnavailableTelemetry, name, label)
 }
 
 func (c Client) queryPrometheusScalar(ctx context.Context, query string) (float64, error) {
@@ -307,7 +516,7 @@ func (c Client) queryPrometheusOne(ctx context.Context, query string) (prometheu
 }
 
 func (c Client) queryPrometheus(ctx context.Context, query string) (prometheusQueryResponse, error) {
-	baseURL, err := url.Parse(c.PrometheusURL)
+	baseURL, err := url.Parse(c.prometheusURL())
 	if err != nil {
 		return prometheusQueryResponse{}, fmt.Errorf("%w: invalid prometheus url: %v", ErrUnavailableTelemetry, err)
 	}
@@ -344,6 +553,13 @@ func (c Client) queryPrometheus(ctx context.Context, query string) (prometheusQu
 		return prometheusQueryResponse{}, fmt.Errorf("%w: prometheus query %q status=%s", ErrUnavailableTelemetry, query, decoded.Status)
 	}
 	return decoded, nil
+}
+
+func (c Client) prometheusURL() string {
+	if strings.TrimSpace(c.PrometheusURL) == "" {
+		return defaultPrometheusURL
+	}
+	return c.PrometheusURL
 }
 
 func (c Client) httpClient() *http.Client {
