@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -95,6 +96,25 @@ type browserSessionRunnerListView struct {
 
 type browserSessionRunnerPlanEnvelope struct {
 	Plan browserSessionRunnerPlanView `json:"plan"`
+}
+
+type browserSessionXBioApplyEnvelope struct {
+	Result browserSessionXBioApplyView `json:"result"`
+}
+
+type browserSessionXBioApplyView struct {
+	Status              string `json:"status"`
+	TaskID              int64  `json:"task_id"`
+	RunID               int64  `json:"run_id"`
+	RunArtifactID       int64  `json:"run_artifact_id"`
+	ApprovalID          int64  `json:"approval_id"`
+	SessionID           int64  `json:"session_id"`
+	ArtifactID          int64  `json:"artifact_id"`
+	ProfilePath         string `json:"profile_path"`
+	MaterializationPath string `json:"materialization_path"`
+	Summary             string `json:"summary"`
+	ErrorCode           string `json:"error_code,omitempty"`
+	ErrorMessage        string `json:"error_message,omitempty"`
 }
 
 const (
@@ -592,6 +612,18 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 			return fmt.Errorf("browser session proof failed")
 		}
 		return nil
+	case "apply-x-bio":
+		result, err := applyXBioChange(ctx, app, command)
+		if command.JSON {
+			if writeErr := commands.WriteJSON(stdout, browserSessionXBioApplyEnvelope{Result: result}); writeErr != nil {
+				return writeErr
+			}
+		} else {
+			if _, writeErr := fmt.Fprintf(stdout, "browser_session_apply_x_bio task=%d run=%d status=%s artifact=%d\n", result.TaskID, result.RunID, result.Status, result.RunArtifactID); writeErr != nil {
+				return writeErr
+			}
+		}
+		return err
 	case "handoff":
 		handoff, err := app.Store.GetBrowserSessionLoginHandoff(ctx, command.HandoffID)
 		if err != nil {
@@ -609,6 +641,256 @@ func runBrowserSession(ctx context.Context, app bootstrap.App, command commands.
 		return runBrowserSessionProfile(ctx, app, command, stdout)
 	default:
 		return fmt.Errorf(commands.BrowserUsage)
+	}
+}
+
+type xBioDriverResponse struct {
+	Status    string         `json:"status"`
+	ToolKey   string         `json:"tool_key"`
+	Summary   string         `json:"summary"`
+	Artifacts map[string]any `json:"artifacts"`
+}
+
+func applyXBioChange(ctx context.Context, app bootstrap.App, command commands.BrowserCommand) (browserSessionXBioApplyView, error) {
+	view := browserSessionXBioApplyView{
+		Status:     "failed",
+		TaskID:     command.TaskID,
+		ApprovalID: command.ApprovalID,
+		SessionID:  command.ID,
+	}
+	session, err := app.Store.GetBrowserSession(ctx, command.ID)
+	if err != nil {
+		return view, err
+	}
+	view.ProfilePath = session.ProfilePath
+	if session.Status != sqlite.BrowserSessionStatusVerified {
+		return view, fmt.Errorf("browser session %d must be verified before X bio mutation; status=%s", session.ID, session.Status)
+	}
+	if !isXBrowserSessionDomain(session.Domain) {
+		return view, fmt.Errorf("browser session %d domain %q is not an X domain", session.ID, session.Domain)
+	}
+	targetURL := strings.TrimSpace(command.URL)
+	if targetURL == "" {
+		targetURL = "https://x.com/settings/profile"
+	}
+	hostAllowed, hostEvidence := browserSessionProofURLMatchesDomain(targetURL, session.Domain)
+	if !hostAllowed {
+		return view, fmt.Errorf("X bio URL does not match browser session domain: %s", hostEvidence)
+	}
+	approval, err := app.Store.GetApproval(ctx, command.ApprovalID)
+	if err != nil {
+		return view, err
+	}
+	if approval.TaskID != command.TaskID {
+		return view, fmt.Errorf("approval %d belongs to task %d, not task %d", approval.ID, approval.TaskID, command.TaskID)
+	}
+	if approval.Status != "approved" {
+		return view, fmt.Errorf("approval %d must be approved before X bio mutation; status=%s", approval.ID, approval.Status)
+	}
+	task, err := app.Store.GetTask(ctx, command.TaskID)
+	if err != nil {
+		return view, err
+	}
+	if task.Status == "completed" || task.Status == "failed" {
+		return view, fmt.Errorf("task %d is already %s", task.ID, task.Status)
+	}
+	artifacts, err := app.Store.ListBrowserEncryptedProfileArtifacts(ctx, sqlite.ListBrowserEncryptedProfileArtifactsParams{
+		SessionID: session.ID,
+		Status:    sqlite.BrowserEncryptedProfileArtifactStatusEncrypted,
+	})
+	if err != nil {
+		return view, err
+	}
+	if len(artifacts) == 0 {
+		return view, fmt.Errorf("encrypted browser profile artifact is required before X bio mutation")
+	}
+	artifact := artifacts[len(artifacts)-1]
+	view.ArtifactID = artifact.ID
+	attempt, err := nextBrowserMutationAttempt(ctx, app.Store, task.ID)
+	if err != nil {
+		return view, err
+	}
+	run, err := app.Store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     task.ID,
+		Executor:   "browser_x_bio",
+		Attempt:    attempt,
+		Status:     "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		return view, err
+	}
+	view.RunID = run.ID
+	materializationPath := filepath.ToSlash(filepath.Join("runtime", "browser-profile-materializations", fmt.Sprintf("x-bio-task-%d-run-%d-artifact-%d", task.ID, run.ID, artifact.ID)))
+	materialized, err := browserprofilematerialize.MaterializeDirectory(ctx, browserprofilematerialize.Params{
+		Store:       app.Store,
+		ODINRoot:    app.RuntimeRoot,
+		Artifact:    artifact,
+		TargetDir:   filepath.Join(app.RuntimeRoot, filepath.FromSlash(materializationPath)),
+		KeyProvider: browserprofilekeys.LoadFromEnv,
+		Actor:       "browser_x_bio",
+		Reason:      "materialize encrypted profile for approved X bio mutation",
+	})
+	if err != nil {
+		return view, finishXBioRun(ctx, app, run.ID, "failed", "X bio profile materialization failed", "profile_materialization_failed", err.Error(), "")
+	}
+	view.MaterializationPath = materialized.MaterializationPath
+	driverResponse, driverErr := runXBioDriver(ctx, app, targetURL, strings.TrimSpace(command.Bio), materialized.MaterializationPath, task.ID, run.ID, approval.ID)
+	details, marshalErr := json.Marshal(map[string]any{
+		"executor":               "browser_x_bio",
+		"task_id":                task.ID,
+		"run_id":                 run.ID,
+		"approval_id":            approval.ID,
+		"session_id":             session.ID,
+		"artifact_id":            artifact.ID,
+		"target_url":             targetURL,
+		"materialization_path":   materialized.MaterializationPath,
+		"driver_status":          driverResponse.Status,
+		"driver_tool_key":        driverResponse.ToolKey,
+		"driver_summary":         driverResponse.Summary,
+		"driver_artifacts":       driverResponse.Artifacts,
+		"mutation_approved":      true,
+		"external_mutation_kind": "x_profile_bio",
+	})
+	if marshalErr != nil {
+		return view, marshalErr
+	}
+	summary := strings.TrimSpace(driverResponse.Summary)
+	if summary == "" {
+		summary = "Applied approved X bio change through Browser Control."
+	}
+	artifactRow, err := app.Store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        run.ID,
+		ArtifactType: "browser_x_bio",
+		Summary:      summary,
+		DetailsJSON:  string(details),
+	})
+	if err != nil {
+		return view, err
+	}
+	view.RunArtifactID = artifactRow.ID
+	artifactsJSON := fmt.Sprintf(`[{"type":"browser_x_bio","run_artifact_id":%d,"summary":%q}]`, artifactRow.ID, artifactRow.Summary)
+	if driverErr != nil || driverResponse.Status != "completed" {
+		errorMessage := ""
+		if driverErr != nil {
+			errorMessage = driverErr.Error()
+		} else {
+			errorMessage = summary
+		}
+		return view, finishXBioRun(ctx, app, run.ID, "failed", summary, "x_bio_mutation_failed", errorMessage, artifactsJSON)
+	}
+	finishedTask, _, err := app.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+		RunID:          run.ID,
+		RunStatus:      "completed",
+		TaskStatus:     "completed",
+		Summary:        summary,
+		TerminalReason: "x_bio_mutation_completed",
+		ArtifactsJSON:  artifactsJSON,
+	})
+	if err != nil {
+		return view, err
+	}
+	_ = finishedTask
+	view.Status = "completed"
+	view.Summary = summary
+	return view, nil
+}
+
+func finishXBioRun(ctx context.Context, app bootstrap.App, runID int64, status string, summary string, code string, message string, artifactsJSON string) error {
+	taskStatus := "failed"
+	if status == "completed" {
+		taskStatus = "completed"
+	}
+	_, _, err := app.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
+		RunID:          runID,
+		RunStatus:      status,
+		TaskStatus:     taskStatus,
+		Summary:        summary,
+		TerminalReason: code,
+		ArtifactsJSON:  artifactsJSON,
+	})
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("%s: %s", code, message)
+}
+
+func runXBioDriver(ctx context.Context, app bootstrap.App, targetURL string, bio string, materializationPath string, taskID int64, runID int64, approvalID int64) (xBioDriverResponse, error) {
+	driverPath, err := xBioDriverPath(app)
+	if err != nil {
+		return xBioDriverResponse{}, err
+	}
+	payload, err := json.Marshal(map[string]any{
+		"tool_key": "browser_x_profile_bio_update",
+		"input": map[string]any{
+			"target_url":  targetURL,
+			"bio":         bio,
+			"label":       fmt.Sprintf("task-%d-x-bio", taskID),
+			"task_id":     taskID,
+			"run_id":      runID,
+			"approval_id": approvalID,
+		},
+	})
+	if err != nil {
+		return xBioDriverResponse{}, err
+	}
+	cmd := exec.CommandContext(ctx, driverPath)
+	cmd.Stdin = strings.NewReader(string(payload))
+	cmd.Env = append(os.Environ(),
+		"ODIN_ROOT="+app.RuntimeRoot,
+		"ODIN_DIR="+app.RuntimeRoot,
+		"ODIN_CHROME_PROFILE_DIR="+filepath.Join(app.RuntimeRoot, filepath.FromSlash(materializationPath)),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return xBioDriverResponse{}, fmt.Errorf("X bio driver failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	var response xBioDriverResponse
+	if decodeErr := json.Unmarshal(output, &response); decodeErr != nil {
+		return xBioDriverResponse{}, fmt.Errorf("decode X bio driver response: %w: %s", decodeErr, strings.TrimSpace(string(output)))
+	}
+	return response, nil
+}
+
+func xBioDriverPath(app bootstrap.App) (string, error) {
+	commandPath := filepath.Clean(strings.TrimSpace(os.Getenv("ODIN_X_BIO_DRIVER")))
+	if commandPath == "." || commandPath == "" {
+		commandPath = filepath.Join(app.RepoRoot, "scripts", "drivers", "huginn-x-profile-bio-update.sh")
+	}
+	if !filepath.IsAbs(commandPath) {
+		return commandPath, fmt.Errorf("ODIN_X_BIO_DRIVER must be an absolute path")
+	}
+	allowed := os.Getenv("ODIN_X_BIO_ALLOWED_DRIVERS")
+	if strings.TrimSpace(allowed) == "" {
+		allowed = commandPath
+	}
+	if !browserProofCommandAllowlisted(commandPath, allowed) {
+		return commandPath, fmt.Errorf("X bio driver %s must be listed in ODIN_X_BIO_ALLOWED_DRIVERS", commandPath)
+	}
+	info, err := os.Stat(commandPath)
+	if err != nil {
+		return commandPath, fmt.Errorf("X bio driver stat: %w", err)
+	}
+	if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+		return commandPath, fmt.Errorf("X bio driver must be executable")
+	}
+	return commandPath, nil
+}
+
+func nextBrowserMutationAttempt(ctx context.Context, store *sqlite.Store, taskID int64) (int, error) {
+	var attempt int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COALESCE(MAX(attempt), 0) + 1 FROM runs WHERE task_id = ?`, taskID).Scan(&attempt); err != nil {
+		return 0, err
+	}
+	return attempt, nil
+}
+
+func isXBrowserSessionDomain(domain string) bool {
+	switch strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), ".")) {
+	case "x.com", "www.x.com", "twitter.com", "www.twitter.com":
+		return true
+	default:
+		return false
 	}
 }
 
