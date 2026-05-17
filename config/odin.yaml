@@ -9,5 +9,5 @@ service:
     recipient: marcusgoll@gmail.com
     base_url: http://127.0.0.1:9443
     secret_env: ODIN_EMAIL_ACTION_SECRET
-    sendmail_path: /usr/sbin/sendmail
+    sendmail_path: /usr/bin/msmtp
     from: odin-os@localhost

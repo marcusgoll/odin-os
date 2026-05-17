@@ -19,6 +19,8 @@ projects_overlay="${ODIN_PROJECTS_OVERLAY:-$HOME/.config/odin/odin-os-projects.l
 codex_driver="${ODIN_CODEX_DRIVER:-$HOME/.config/odin/odin-codex-live-driver.sh}"
 handoff_base_url="${ODIN_BROWSER_HANDOFF_BASE_URL:-https://odin.marcusgoll.com/browser/session/handoff}"
 family_ops_worktree="${ODIN_FAMILY_OPS_CUTOVER_WORKTREE:-$HOME/.config/superpowers/worktrees/family-ops/odin-os-cutover-main}"
+msmtp_bin="${ODIN_EMAIL_ACTION_MSMTP_BIN:-/usr/bin/msmtp}"
+msmtp_config="${ODIN_EMAIL_ACTION_MSMTP_CONFIG:-/etc/msmtprc}"
 
 if [[ ! -f "$env_file" ]]; then
   echo "missing env file: $env_file" >&2
@@ -35,6 +37,17 @@ fi
 if [[ ! -f "$nginx_config" ]]; then
   echo "missing nginx config: $nginx_config" >&2
   exit 1
+fi
+
+email_mounts=()
+if [[ -x "$msmtp_bin" ]]; then
+  email_mounts+=(-v "$msmtp_bin:/usr/bin/msmtp:ro")
+fi
+if [[ -f "$msmtp_config" ]]; then
+  email_mounts+=(-v "$msmtp_config:/etc/msmtprc:ro")
+fi
+if [[ -d /etc/ssl/certs ]]; then
+  email_mounts+=(-v /etc/ssl/certs:/etc/ssl/certs:ro)
 fi
 
 if docker ps -a --format '{{.Names}}' | grep -qx "$container_name"; then
@@ -77,6 +90,7 @@ docker run "${docker_args[@]}" \
   -v "$HOME/cfipros:$HOME/cfipros:ro" \
   -v "$HOME/marcusgoll:$HOME/marcusgoll:ro" \
   -v "$family_ops_worktree:$family_ops_worktree:ro" \
+  "${email_mounts[@]}" \
   -v /var/odin/browser-state/novnc-root:/var/odin/browser-state/novnc-root:ro \
   -v /opt/google/chrome:/opt/google/chrome:ro \
   -v /etc/alternatives/google-chrome:/etc/alternatives/google-chrome:ro \
