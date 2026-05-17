@@ -19,6 +19,7 @@ printf '{"status":"completed"}'
 	t.Setenv("OPENAI_API_KEY", "sk-secret")
 	t.Setenv("ODIN_ADMIN_TOKEN", "admin-secret")
 	t.Setenv("ODIN_CODEX_SANDBOX_MODE", "workspace-write")
+	t.Setenv("ODIN_CODEX_HOST_DRIVER_SOCKET", "/tmp/odin-codex-driver.sock")
 	t.Setenv("ODIN_ROOT", "/tmp/odin-root")
 
 	var response struct {
@@ -44,7 +45,7 @@ printf '{"status":"completed"}'
 			t.Fatalf("driver env contains forbidden value %q in:\n%s", forbidden, env)
 		}
 	}
-	for _, required := range []string{"PATH=", "ODIN_CODEX_SANDBOX_MODE=workspace-write", "ODIN_ROOT=/tmp/odin-root"} {
+	for _, required := range []string{"PATH=", "ODIN_CODEX_SANDBOX_MODE=workspace-write", "ODIN_CODEX_HOST_DRIVER_SOCKET=/tmp/odin-codex-driver.sock", "ODIN_ROOT=/tmp/odin-root"} {
 		if !strings.Contains(env, required) {
 			t.Fatalf("driver env missing required value %q in:\n%s", required, env)
 		}

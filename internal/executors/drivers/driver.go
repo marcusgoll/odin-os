@@ -31,6 +31,7 @@ var inheritedWorkerEnvAllowlist = map[string]struct{}{
 	"ODIN_CODEX_DRIVER_TRACE":           {},
 	"ODIN_CODEX_DRIVER_HEALTH_RESPONSE": {},
 	"ODIN_CODEX_DRIVER_RUN_RESPONSE":    {},
+	"ODIN_CODEX_HOST_DRIVER_SOCKET":     {},
 	"ODIN_DRIVER_REQUEST_PATH":          {},
 }
 
