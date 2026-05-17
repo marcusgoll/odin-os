@@ -1795,6 +1795,73 @@ func TestRunBrowserSessionProfileArtifactCreateFixtureFailsClosed(t *testing.T) 
 	}
 }
 
+func TestRunBrowserSessionProfileArtifactCreateDirectoryAndMaterializeDirectory(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := testRepoRoot(t)
+	key := bytes.Repeat([]byte{0x62}, browserprofilecrypto.KeySize)
+	encodedKey := base64.StdEncoding.EncodeToString(key)
+	t.Setenv(browserprofilekeys.EnvKeyB64, encodedKey)
+
+	sourceDir := filepath.Join(t.TempDir(), "chrome-profile")
+	if err := os.MkdirAll(filepath.Join(sourceDir, "Default"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(source profile) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "Default", "Preferences"), []byte("saved-profile-state"), 0o600); err != nil {
+		t.Fatalf("WriteFile(source profile) error = %v", err)
+	}
+
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &output); err != nil {
+			t.Fatalf("Run(%v) error = %v\noutput=%s", args, err, output.String())
+		}
+		return output.String()
+	}
+
+	created := decodeBrowserSessionEnvelope(t, []byte(run(
+		"browser", "session", "create",
+		"--name", "directory-artifact",
+		"--domain", "x.com",
+		"--permission-tier", "authenticated_read",
+		"--json",
+	)))
+	createOutput := run(
+		"browser", "session", "profile", "artifact", "create-directory",
+		"--session-id", int64String(created.ID),
+		"--name", "x-managed-profile",
+		"--source-dir", sourceDir,
+		"--json",
+	)
+	for _, forbidden := range []string{"saved-profile-state", sourceDir, encodedKey} {
+		if strings.Contains(createOutput, forbidden) {
+			t.Fatalf("create-directory output leaked forbidden marker %q: %s", forbidden, createOutput)
+		}
+	}
+	artifact := decodeBrowserSessionProfileArtifactEnvelope(t, []byte(createOutput))
+	targetDir := "runtime/browser-profile-materializations/directory-cli-proof"
+	materializeOutput := run(
+		"browser", "session", "profile", "artifact", "materialize-directory",
+		"--id", int64String(artifact.ID),
+		"--target-dir", targetDir,
+		"--json",
+	)
+	if strings.Contains(materializeOutput, "saved-profile-state") || strings.Contains(materializeOutput, sourceDir) {
+		t.Fatalf("materialize-directory output leaked source/profile state: %s", materializeOutput)
+	}
+	materialization := decodeBrowserSessionProfileMaterializationEnvelope(t, []byte(materializeOutput))
+	if materialization.MaterializationPath != targetDir || materialization.ReadOnly {
+		t.Fatalf("materialization = %+v, want writable directory materialization", materialization)
+	}
+	got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(targetDir), "Default", "Preferences"))
+	if err != nil {
+		t.Fatalf("ReadFile(materialized preferences) error = %v", err)
+	}
+	if string(got) != "saved-profile-state" {
+		t.Fatalf("materialized preferences = %q", got)
+	}
+}
+
 func TestRunBrowserSessionProfileArtifactMaterializeAndCleanup(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := testRepoRoot(t)

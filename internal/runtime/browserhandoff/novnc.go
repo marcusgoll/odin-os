@@ -22,6 +22,8 @@ const (
 	NoVNCRealBrowserEnvVar       = "ODIN_NOVNC_REAL_BROWSER"
 	NoVNCRealDisplayEnvVar       = "ODIN_NOVNC_REAL_DISPLAY"
 	NoVNCRealWebsockifyEnvVar    = "ODIN_NOVNC_REAL_WEBSOCKIFY"
+	BrowserProfileDirEnvVar      = "ODIN_BROWSER_PROFILE_DIR"
+	BrowserStartURLEnvVar        = "ODIN_BROWSER_START_URL"
 
 	defaultNoVNCBindAddr = "127.0.0.1:0"
 
@@ -135,6 +137,7 @@ func (runner NoVNCRunner) Start(ctx context.Context, request StartRequest) (Star
 		handle, err := supervisor.StartProcess(ctx, StartProcessRequest{
 			Role:            command.Role,
 			CommandPath:     command.Path,
+			Env:             noVNCProcessEnv(command.Role, request),
 			TimeoutSeconds:  config.TimeoutSeconds,
 			AllowedCommands: config.AllowedCommandPaths,
 		})
@@ -203,6 +206,28 @@ func (runner NoVNCRunner) Start(ctx context.Context, request StartRequest) (Star
 	response.ChildProcesses = results
 	response.Status = StatusCompleted
 	return response, nil
+}
+
+func noVNCProcessEnv(role string, request StartRequest) []string {
+	if role != NoVNCBrowserCommandRole {
+		return nil
+	}
+	profileDir := strings.TrimSpace(request.BrowserProfileDir)
+	if profileDir == "" {
+		return nil
+	}
+	return []string{
+		BrowserProfileDirEnvVar + "=" + filepath.Clean(profileDir),
+		BrowserStartURLEnvVar + "=" + noVNCStartURL(request.AllowedDomain),
+	}
+}
+
+func noVNCStartURL(domain string) string {
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if domain == "" {
+		return "about:blank"
+	}
+	return "https://" + domain + "/"
 }
 
 func newNoVNCStartResponse(request StartRequest, config NoVNCLaunchConfig, handles []ProcessHandle, results []ProcessResult) StartResponse {

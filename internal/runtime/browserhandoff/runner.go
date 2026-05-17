@@ -17,15 +17,16 @@ const (
 )
 
 type StartRequest struct {
-	SessionID      int64  `json:"session_id"`
-	LoginRequestID int64  `json:"login_request_id"`
-	HandoffID      string `json:"handoff_id"`
-	ProfilePath    string `json:"profile_path"`
-	AllowedDomain  string `json:"allowed_domain"`
-	TimeoutSeconds int    `json:"timeout_seconds"`
-	BindAddr       string `json:"bind_addr,omitempty"`
-	PrivateBaseURL string `json:"private_base_url,omitempty"`
-	PublicBaseURL  string `json:"public_base_url,omitempty"`
+	SessionID         int64  `json:"session_id"`
+	LoginRequestID    int64  `json:"login_request_id"`
+	HandoffID         string `json:"handoff_id"`
+	ProfilePath       string `json:"profile_path"`
+	BrowserProfileDir string `json:"browser_profile_dir,omitempty"`
+	AllowedDomain     string `json:"allowed_domain"`
+	TimeoutSeconds    int    `json:"timeout_seconds"`
+	BindAddr          string `json:"bind_addr,omitempty"`
+	PrivateBaseURL    string `json:"private_base_url,omitempty"`
+	PublicBaseURL     string `json:"public_base_url,omitempty"`
 }
 
 type StartResponse struct {
@@ -109,6 +110,9 @@ func ValidateStartRequest(request StartRequest) error {
 	if err := validateProfilePath(request.ProfilePath); err != nil {
 		return err
 	}
+	if err := validateBrowserProfileDir(request.BrowserProfileDir); err != nil {
+		return err
+	}
 	if err := validateAllowedDomain(request.AllowedDomain); err != nil {
 		return err
 	}
@@ -120,6 +124,21 @@ func ValidateStartRequest(request StartRequest) error {
 	}
 	if strings.TrimSpace(request.PublicBaseURL) != "" {
 		return fmt.Errorf("public_base_url is not supported by the stub boundary")
+	}
+	return nil
+}
+
+func validateBrowserProfileDir(profileDir string) error {
+	profileDir = strings.TrimSpace(profileDir)
+	if profileDir == "" {
+		return nil
+	}
+	if !filepath.IsAbs(profileDir) {
+		return fmt.Errorf("browser_profile_dir must be absolute")
+	}
+	clean := filepath.Clean(profileDir)
+	if clean == string(filepath.Separator) || strings.Contains(filepath.ToSlash(clean), "/../") {
+		return fmt.Errorf("browser_profile_dir must be a concrete directory path")
 	}
 	return nil
 }

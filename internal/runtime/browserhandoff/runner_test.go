@@ -765,6 +765,52 @@ func TestNoVNCRunnerStartDoesNotPassProfileStorageToRealBrowser(t *testing.T) {
 	}
 }
 
+func TestNoVNCRunnerStartPassesManagedProfileEnvOnlyToBrowserRole(t *testing.T) {
+	commandPath := testExecutablePath(t, "true")
+	browserPath := writeProcessTestScript(t, "browser", "#!/bin/sh\nexit 0\n")
+	supervisor := &fakeNoVNCProcessSupervisor{}
+	runner := NoVNCRunner{
+		Supervisor: supervisor,
+		LoadConfig: func() (NoVNCLaunchConfig, error) {
+			config := validNoVNCLaunchConfig(commandPath)
+			config.BrowserCommand = browserPath
+			config.AllowedCommandPaths = []string{commandPath, browserPath}
+			config.RealBrowserEnabled = true
+			return config, nil
+		},
+	}
+	request := validFixtureStartRequest()
+	request.BrowserProfileDir = filepath.Join(t.TempDir(), "profile")
+	request.AllowedDomain = "X.COM"
+
+	response, err := runner.Start(context.Background(), request)
+	if err != nil {
+		t.Fatalf("NoVNCRunner.Start(managed profile env) error = %v", err)
+	}
+	if response.Status != StatusCompleted {
+		t.Fatalf("response.Status = %q, want completed", response.Status)
+	}
+	if len(supervisor.started) != 3 {
+		t.Fatalf("started processes = %+v, want display/browser/websockify", supervisor.started)
+	}
+	if len(supervisor.started[0].Env) != 0 || len(supervisor.started[2].Env) != 0 {
+		t.Fatalf("non-browser env = display:%v websockify:%v, want empty", supervisor.started[0].Env, supervisor.started[2].Env)
+	}
+	browserStart := supervisor.started[1]
+	wantEnv := []string{
+		BrowserProfileDirEnvVar + "=" + filepath.Clean(request.BrowserProfileDir),
+		BrowserStartURLEnvVar + "=https://x.com/",
+	}
+	if strings.Join(browserStart.Env, "\n") != strings.Join(wantEnv, "\n") {
+		t.Fatalf("browser env = %v, want %v", browserStart.Env, wantEnv)
+	}
+	for _, forbidden := range []string{"cookie", "password", "totp", "credential"} {
+		if strings.Contains(strings.ToLower(strings.Join(browserStart.Env, " ")), forbidden) {
+			t.Fatalf("browser env leaked forbidden marker %q: %v", forbidden, browserStart.Env)
+		}
+	}
+}
+
 func TestNoVNCRunnerStartRejectsInvalidLaunchConfig(t *testing.T) {
 	commandPath := testExecutablePath(t, "true")
 	supervisor := &fakeNoVNCProcessSupervisor{}
