@@ -154,7 +154,9 @@ func (service Service) tickGoal(ctx context.Context, goal sqlite.Goal) (TickGoal
 		return service.startApprovedGoal(ctx, goal)
 	case sqlite.GoalStatusRunning:
 		return service.blockRunningGoalWithoutExecutor(ctx, goal)
-	case sqlite.GoalStatusBlocked, sqlite.GoalStatusCompleted, sqlite.GoalStatusWaitingForHuman, sqlite.GoalStatusWaitingForExternal, sqlite.GoalStatusVerifying:
+	case sqlite.GoalStatusBlocked:
+		return service.recoverBlockedGoalWithExecutor(ctx, goal)
+	case sqlite.GoalStatusCompleted, sqlite.GoalStatusWaitingForHuman, sqlite.GoalStatusWaitingForExternal, sqlite.GoalStatusVerifying:
 		return service.observe(ctx, goal, TickActionSkipped, TickReasonStatusSkipped, goal.Status, nil)
 	default:
 		return service.observe(ctx, goal, TickActionSkipped, TickReasonStatusSkipped, goal.Status, nil)
@@ -298,6 +300,49 @@ func (service Service) blockRunningGoalWithoutExecutor(ctx context.Context, goal
 		return TickGoalResult{}, err
 	}
 	return service.observe(ctx, goal, TickActionBlocked, TickReasonNoExecutor, updated.Status, runID)
+}
+
+func (service Service) recoverBlockedGoalWithExecutor(ctx context.Context, goal sqlite.Goal) (TickGoalResult, error) {
+	activeRun, err := service.Store.GetActiveGoalRunByGoalID(ctx, goal.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return service.observe(ctx, goal, TickActionSkipped, TickReasonStatusSkipped, goal.Status, nil)
+		}
+		return TickGoalResult{}, err
+	}
+	runID := activeRun.ID
+	if activeRun.Executor == "" {
+		return service.observe(ctx, goal, TickActionSkipped, TickReasonStatusSkipped, goal.Status, &runID)
+	}
+	if activeRun.Status != sqlite.GoalRunStatusRunning {
+		if _, err := service.Store.UpdateGoalRunStatus(ctx, sqlite.UpdateGoalRunStatusParams{
+			GoalRunID: activeRun.ID,
+			Status:    sqlite.GoalRunStatusRunning,
+			Summary:   "executor-backed goal run recovered",
+		}); err != nil {
+			return TickGoalResult{}, err
+		}
+	}
+	updated, err := service.Store.TransitionGoal(ctx, sqlite.TransitionGoalParams{
+		GoalID: goal.ID,
+		Status: sqlite.GoalStatusRunning,
+		Actor:  "goal_runner",
+		Reason: "executor_backed_run_recovered",
+	})
+	if err != nil {
+		return TickGoalResult{}, err
+	}
+	if _, err := service.Store.AddGoalEvidence(ctx, sqlite.AddGoalEvidenceParams{
+		GoalID:       goal.ID,
+		GoalRunID:    &runID,
+		EvidenceType: "goal_runner_recovery",
+		Summary:      "executor-backed goal run recovered from missing-executor blocker",
+		PayloadJSON:  `{"reason":"executor_backed_run_recovered"}`,
+		CreatedBy:    "goal_runner",
+	}); err != nil {
+		return TickGoalResult{}, err
+	}
+	return service.observe(ctx, goal, TickActionSkipped, TickReasonActiveRunExists, updated.Status, &runID)
 }
 
 func (service Service) observe(ctx context.Context, goal sqlite.Goal, action string, reason string, status sqlite.GoalStatus, goalRunID *int64) (TickGoalResult, error) {
