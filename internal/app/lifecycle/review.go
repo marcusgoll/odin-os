@@ -1109,7 +1109,11 @@ func reviewQueueDetail(ctx context.Context, app bootstrap.App, ref reviewQueueRe
 		if ref.Kind == "goal-approval" {
 			entry = reviewEntryFromPlannedGoal(goal)
 		}
-		return entry, commands.GoalEnvelope{Goal: newGoalView(goal)}, nil
+		envelope, err := newGoalEnvelopeWithEvidence(ctx, app.Store, goal)
+		if err != nil {
+			return reviewQueueEntry{}, nil, err
+		}
+		return entry, envelope, nil
 	case "goal-blocker":
 		blocker, goal, err := findGoalBlockerReviewDetail(ctx, app.Store, ref.ID)
 		if err != nil {
