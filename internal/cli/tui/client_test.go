@@ -226,7 +226,7 @@ odin_os_telemetry_stale 0
 		PrometheusURL: defaultPrometheusURL,
 		MetricsURL:    metrics.URL,
 		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.URL.String() == defaultPrometheusURL+"/api/v1/query" {
+			if req.URL.Scheme+"://"+req.URL.Host == defaultPrometheusURL && req.URL.Path == "/api/v1/query" {
 				return nil, fmt.Errorf("default prometheus unavailable")
 			}
 			return http.DefaultTransport.RoundTrip(req)
