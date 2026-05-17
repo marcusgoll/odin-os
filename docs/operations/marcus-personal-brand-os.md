@@ -8,6 +8,8 @@ Supported runtime path: `odin trigger seed marcus-brand-os`, `odin scheduler tic
 
 Brand authority path: `marcusgoll` owns the public voice, site, resources, and brand rules. `odin-os` owns the recurring runtime and approval-safe work materialization.
 
+The morning editorial strategist lane is command-backed and produces a reviewable strategy artifact. The writing, resource, newsletter, and growth lanes still need the same treatment before they can produce useful downstream work.
+
 ## Install Routine Triggers
 
 From `/home/orchestrator/odin-os` after building or installing the current `odin` binary:
