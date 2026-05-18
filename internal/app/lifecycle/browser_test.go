@@ -1204,7 +1204,7 @@ func TestRunBrowserSessionApplyXBioRequiresApprovalAndRecordsEvidence(t *testing
 	failDriverPath := writeLifecycleExecutable(t, "x-bio-driver-fail", `#!/bin/sh
 cat >/dev/null
 test -d "$ODIN_CHROME_PROFILE_DIR" || exit 12
-printf '{"status":"failed","tool_key":"browser_x_profile_bio_update","summary":"simulated X save failure","artifacts":{"reason":"test_failure"}}'
+printf '{"status":"failed","tool_key":"browser_x_profile_bio_update","summary":"simulated X save failure","artifacts":{"reason":"test_failure","save_clicked":true,"post_save_url":"https://x.com/home","profile_url":"https://x.com/marcusgoll","bio_verified":false,"observed_title":"Marcus / X"}}'
 `)
 	t.Setenv("ODIN_X_BIO_DRIVER", failDriverPath)
 	t.Setenv("ODIN_X_BIO_ALLOWED_DRIVERS", failDriverPath)
@@ -1225,7 +1225,7 @@ printf '{"status":"failed","tool_key":"browser_x_profile_bio_update","summary":"
 	driverPath := writeLifecycleExecutable(t, "x-bio-driver", `#!/bin/sh
 cat >/dev/null
 test -d "$ODIN_CHROME_PROFILE_DIR" || exit 12
-printf '{"status":"completed","tool_key":"browser_x_profile_bio_update","summary":"Applied approved X profile bio change through Browser Control.","artifacts":{"final_url":"https://x.com/settings/profile","title":"X","bio":"Daily autonomy proof via Odin OS."}}'
+printf '{"status":"completed","tool_key":"browser_x_profile_bio_update","summary":"Applied approved X profile bio change and verified it on the X profile page.","artifacts":{"target_url":"https://x.com/settings/profile","post_save_url":"https://x.com/home","profile_url":"https://x.com/marcusgoll","current_url":"https://x.com/marcusgoll","observed_title":"Marcus / X","save_clicked":true,"bio_verified":true,"bio":"Daily autonomy proof via Odin OS."}}'
 `)
 	t.Setenv("ODIN_X_BIO_DRIVER", driverPath)
 	t.Setenv("ODIN_X_BIO_ALLOWED_DRIVERS", driverPath)
@@ -1251,6 +1251,18 @@ printf '{"status":"completed","tool_key":"browser_x_profile_bio_update","summary
 	}
 	if run.Status != "completed" || !strings.Contains(run.ArtifactsJSON, "browser_x_bio") {
 		t.Fatalf("run = %+v, want completed browser_x_bio artifact", run)
+	}
+	artifacts, err := app.Store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{RunID: result.RunID})
+	if err != nil {
+		t.Fatalf("ListRunArtifacts() error = %v", err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("run artifacts len = %d, want 1", len(artifacts))
+	}
+	for _, want := range []string{`"save_clicked":true`, `"post_save_url":"https://x.com/home"`, `"profile_url":"https://x.com/marcusgoll"`, `"bio_verified":true`, `"observed_title":"Marcus / X"`} {
+		if !strings.Contains(artifacts[0].DetailsJSON, want) {
+			t.Fatalf("artifact details missing %s: %s", want, artifacts[0].DetailsJSON)
+		}
 	}
 }
 

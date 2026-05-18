@@ -42,6 +42,7 @@ except Exception as exc:
 payload = request.get("input") or {}
 bio = str(payload.get("bio") or "").strip()
 target_url = str(payload.get("target_url") or "https://x.com/settings/profile").strip()
+profile_url = str(payload.get("profile_url") or "").strip()
 label = str(payload.get("label") or "x-bio-update").strip() or "x-bio-update"
 task_id = str(payload.get("task_id") or "").strip()
 run_id = str(payload.get("run_id") or "").strip()
@@ -49,6 +50,8 @@ approval_id = str(payload.get("approval_id") or "").strip()
 
 parsed = urlparse(target_url)
 host = (parsed.hostname or "").strip().lower()
+profile_parsed = urlparse(profile_url) if profile_url else None
+profile_host = ((profile_parsed.hostname or "").strip().lower() if profile_parsed else "")
 if not bio:
     print("error")
     print("bio is required")
@@ -58,10 +61,14 @@ elif len(bio) > 160:
 elif parsed.scheme not in {"http", "https"} or host not in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}:
     print("error")
     print("target_url must be an X URL")
+elif profile_url and (profile_parsed.scheme not in {"http", "https"} or profile_host not in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}):
+    print("error")
+    print("profile_url must be an X URL")
 else:
     print("ok")
     print(bio)
     print(target_url)
+    print(profile_url)
     print(label)
     print(task_id)
     print(run_id)
@@ -76,10 +83,11 @@ fi
 
 bio="${request_fields[1]}"
 target_url="${request_fields[2]}"
-label="${request_fields[3]}"
-task_id="${request_fields[4]}"
-run_id="${request_fields[5]}"
-approval_id="${request_fields[6]}"
+profile_url="${request_fields[3]}"
+label="${request_fields[4]}"
+task_id="${request_fields[5]}"
+run_id="${request_fields[6]}"
+approval_id="${request_fields[7]}"
 
 if [[ -n "${ODIN_TEST_X_BIO_DRIVER_RESULT:-}" ]]; then
     printf '%s\n' "${ODIN_TEST_X_BIO_DRIVER_RESULT}"
@@ -204,6 +212,66 @@ if [[ "$(jq -r '.clicked // false' <<<"${save_state}")" != "true" ]]; then
 fi
 
 sleep 2
+post_save_state="$(json_object_or_empty "$(browser_evaluate '(() => ({current_url: location.href, title: document.title}))()' 2>/dev/null || true)")"
+post_save_url="$(jq -r '.current_url // empty' <<<"${post_save_state}")"
+
+if [[ -z "${profile_url}" ]]; then
+    find_profile_eval='(() => {
+      const absolute = (href) => {
+        try { return new URL(href, location.href).href; } catch (_) { return ""; }
+      };
+      const candidates = Array.from(document.querySelectorAll("a[href]"));
+      const profileLink = candidates.find((node) => node.getAttribute("data-testid") === "AppTabBar_Profile_Link");
+      if (profileLink) return {profile_url: absolute(profileLink.getAttribute("href")), source: "app_tab_profile_link", current_url: location.href, title: document.title};
+      const allowed = /^\/[A-Za-z0-9_]{1,15}$/;
+      const fallback = candidates.find((node) => allowed.test(node.getAttribute("href") || ""));
+      if (fallback) return {profile_url: absolute(fallback.getAttribute("href")), source: "single_segment_profile_href", current_url: location.href, title: document.title};
+      return {profile_url: "", source: "not_found", current_url: location.href, title: document.title};
+    })()'
+    profile_state="$(json_object_or_empty "$(browser_evaluate "${find_profile_eval}" 2>/dev/null || true)")"
+    profile_url="$(jq -r '.profile_url // empty' <<<"${profile_state}")"
+else
+    profile_state="$(jq -nc --arg profile_url "${profile_url}" --arg current_url "${post_save_url}" '{profile_url: $profile_url, source: "request", current_url: $current_url}')"
+fi
+
+if [[ -z "${profile_url}" ]]; then
+    artifacts_json="$(jq -nc \
+        --arg reason "profile_url_missing" \
+        --arg target_url "${target_url}" \
+        --arg post_save_url "${post_save_url}" \
+        --arg profile_url "" \
+        --arg bio "${bio}" \
+        --arg label "${label}" \
+        --arg task_id "${task_id}" \
+        --arg run_id "${run_id}" \
+        --arg approval_id "${approval_id}" \
+        --argjson save_state "${save_state}" \
+        --argjson post_save_state "${post_save_state}" \
+        --argjson profile_state "${profile_state}" \
+        '{reason: $reason, target_url: $target_url, post_save_url: $post_save_url, profile_url: $profile_url, bio: $bio, label: $label, task_id: $task_id, run_id: $run_id, approval_id: $approval_id, save_clicked: true, save_state: $save_state, post_save_state: $post_save_state, profile_state: $profile_state, bio_verified: false}')"
+    emit_json "failed" "Unable to resolve the X profile page for bio verification." "${artifacts_json}"
+    exit 0
+fi
+
+if ! browser_navigate "${profile_url}" >/dev/null 2>&1; then
+    artifacts_json="$(jq -nc \
+        --arg reason "profile_navigation_failed" \
+        --arg target_url "${target_url}" \
+        --arg post_save_url "${post_save_url}" \
+        --arg profile_url "${profile_url}" \
+        --arg bio "${bio}" \
+        --arg label "${label}" \
+        --arg task_id "${task_id}" \
+        --arg run_id "${run_id}" \
+        --arg approval_id "${approval_id}" \
+        --argjson save_state "${save_state}" \
+        --argjson post_save_state "${post_save_state}" \
+        --argjson profile_state "${profile_state}" \
+        '{reason: $reason, target_url: $target_url, post_save_url: $post_save_url, profile_url: $profile_url, bio: $bio, label: $label, task_id: $task_id, run_id: $run_id, approval_id: $approval_id, save_clicked: true, save_state: $save_state, post_save_state: $post_save_state, profile_state: $profile_state, bio_verified: false}')"
+    emit_json "failed" "Unable to navigate to the X profile page for bio verification." "${artifacts_json}"
+    exit 0
+fi
+
 verify_eval="$(python3 - "${bio}" <<'PY'
 import json
 import sys
@@ -217,13 +285,23 @@ print(f"""(() => {{
 }})()""")
 PY
 )"
-verify_state="$(json_object_or_empty "$(browser_evaluate "${verify_eval}" 2>/dev/null || true)")"
+verify_state='{}'
+for _ in $(seq 1 20); do
+    verify_state="$(json_object_or_empty "$(browser_evaluate "${verify_eval}" 2>/dev/null || true)")"
+    if [[ "$(jq -r '.bio_present // false' <<<"${verify_state}")" == "true" ]]; then
+        break
+    fi
+    sleep 0.5
+done
 current_url="$(jq -r '.current_url // empty' <<<"${verify_state}")"
 title="$(jq -r '.title // empty' <<<"${verify_state}")"
+bio_verified="$(jq -r '.bio_present // false' <<<"${verify_state}")"
 updated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 artifacts_json="$(jq -nc \
     --arg target_url "${target_url}" \
     --arg current_url "${current_url}" \
+    --arg post_save_url "${post_save_url}" \
+    --arg profile_url "${profile_url}" \
     --arg title "${title}" \
     --arg bio "${bio}" \
     --arg label "${label}" \
@@ -231,6 +309,15 @@ artifacts_json="$(jq -nc \
     --arg run_id "${run_id}" \
     --arg approval_id "${approval_id}" \
     --arg updated_at "${updated_at}" \
+    --argjson save_state "${save_state}" \
+    --argjson post_save_state "${post_save_state}" \
+    --argjson profile_state "${profile_state}" \
     --argjson verify_state "${verify_state}" \
-    '{target_url: $target_url, current_url: $current_url, title: $title, bio: $bio, label: $label, task_id: $task_id, run_id: $run_id, approval_id: $approval_id, updated_at: $updated_at, verify_state: $verify_state}')"
-emit_json "completed" "Applied approved X profile bio change through Browser Control." "${artifacts_json}"
+    '{target_url: $target_url, current_url: $current_url, post_save_url: $post_save_url, profile_url: $profile_url, title: $title, observed_title: $title, bio: $bio, label: $label, task_id: $task_id, run_id: $run_id, approval_id: $approval_id, updated_at: $updated_at, save_clicked: true, bio_verified: ($verify_state.bio_present // false), save_state: $save_state, post_save_state: $post_save_state, profile_state: $profile_state, verify_state: $verify_state}')"
+
+if [[ "${bio_verified}" != "true" ]]; then
+    emit_json "failed" "X profile bio verification failed after save." "${artifacts_json}"
+    exit 0
+fi
+
+emit_json "completed" "Applied approved X profile bio change and verified it on the X profile page." "${artifacts_json}"
