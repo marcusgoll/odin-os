@@ -330,6 +330,28 @@ func TestHeadlessRunTaskRejectsEmptyDriverStatus(t *testing.T) {
 	}
 }
 
+func TestHeadlessRunTaskUsesConfiguredRunTimeout(t *testing.T) {
+	driverPath := writeExecutable(t, "slow-driver.sh", `#!/usr/bin/env bash
+sleep 2
+printf '{"status":"completed","output":"late"}'
+`)
+	t.Setenv("ODIN_CODEX_DRIVER", driverPath)
+	t.Setenv("ODIN_CODEX_DRIVER_RUN_TIMEOUT", "1s")
+
+	_, err := NewHeadless().RunTask(context.Background(), contract.TaskSpec{
+		ID:     "runtime-smoke",
+		Kind:   contract.TaskKindGeneral,
+		Scope:  "project",
+		Prompt: "say ready",
+	})
+	if err == nil {
+		t.Fatal("RunTask() error = nil, want timeout")
+	}
+	if !strings.Contains(err.Error(), "codex driver timed out after 1s") {
+		t.Fatalf("RunTask() error = %v, want configured 1s timeout", err)
+	}
+}
+
 func TestHeadlessRunTaskWritesArtifactMetadata(t *testing.T) {
 	t.Setenv("ODIN_CODEX_DRIVER", "")
 
@@ -366,6 +388,39 @@ func TestHeadlessRunTaskWritesArtifactMetadata(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "runtime-smoke") {
 		t.Fatalf("artifact content = %q, want task id runtime-smoke", string(content))
+	}
+}
+
+func TestHeadlessRunTaskBoundsLongArtifactFilename(t *testing.T) {
+	t.Setenv("ODIN_CODEX_DRIVER", "")
+
+	worktreePath := t.TempDir()
+	longID := strings.Repeat("very-long-task-key-", 40)
+	executor := NewHeadlessWithRepoRoot(fixtureRepoRoot())
+	result, err := executor.RunTask(context.Background(), contract.TaskSpec{
+		ID:     longID,
+		Kind:   contract.TaskKindGeneral,
+		Scope:  "project",
+		Prompt: "say ready",
+		Metadata: map[string]string{
+			"project_key":   "alpha",
+			"worktree_path": worktreePath,
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunTask() error = %v", err)
+	}
+
+	artifactPath := result.Metadata["artifact_path"]
+	if artifactPath == "" {
+		t.Fatal("artifact_path empty, want persisted driver artifact")
+	}
+	base := filepath.Base(artifactPath)
+	if len(base) > 180 {
+		t.Fatalf("artifact basename length = %d, want <= 180: %s", len(base), base)
+	}
+	if _, err := os.Stat(artifactPath); err != nil {
+		t.Fatalf("artifact path stat error = %v", err)
 	}
 }
 

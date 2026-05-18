@@ -3,7 +3,9 @@ package codex
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,6 +23,8 @@ var (
 	healthDriverTimeout = 5 * time.Second
 	runDriverTimeout    = 30 * time.Minute
 )
+
+const maxArtifactFilenameStemLength = 160
 
 type driverRequest struct {
 	Action string            `json:"action"`
@@ -247,7 +251,7 @@ func (executor headlessExecutor) runLegacyDriver(ctx context.Context, driver str
 		return contract.ExecutionResult{}, err
 	}
 
-	driverCtx, cancel := context.WithTimeout(ctx, runDriverTimeout)
+	driverCtx, cancel := context.WithTimeout(ctx, configuredRunDriverTimeout())
 	defer cancel()
 
 	cmd := exec.CommandContext(driverCtx, driver)
@@ -258,6 +262,9 @@ func (executor headlessExecutor) runLegacyDriver(ctx context.Context, driver str
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
+		if errors.Is(driverCtx.Err(), context.DeadlineExceeded) {
+			return contract.ExecutionResult{}, fmt.Errorf("codex driver timed out after %s: %w", configuredRunDriverTimeout(), driverCtx.Err())
+		}
 		details := strings.TrimSpace(stderr.String())
 		if details == "" {
 			details = strings.TrimSpace(string(output))
@@ -351,7 +358,19 @@ func driverTimeout(action string) time.Duration {
 	if action == "health" {
 		return healthDriverTimeout
 	}
-	return runDriverTimeout
+	return configuredRunDriverTimeout()
+}
+
+func configuredRunDriverTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("ODIN_CODEX_DRIVER_RUN_TIMEOUT"))
+	if raw == "" {
+		return runDriverTimeout
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil || timeout <= 0 {
+		return runDriverTimeout
+	}
+	return timeout
 }
 
 func (headlessExecutor) ResumeTask(context.Context, contract.TaskHandle, contract.ResumePacket) (contract.ExecutionResult, error) {
@@ -476,6 +495,15 @@ func sanitizeArtifactName(value string) string {
 	result := strings.Trim(builder.String(), "-_")
 	if result == "" {
 		return "codex-headless-run"
+	}
+	if len(result) > maxArtifactFilenameStemLength {
+		sum := sha256.Sum256([]byte(result))
+		suffix := fmt.Sprintf("-%x", sum[:8])
+		prefixLength := maxArtifactFilenameStemLength - len(suffix)
+		if prefixLength < 1 {
+			return strings.Trim(suffix, "-")
+		}
+		result = strings.Trim(result[:prefixLength], "-_") + suffix
 	}
 	return result
 }
