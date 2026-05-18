@@ -268,6 +268,43 @@ func TestResolveClarifyPreservesReasonAndRecordsAuditEvent(t *testing.T) {
 	}
 }
 
+func TestResolveBrowserMutationReceiptRequiresContinuation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openApprovalTestStore(t)
+	fixture := seedBrowserMutationApproval(t, ctx, store)
+
+	result, err := Service{Store: store}.Resolve(ctx, ResolveParams{
+		ApprovalID: fixture.Approval.ID,
+		Action:     "approve",
+		DecisionBy: "operator",
+		Reason:     "approved browser mutation",
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if result.ContinuationKind != "browser_mutation" {
+		t.Fatalf("ContinuationKind = %q, want browser_mutation", result.ContinuationKind)
+	}
+
+	task, err := store.GetTask(ctx, fixture.Task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if task.Status != "blocked" || task.BlockedReason != "approval_resolved_waiting_for_browser_continuation" {
+		t.Fatalf("task status=%q blocked_reason=%q, want browser continuation ownership", task.Status, task.BlockedReason)
+	}
+
+	receipt, err := FormatReceipt(result)
+	if err != nil {
+		t.Fatalf("FormatReceipt() error = %v", err)
+	}
+	if receipt.Summary != "summary=approval granted; browser continuation required" {
+		t.Fatalf("receipt.Summary = %q, want browser continuation wording", receipt.Summary)
+	}
+}
+
 func TestResolveApprovePreparedTransferStartsSubmitContinuation(t *testing.T) {
 	t.Parallel()
 
@@ -817,6 +854,52 @@ func seedTaskBackedApproval(t *testing.T, ctx context.Context, store *sqlite.Sto
 	})
 	if err != nil {
 		t.Fatalf("RequestApproval() error = %v", err)
+	}
+	return approvalFixture{Task: blocked, Approval: approval}
+}
+
+func seedBrowserMutationApproval(t *testing.T, ctx context.Context, store *sqlite.Store) approvalFixture {
+	t.Helper()
+
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "browser-work",
+		Name:          "Browser Work",
+		Scope:         "project",
+		GitRoot:       "/tmp/browser-work",
+		DefaultBranch: "main",
+		ManifestPath:  "/tmp/browser-work/project.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:             project.ID,
+		Key:                   "browser-mutation-approval",
+		Title:                 "Browser mutation approval",
+		ActionKey:             "external_mutation",
+		Status:                "queued",
+		Scope:                 "project",
+		RequestedBy:           "operator",
+		WorkKind:              "external_mutation",
+		ExecutionIntent:       "mutation",
+		ExecutionIntentSource: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	payloadJSON := `{"schema_version":1,"action_kind":"submit_form","allowed_domains":["example.com"],"start_url":"https://example.com/form","requested_by":"operator","redaction_policy":"secrets_and_sensitive_values"}`
+	hash := "test-payload-hash"
+	blocked, approval, _, err := store.BlockTaskAndRequestBrowserMutationApproval(ctx, sqlite.BlockTaskAndRequestBrowserMutationApprovalParams{
+		TaskID:             task.ID,
+		RequestedBy:        "operator",
+		ActionKind:         "submit_form",
+		AllowedDomainsJSON: `["example.com"]`,
+		StartURL:           "https://example.com/form",
+		PayloadJSON:        payloadJSON,
+		PayloadHash:        hash,
+	})
+	if err != nil {
+		t.Fatalf("BlockTaskAndRequestBrowserMutationApproval() error = %v", err)
 	}
 	return approvalFixture{Task: blocked, Approval: approval}
 }
