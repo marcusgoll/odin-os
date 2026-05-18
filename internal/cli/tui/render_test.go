@@ -290,6 +290,45 @@ func TestRenderOverviewUsesResponsiveColumnsOnWideTerminals(t *testing.T) {
 	}
 }
 
+func TestRenderOverviewCompactsForShortTerminals(t *testing.T) {
+	t.Parallel()
+
+	output := RenderOverviewForTerminalSize(Model{
+		Name:                 "Default Workspace",
+		TelemetryAvailable:   false,
+		TelemetryUnavailable: "unavailable telemetry",
+		LogsUnavailable:      "unavailable telemetry: loki query failed",
+	}, 80, 24, false)
+
+	for _, want := range []string{
+		"┌─ ACTION REQUIRED ",
+		"│ approvals=0 blocked=0 review=0 failed=0 recovery=0",
+		"┌─ ODIN HEALTH ",
+		"│ HEALTH        UNKNOWN",
+		"│ TELEMETRY     unavailable",
+		"┌─ OTHER LANES ",
+		"live=none activity=none inbox=none agents=none goals=none schedules=none",
+		"┌─ RECENT LOGS ",
+		"│ Loki unavailable: unavailable telemetry: loki query failed",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want compact fragment %q", output, want)
+		}
+	}
+	if strings.Contains(strings.ToUpper(output), "HEALTHY") {
+		t.Fatalf("output = %q, did not expect HEALTHY in unavailable compact view", output)
+	}
+	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+	if len(lines) > 24 {
+		t.Fatalf("line count = %d, want <= 24\n%s", len(lines), output)
+	}
+	for _, line := range lines {
+		if visibleLen(line) > 80 {
+			t.Fatalf("line width = %d, want <= 80: %q", visibleLen(line), line)
+		}
+	}
+}
+
 func TestRenderOverviewAddsColorForTerminalOutput(t *testing.T) {
 	t.Parallel()
 
