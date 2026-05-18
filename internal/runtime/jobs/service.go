@@ -2064,7 +2064,7 @@ func taskClassForRouting(title string, intent executionIntent) string {
 		return "frontend_build"
 	case containsAny(normalized, []string{"backend", "api", "database", "sqlite", "store", "service"}):
 		return "backend_build"
-	case containsAny(normalized, []string{"test", "tests", "coverage", "fixture"}):
+	case containsAnyToken(normalized, []string{"test", "tests", "coverage", "fixture"}):
 		return "test_writing"
 	case containsAny(normalized, []string{"refactor", "cleanup", "consolidate"}):
 		return "refactor"
@@ -3386,6 +3386,20 @@ func containsAny(value string, candidates []string) bool {
 	for _, candidate := range candidates {
 		if strings.Contains(value, candidate) {
 			return true
+		}
+	}
+	return false
+}
+
+func containsAnyToken(value string, candidates []string) bool {
+	tokens := strings.FieldsFunc(value, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
+	for _, token := range tokens {
+		for _, candidate := range candidates {
+			if token == candidate {
+				return true
+			}
 		}
 	}
 	return false
