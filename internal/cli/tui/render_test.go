@@ -262,31 +262,55 @@ func TestRenderOverviewShowsUnavailableLogs(t *testing.T) {
 func TestRenderOverviewUsesResponsiveColumnsOnWideTerminals(t *testing.T) {
 	t.Parallel()
 
-	output := RenderOverviewForTerminal(Model{
+	output := RenderOverviewForTerminalSize(Model{
 		Name:               "Odin Core",
 		TelemetryAvailable: true,
 		Status:             "degraded",
 		HealthScore:        87,
 		LifecyclePhase:     "run",
 		BlockedItems:       2,
+		Flows: []FlowRow{
+			{Direction: "IN", Ref: "intake#8", Source: "mobile/share", Status: "received", Subject: "Review captured request"},
+		},
+		LiveExecution: []SnapshotRow{
+			{ID: "run:9", Label: "Run 9", Summary: "goal-7 is running", Command: "odin runs show 9"},
+		},
 		Agents: []AgentRow{
 			{Name: "codex", Task: "goal-7", Project: "odin-os", Status: "running"},
 		},
 		Goals: []GoalRow{
 			{ID: 7, Title: "Keep overview visible", Status: "running"},
 		},
-	}, 140, false)
+		Logs: []LogEntry{
+			{Timestamp: "1714521600000000000", Line: `{"level":"info","message":"ready"}`},
+		},
+	}, 200, 36, false)
 
-	if !strings.Contains(output, "┐  ┌─ ODIN HEALTH ") {
-		t.Fatalf("output = %q, want side-by-side action and health panels", output)
+	if !strings.Contains(output, "┐  ┌─ RECENT LOGS ") {
+		t.Fatalf("output = %q, want logs pinned as right column", output)
 	}
-	if !strings.Contains(output, "┐  ┌─ CURRENT GOALS ") {
-		t.Fatalf("output = %q, want side-by-side agents and goals panels", output)
+	for _, want := range []string{
+		"┌─ CURRENT GOALS ",
+		"Keep overview visible",
+		"┌─ INBOX / OUTBOX ",
+		"mobile/share",
+		"┌─ RECENT WORK ",
+		"goal-7 is running",
+		"┌─ AGENTS RUNNING ",
+		"codex task=goal-7 project=odin-os status=running",
+		`{"level":"info","message":"ready"}`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want wide operator fragment %q", output, want)
+		}
 	}
 	for _, line := range strings.Split(strings.TrimSuffix(output, "\n"), "\n") {
-		if visibleLen(line) > 140 {
-			t.Fatalf("line width = %d, want <= 140: %q", visibleLen(line), line)
+		if visibleLen(line) > 200 {
+			t.Fatalf("line width = %d, want <= 200: %q", visibleLen(line), line)
 		}
+	}
+	if firstLine := strings.SplitN(output, "\n", 2)[0]; visibleLen(firstLine) != 200 {
+		t.Fatalf("first line width = %d, want full terminal width 200: %q", visibleLen(firstLine), firstLine)
 	}
 }
 
