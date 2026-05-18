@@ -134,6 +134,22 @@ such as `login_required`, `mfa_required`, `captcha_or_bot_check`,
 `selector_drift`, `domain_changed`, `ambiguous_result`, or
 `unsupported_mutation`.
 
+### DOM fast lane proof boundary
+
+The first supported recipe is `fixture_status`. It proves the contract shape
+against a fixture page and must return either:
+
+- `completed` with `recipe_key`, `source_url`, `final_url`, typed `rows`,
+  `page_status`, `selector_version`, snapshot excerpt, and screenshot path.
+- `blocked` with `intervention_reason` when selectors drift, login or bot
+  checks appear, domains change, results are ambiguous, or a mutation-shaped
+  recipe is requested.
+
+Public webhooks are deferred until at least one DOM fast lane recipe is proven
+through `./bin/odin` and can be audited through operator output. Hidden/private
+API replay remains rejected by default; a DOM fast lane may observe browser
+state to explain visible evidence, but it must not become a stealth API client.
+
 X post visible evidence driver request:
 
 ```json
