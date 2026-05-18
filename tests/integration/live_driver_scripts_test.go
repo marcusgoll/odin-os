@@ -2793,6 +2793,153 @@ fi
 	}
 }
 
+func TestHuginnDOMFastLaneDriverScriptExtractsFixtureStatus(t *testing.T) {
+	repoRoot := projectRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-dom-fast-lane.sh")
+	fixtureDir := t.TempDir()
+	browserLib := filepath.Join(fixtureDir, "browser-access.sh")
+	tracePath := filepath.Join(fixtureDir, "dom-fast-lane-trace.txt")
+	screenshotPath := filepath.Join(fixtureDir, "fixture-status.png")
+	writeDOMFastLaneBrowserLib(t, browserLib, "completed")
+
+	request := `{"tool_key":"browser_dom_fast_lane","input":{"recipe_key":"fixture_status","target_url":"http://127.0.0.1:18080/status-fixture","label":"fixture-status","screenshot_path":"` + screenshotPath + `","wait_ms":"0","headless":"true","allowed_domain":"127.0.0.1"}}`
+	response := runDriverScript(t, scriptPath, request, map[string]string{
+		"ODIN_BROWSER_ACCESS_LIB_PATH":  browserLib,
+		"ODIN_TEST_DOM_FAST_TRACE":      tracePath,
+		"ODIN_TEST_DOM_FAST_SCREENSHOT": screenshotPath,
+	})
+
+	if response.Status != "completed" {
+		t.Fatalf("Status = %q, want completed (summary=%q)", response.Status, response.Summary)
+	}
+	if response.ToolKey != "browser_dom_fast_lane" {
+		t.Fatalf("ToolKey = %q, want browser_dom_fast_lane", response.ToolKey)
+	}
+	if response.Artifacts["recipe_key"] != "fixture_status" {
+		t.Fatalf("recipe_key = %#v, want fixture_status", response.Artifacts["recipe_key"])
+	}
+	if response.Artifacts["page_status"] != "Ready" {
+		t.Fatalf("page_status = %#v, want Ready", response.Artifacts["page_status"])
+	}
+	if response.Artifacts["selector_version"] != "fixture-v1" {
+		t.Fatalf("selector_version = %#v, want fixture-v1", response.Artifacts["selector_version"])
+	}
+	if response.Artifacts["screenshot_path"] != screenshotPath {
+		t.Fatalf("screenshot_path = %#v, want %s", response.Artifacts["screenshot_path"], screenshotPath)
+	}
+	rows, ok := response.Artifacts["rows"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("rows = %#v, want one row", response.Artifacts["rows"])
+	}
+
+	traceBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("ReadFile(tracePath) error = %v", err)
+	}
+	trace := string(traceBytes)
+	if !strings.Contains(trace, "navigate:http://127.0.0.1:18080/status-fixture\n") || !strings.Contains(trace, "eval:") || !strings.Contains(trace, "screenshot:") {
+		t.Fatalf("trace = %q, want navigate/eval/screenshot", trace)
+	}
+}
+
+func TestHuginnDOMFastLaneDriverScriptReportsSelectorDrift(t *testing.T) {
+	repoRoot := projectRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-dom-fast-lane.sh")
+	fixtureDir := t.TempDir()
+	browserLib := filepath.Join(fixtureDir, "browser-access.sh")
+	writeDOMFastLaneBrowserLib(t, browserLib, "selector-drift")
+
+	request := `{"tool_key":"browser_dom_fast_lane","input":{"recipe_key":"fixture_status","target_url":"http://127.0.0.1:18080/status-fixture","wait_ms":"0"}}`
+	response := runDriverScript(t, scriptPath, request, map[string]string{
+		"ODIN_BROWSER_ACCESS_LIB_PATH": browserLib,
+		"ODIN_TEST_DOM_FAST_TRACE":     filepath.Join(fixtureDir, "trace.txt"),
+	})
+
+	if response.Status != "blocked" {
+		t.Fatalf("Status = %q, want blocked", response.Status)
+	}
+	if response.Artifacts["intervention_reason"] != "selector_drift" {
+		t.Fatalf("intervention_reason = %#v, want selector_drift", response.Artifacts["intervention_reason"])
+	}
+}
+
+func TestHuginnDOMFastLaneDriverScriptBlocksBotOrLoginChallenge(t *testing.T) {
+	repoRoot := projectRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-dom-fast-lane.sh")
+	fixtureDir := t.TempDir()
+	browserLib := filepath.Join(fixtureDir, "browser-access.sh")
+	writeDOMFastLaneBrowserLib(t, browserLib, "login")
+
+	request := `{"tool_key":"browser_dom_fast_lane","input":{"recipe_key":"fixture_status","target_url":"http://127.0.0.1:18080/status-fixture","wait_ms":"0"}}`
+	response := runDriverScript(t, scriptPath, request, map[string]string{
+		"ODIN_BROWSER_ACCESS_LIB_PATH": browserLib,
+		"ODIN_TEST_DOM_FAST_TRACE":     filepath.Join(fixtureDir, "trace.txt"),
+	})
+
+	if response.Status != "blocked" {
+		t.Fatalf("Status = %q, want blocked", response.Status)
+	}
+	if response.Artifacts["intervention_reason"] != "login_required" {
+		t.Fatalf("intervention_reason = %#v, want login_required", response.Artifacts["intervention_reason"])
+	}
+}
+
+func TestHuginnDOMFastLaneDriverScriptRejectsMutationRecipe(t *testing.T) {
+	repoRoot := projectRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "drivers", "huginn-dom-fast-lane.sh")
+	fixtureDir := t.TempDir()
+	browserLib := filepath.Join(fixtureDir, "browser-access.sh")
+	tracePath := filepath.Join(fixtureDir, "trace.txt")
+	writeDOMFastLaneBrowserLib(t, browserLib, "completed")
+
+	request := `{"tool_key":"browser_dom_fast_lane","input":{"recipe_key":"submit_form","target_url":"http://127.0.0.1:18080/status-fixture","wait_ms":"0"}}`
+	response := runDriverScript(t, scriptPath, request, map[string]string{
+		"ODIN_BROWSER_ACCESS_LIB_PATH": browserLib,
+		"ODIN_TEST_DOM_FAST_TRACE":     tracePath,
+	})
+
+	if response.Status != "blocked" {
+		t.Fatalf("Status = %q, want blocked", response.Status)
+	}
+	if response.Artifacts["intervention_reason"] != "unsupported_mutation" {
+		t.Fatalf("intervention_reason = %#v, want unsupported_mutation", response.Artifacts["intervention_reason"])
+	}
+	if _, err := os.Stat(tracePath); !os.IsNotExist(err) {
+		t.Fatalf("mutation request touched browser trace; stat err = %v", err)
+	}
+}
+
+func writeDOMFastLaneBrowserLib(t *testing.T, path string, mode string) {
+	t.Helper()
+
+	if err := os.WriteFile(path, []byte(`#!/usr/bin/env bash
+set -euo pipefail
+browser_request_domain_access() { printf 'domain:%s\n' "$1" >>"$ODIN_TEST_DOM_FAST_TRACE"; }
+browser_server_health() { printf '%s' '{"ok":true,"browser":true,"page":true,"url":"http://127.0.0.1:18080/status-fixture","title":"Fixture Status"}'; }
+browser_server_start() { printf 'start:%s\n' "$*" >>"$ODIN_TEST_DOM_FAST_TRACE"; }
+browser_navigate() { printf 'navigate:%s\n' "$1" >>"$ODIN_TEST_DOM_FAST_TRACE"; }
+browser_snapshot() {
+    case "$ODIN_TEST_DOM_FAST_MODE" in
+        login) printf '%s' 'Sign in Password required' ;;
+        bot) printf '%s' 'Verify you are human before continuing' ;;
+        *) printf '%s' 'Ready alpha green' ;;
+    esac
+}
+browser_evaluate() {
+    printf 'eval:%s\n' "$1" >>"$ODIN_TEST_DOM_FAST_TRACE"
+    case "$ODIN_TEST_DOM_FAST_MODE" in
+        selector-drift) printf '%s' '{}' ;;
+        *) printf '%s' '{"source_url":"http://127.0.0.1:18080/status-fixture","final_url":"http://127.0.0.1:18080/status-fixture","page_status":"Ready","rows":[{"name":"alpha","state":"green"}],"selector_version":"fixture-v1"}' ;;
+    esac
+}
+browser_bc_screenshot() { printf 'screenshot:%s\n' "$*" >>"$ODIN_TEST_DOM_FAST_TRACE"; printf '%s' "$ODIN_TEST_DOM_FAST_SCREENSHOT"; }
+browser_server_stop() { printf 'stop\n' >>"$ODIN_TEST_DOM_FAST_TRACE"; }
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(browserLib) error = %v", err)
+	}
+	t.Setenv("ODIN_TEST_DOM_FAST_MODE", mode)
+}
+
 func runDriverScript(t *testing.T, scriptPath string, stdin string, extraEnv map[string]string) driverScriptResponse {
 	t.Helper()
 

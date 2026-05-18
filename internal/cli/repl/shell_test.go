@@ -1193,6 +1193,66 @@ func TestShellToolRunInvokesBuiltinTool(t *testing.T) {
 	}
 }
 
+func TestShellToolRunBrowserDOMFastLane(t *testing.T) {
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	driverPath := filepath.Join(t.TempDir(), "huginn-dom-fast-lane-driver.sh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+printf '{"status":"completed","tool_key":"browser_dom_fast_lane","summary":"Extracted fixture status table.","artifacts":{"recipe_key":"fixture_status","source_url":"http://127.0.0.1:18080/status-fixture","final_url":"http://127.0.0.1:18080/status-fixture","page_status":"Ready","selector_version":"fixture-v1","snapshot_excerpt":"Ready alpha green","screenshot_path":"/tmp/fixture-status.png"}}'
+`
+	if err := os.WriteFile(driverPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_HUGINN_DOM_FAST_LANE_DRIVER", driverPath)
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/tool run browser_dom_fast_lane recipe_key=fixture_status target_url=http://127.0.0.1:18080/status-fixture label=fixture-status wait_ms=0 headless=true", &output); err != nil {
+		t.Fatalf("HandleLine(/tool run browser_dom_fast_lane) error = %v", err)
+	}
+
+	for _, want := range []string{"tool=browser_dom_fast_lane", "fixture_status", "Ready", "selector_version", "/tmp/fixture-status.png"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("tool run output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
+func TestShellToolRunBrowserDOMFastLaneBlockedResult(t *testing.T) {
+	env := newTestEnvironment(t)
+	shell, err := New(env)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	driverPath := filepath.Join(t.TempDir(), "huginn-dom-fast-lane-driver.sh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+printf '{"status":"blocked","tool_key":"browser_dom_fast_lane","summary":"Selector drift blocked fixture extraction.","artifacts":{"recipe_key":"fixture_status","intervention_reason":"selector_drift","selector_version":"fixture-v1"}}'
+`
+	if err := os.WriteFile(driverPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	t.Setenv("ODIN_HUGINN_DOM_FAST_LANE_DRIVER", driverPath)
+
+	var output bytes.Buffer
+	if err := shell.HandleLine(context.Background(), "/tool run browser_dom_fast_lane recipe_key=fixture_status target_url=http://127.0.0.1:18080/status-fixture", &output); err != nil {
+		t.Fatalf("HandleLine(/tool run browser_dom_fast_lane) error = %v", err)
+	}
+
+	for _, want := range []string{"tool=browser_dom_fast_lane", "fixture_status", "intervention_reason=selector_drift"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("tool run output = %q, want %q", output.String(), want)
+		}
+	}
+}
+
 func TestShellToolRunRecordsBrowserMemoryEntries(t *testing.T) {
 	ctx := context.Background()
 	env := newTestEnvironment(t)

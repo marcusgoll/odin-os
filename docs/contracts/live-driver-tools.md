@@ -13,6 +13,7 @@ date: 2026-04-23
 - `ODIN_GOOGLE_CALENDAR_DRIVER`
 - `ODIN_HUGINN_DRIVER`
 - `ODIN_HUGINN_VISUAL_DRIVER`
+- `ODIN_HUGINN_DOM_FAST_LANE_DRIVER`
 - `ODIN_HUGINN_X_POST_DRIVER`
 - `ODIN_HUGINN_X_PUBLISH_DRIVER`
 - `ODIN_HUGINN_BROWSER_MUTATION_DRIVER`
@@ -25,6 +26,7 @@ These env vars should point to executable commands. The repo-local driver script
 - `scripts/drivers/google-calendar-off-dates.sh`
 - `scripts/drivers/huginn-pbs-session.sh`
 - `scripts/drivers/huginn-visual-audit.sh`
+- `scripts/drivers/huginn-dom-fast-lane.sh`
 - `scripts/drivers/huginn-x-post-evidence.sh`
 - `scripts/drivers/huginn-x-post-publish.sh`
 - `scripts/drivers/browser-mutation-fixture.sh`
@@ -36,6 +38,7 @@ Example:
 export ODIN_GOOGLE_CALENDAR_DRIVER="/home/orchestrator/odin-os/scripts/drivers/google-calendar-off-dates.sh"
 export ODIN_HUGINN_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-pbs-session.sh"
 export ODIN_HUGINN_VISUAL_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-visual-audit.sh"
+export ODIN_HUGINN_DOM_FAST_LANE_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-dom-fast-lane.sh"
 export ODIN_HUGINN_X_POST_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-x-post-evidence.sh"
 export ODIN_HUGINN_X_PUBLISH_DRIVER="/home/orchestrator/odin-os/scripts/drivers/huginn-x-post-publish.sh"
 export ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER="/home/orchestrator/odin-os/scripts/drivers/robinhood-transfer-flow.sh"
@@ -47,6 +50,7 @@ The repo-local scripts reuse shell libraries inside `odin-os`.
 
 - `huginn-pbs-session.sh` sources `scripts/browser/browser-access.sh`
 - `huginn-visual-audit.sh` sources `scripts/browser/browser-access.sh`
+- `huginn-dom-fast-lane.sh` sources `scripts/browser/browser-access.sh`
 - `huginn-x-post-evidence.sh` sources `scripts/browser/browser-access.sh`
 - `huginn-x-post-publish.sh` sources `scripts/browser/browser-access.sh`
 - `robinhood-transfer-flow.sh` sources `scripts/browser/browser-access.sh`
@@ -132,6 +136,50 @@ Visual audit driver request:
   }
 }
 ```
+
+DOM fast lane driver request:
+
+```json
+{
+  "tool_key": "browser_dom_fast_lane",
+  "input": {
+    "recipe_key": "fixture_status",
+    "target_url": "http://127.0.0.1:18080/status-fixture",
+    "label": "fixture-status",
+    "wait_ms": "0",
+    "headless": "true",
+    "allowed_domain": "127.0.0.1"
+  }
+}
+```
+
+DOM fast lanes are read-only browser recipes. They may extract typed data from
+visible DOM, browser snapshots, or bounded recipe-owned evaluation functions.
+They must not accept arbitrary JavaScript from operator input, mutate external
+state, replay hidden/private APIs as the primary integration path, or bypass
+login, MFA, CAPTCHA, bot detection, or platform controls.
+
+DOM fast lane drivers may return `status: "completed"` or `status: "blocked"`.
+Blocked responses must include `artifacts.intervention_reason`, using values
+such as `login_required`, `mfa_required`, `captcha_or_bot_check`,
+`selector_drift`, `domain_changed`, `ambiguous_result`, or
+`unsupported_mutation`.
+
+### DOM fast lane proof boundary
+
+The first supported recipe is `fixture_status`. It proves the contract shape
+against a fixture page and must return either:
+
+- `completed` with `recipe_key`, `source_url`, `final_url`, typed `rows`,
+  `page_status`, `selector_version`, snapshot excerpt, and screenshot path.
+- `blocked` with `intervention_reason` when selectors drift, login or bot
+  checks appear, domains change, results are ambiguous, or a mutation-shaped
+  recipe is requested.
+
+Public webhooks are deferred until at least one DOM fast lane recipe is proven
+through `./bin/odin` and can be audited through operator output. Hidden/private
+API replay remains rejected by default; a DOM fast lane may observe browser
+state to explain visible evidence, but it must not become a stealth API client.
 
 X post visible evidence driver request:
 

@@ -32,6 +32,7 @@ type Result struct {
 
 type BrowserResult struct {
 	ToolKey   string
+	Status    string
 	Summary   string
 	Artifacts map[string]any
 	RawOutput string
@@ -128,6 +129,14 @@ func (service Service) HuginnVisualAudit(ctx context.Context, request webdriver.
 	return browserResultFromResponse(response.ToolKey, response.Summary, response.Artifacts, response)
 }
 
+func (service Service) HuginnDOMFastLane(ctx context.Context, request webdriver.DOMFastLaneRequest) (BrowserResult, error) {
+	response, err := webdriver.NewDOMFastLaneDriver().Invoke(ctx, request)
+	if err != nil {
+		return BrowserResult{}, err
+	}
+	return browserResultFromResponse(response.ToolKey, response.Summary, response.Artifacts, response)
+}
+
 func (service Service) HuginnXPostVisibleEvidence(ctx context.Context, request webdriver.XPostRequest) (BrowserResult, error) {
 	response, err := webdriver.NewXPostDriver().Invoke(ctx, request)
 	if err != nil {
@@ -192,7 +201,14 @@ func browserResultFromResponse(toolKey string, summary string, artifacts map[str
 	if err != nil {
 		return BrowserResult{}, err
 	}
-	return toBrowserResult(toolKey, summary, artifacts, string(rawOutput)), nil
+	result := toBrowserResult(toolKey, summary, artifacts, string(rawOutput))
+	var status struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(rawOutput, &status); err == nil {
+		result.Status = strings.TrimSpace(status.Status)
+	}
+	return result, nil
 }
 
 func toBrowserResult(toolKey string, summary string, artifacts map[string]any, rawOutput string) BrowserResult {
