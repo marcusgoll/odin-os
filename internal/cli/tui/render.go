@@ -26,8 +26,9 @@ const (
 )
 
 type renderOptions struct {
-	Width int
-	Color bool
+	Width  int
+	Height int
+	Color  bool
 }
 
 type panel struct {
@@ -42,6 +43,10 @@ func RenderOverview(model Model) string {
 
 func RenderOverviewForTerminal(model Model, width int, color bool) string {
 	return renderOverview(model, renderOptions{Width: width, Color: color})
+}
+
+func RenderOverviewForTerminalSize(model Model, width int, height int, color bool) string {
+	return renderOverview(model, renderOptions{Width: width, Height: height, Color: color})
 }
 
 func renderOverview(model Model, options renderOptions) string {
@@ -59,6 +64,9 @@ func renderOverview(model Model, options renderOptions) string {
 		approvalsPanel(model),
 		recentLogsPanel(model),
 	}
+	if options.Height > 0 && estimatedOutputLines(panels, width) > options.Height {
+		panels = compactPanels(model, options.Color)
+	}
 
 	var builder strings.Builder
 	if width >= wideRenderWidth {
@@ -72,6 +80,101 @@ func renderOverview(model Model, options renderOptions) string {
 		}
 	}
 	return builder.String()
+}
+
+func compactPanels(model Model, color bool) []panel {
+	return []panel{
+		compactActionPanel(model, color),
+		compactHealthPanel(model, color),
+		compactLanePanel(model),
+		compactLogsPanel(model),
+	}
+}
+
+func compactActionPanel(model Model, color bool) panel {
+	rows := snapshotPanelRows(model.ActionRequired)
+	if len(rows) > 0 {
+		if model.SnapshotUnavailable != "" {
+			rows = append([]string{model.SnapshotUnavailable}, rows...)
+		}
+		return panel{Title: "ACTION REQUIRED", Rows: limitRows(rows, 4), Span: true}
+	}
+	row := fmt.Sprintf(
+		"approvals=%s blocked=%s review=%s failed=%s recovery=%s",
+		styleCount(model.ApprovalsWaiting, model.ApprovalsWaiting > 0, color),
+		styleCount(model.BlockedItems, model.BlockedItems > 0, color),
+		styleCount(model.ReviewQueueItems, model.ReviewQueueItems > 0, color),
+		styleCount(model.FailedWorkItems, model.FailedWorkItems > 0, color),
+		styleCount(model.RecoveryRecommendations, model.RecoveryRecommendations > 0, color),
+	)
+	if model.SnapshotUnavailable != "" {
+		return panel{Title: "ACTION REQUIRED", Rows: []string{model.SnapshotUnavailable, row}, Span: true}
+	}
+	return panel{Title: "ACTION REQUIRED", Rows: []string{row}, Span: true}
+}
+
+func compactHealthPanel(model Model, color bool) panel {
+	status := strings.ToUpper(model.Status)
+	if status == "" || !model.TelemetryAvailable || model.TelemetryStale {
+		status = "UNKNOWN"
+	}
+	telemetry := "fresh"
+	if !model.TelemetryAvailable {
+		telemetry = "unavailable"
+	} else if model.TelemetryStale {
+		telemetry = "stale"
+	}
+	rows := []string{
+		labelledRow("HEALTH", styleStatus(status, color)),
+		labelledRow("TELEMETRY", styleTelemetry(telemetry, color)),
+		labelledRow("WATCH", watchLabel(model)),
+		labelledRow("PHASE/RUNS", fmt.Sprintf("%s / %d", valueOrUnknown(model.LifecyclePhase), model.ActiveRuns)),
+	}
+	if model.TelemetryAvailable {
+		rows = append(rows[:1], append([]string{labelledRow("SCORE", styleScore(fmt.Sprintf("%d", model.HealthScore), model.HealthScore, color))}, rows[1:]...)...)
+	}
+	if model.OdinHealth.Summary != "" || model.OdinHealth.Status != "" || model.OdinHealth.Command != "" {
+		rows = append(rows, labelledRow("READY", fmt.Sprintf("%t", model.OdinHealth.Ready)))
+	}
+	return panel{Title: "ODIN HEALTH", Rows: rows}
+}
+
+func compactLanePanel(model Model) panel {
+	rows := []string{
+		fmt.Sprintf(
+			"live=%s activity=%s inbox=%s agents=%s goals=%s schedules=%s prs=%s approvals=%s",
+			laneState(len(model.LiveExecution), model.ActiveRuns),
+			laneState(len(model.Activity), 0),
+			laneState(len(model.Flows), 0),
+			laneState(len(model.Agents), 0),
+			laneState(len(model.Goals), 0),
+			laneState(len(model.Schedules), 0),
+			laneState(len(model.PullRequests), 0),
+			laneState(len(model.Approvals), model.ApprovalsWaiting),
+		),
+	}
+	return panel{Title: "OTHER LANES", Rows: rows, Span: true}
+}
+
+func compactLogsPanel(model Model) panel {
+	if model.LogsUnavailable != "" {
+		return panel{Title: "RECENT LOGS", Rows: []string{"Loki unavailable: " + model.LogsUnavailable}, Span: true}
+	}
+	if len(model.Logs) == 0 {
+		return panel{Title: "RECENT LOGS", Rows: []string{"none"}, Span: true}
+	}
+	rows := make([]string, 0, len(model.Logs))
+	for _, entry := range model.Logs {
+		line := strings.TrimSpace(entry.Line)
+		if line == "" {
+			line = "<empty>"
+		}
+		if entry.Timestamp != "" {
+			line = entry.Timestamp + "  " + line
+		}
+		rows = append(rows, line)
+	}
+	return panel{Title: "RECENT LOGS", Rows: limitRows(rows, 3), Span: true}
 }
 
 func healthPanel(model Model, color bool) panel {
@@ -313,6 +416,64 @@ func recentLogsPanel(model Model) panel {
 		}
 	}
 	return panel{Title: "RECENT LOGS", Rows: rows, Span: true}
+}
+
+func estimatedOutputLines(panels []panel, width int) int {
+	if len(panels) == 0 {
+		return 0
+	}
+	if width >= wideRenderWidth {
+		lines := 0
+		columnWidth := (width - columnGap) / 2
+		for index := 0; index < len(panels); index++ {
+			current := panels[index]
+			if current.Span || index == len(panels)-1 || panels[index+1].Span {
+				lines += len(renderPanelLines(current, width, false))
+				if index < len(panels)-1 {
+					lines++
+				}
+				continue
+			}
+			left := len(renderPanelLines(current, columnWidth, false))
+			right := len(renderPanelLines(panels[index+1], width-columnWidth-columnGap, false))
+			if right > left {
+				left = right
+			}
+			lines += left
+			index++
+			if index < len(panels)-1 {
+				lines++
+			}
+		}
+		return lines
+	}
+	lines := 0
+	for index, panel := range panels {
+		lines += len(renderPanelLines(panel, width, false))
+		if index < len(panels)-1 {
+			lines++
+		}
+	}
+	return lines
+}
+
+func limitRows(rows []string, max int) []string {
+	if max <= 0 || len(rows) <= max {
+		return rows
+	}
+	limited := append([]string{}, rows[:max]...)
+	limited = append(limited, fmt.Sprintf("... %d more", len(rows)-max))
+	return limited
+}
+
+func laneState(rowCount int, fallbackCount int) string {
+	if rowCount > 0 {
+		return fmt.Sprintf("%d", rowCount)
+	}
+	if fallbackCount > 0 {
+		return fmt.Sprintf("%d", fallbackCount)
+	}
+	return "none"
 }
 
 func snapshotPanelRows(rows []SnapshotRow) []string {
