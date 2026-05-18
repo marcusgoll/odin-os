@@ -247,6 +247,71 @@ printf '{"status":"completed","tool_key":"browser_visual_audit","summary":"Captu
 	}
 }
 
+func TestServiceExposesDOMFastLaneResults(t *testing.T) {
+	requestPath := filepath.Join(t.TempDir(), "huginn-dom-fast-lane-request.json")
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+cat >"$ODIN_DRIVER_REQUEST_PATH"
+printf '{"status":"completed","tool_key":"browser_dom_fast_lane","summary":"Extracted fixture status table.","artifacts":{"recipe_key":"fixture_status","source_url":"http://127.0.0.1:18080/status-fixture","final_url":"http://127.0.0.1:18080/status-fixture","page_status":"Ready","selector_version":"fixture-v1","snapshot_excerpt":"Ready alpha green","screenshot_path":"/tmp/fixture-status.png"}}'
+`)
+	t.Setenv("ODIN_HUGINN_DOM_FAST_LANE_DRIVER", script)
+	t.Setenv("ODIN_DRIVER_REQUEST_PATH", requestPath)
+
+	service := Service{}
+	result, err := service.HuginnDOMFastLane(context.Background(), webdriver.DOMFastLaneRequest{
+		ToolKey: "browser_dom_fast_lane",
+		Input: webdriver.DOMFastLaneInput{
+			RecipeKey: "fixture_status",
+			TargetURL: "http://127.0.0.1:18080/status-fixture",
+			Label:     "fixture-status",
+			WaitMS:    "0",
+			Headless:  "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("HuginnDOMFastLane() error = %v", err)
+	}
+	if result.ToolKey != "browser_dom_fast_lane" {
+		t.Fatalf("ToolKey = %q, want browser_dom_fast_lane", result.ToolKey)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("Status = %q, want completed", result.Status)
+	}
+	if result.Artifacts["page_status"] != "Ready" {
+		t.Fatalf("Artifacts.page_status = %#v, want Ready", result.Artifacts["page_status"])
+	}
+	if result.Artifacts["selector_version"] != "fixture-v1" {
+		t.Fatalf("Artifacts.selector_version = %#v, want fixture-v1", result.Artifacts["selector_version"])
+	}
+	if result.RawOutput == "" {
+		t.Fatal("RawOutput = empty, want driver output")
+	}
+}
+
+func TestServicePreservesBlockedDOMFastLaneResult(t *testing.T) {
+	script := writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"blocked","tool_key":"browser_dom_fast_lane","summary":"Selector drift blocked fixture extraction.","artifacts":{"recipe_key":"fixture_status","intervention_reason":"selector_drift","selector_version":"fixture-v1"}}'
+`)
+	t.Setenv("ODIN_HUGINN_DOM_FAST_LANE_DRIVER", script)
+
+	service := Service{}
+	result, err := service.HuginnDOMFastLane(context.Background(), webdriver.DOMFastLaneRequest{
+		ToolKey: "browser_dom_fast_lane",
+		Input: webdriver.DOMFastLaneInput{
+			RecipeKey: "fixture_status",
+			TargetURL: "http://127.0.0.1:18080/status-fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("HuginnDOMFastLane() error = %v", err)
+	}
+	if result.Status != "blocked" {
+		t.Fatalf("Status = %q, want blocked", result.Status)
+	}
+	if result.Artifacts["intervention_reason"] != "selector_drift" {
+		t.Fatalf("Artifacts.intervention_reason = %#v, want selector_drift", result.Artifacts["intervention_reason"])
+	}
+}
+
 func TestServiceExposesRealHuginnXPostVisibleEvidenceResults(t *testing.T) {
 	requestPath := filepath.Join(t.TempDir(), "huginn-x-post-request.json")
 	script := writeFixtureDriver(t, `#!/usr/bin/env bash

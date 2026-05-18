@@ -78,6 +78,89 @@ func TestBuiltinDefinitionsExposeCanonicalBrowserToolsAndHiddenHuginnAliases(t *
 	}
 }
 
+func TestBuiltinDefinitionsExposeDOMFastLaneTool(t *testing.T) {
+	t.Parallel()
+
+	definitions := BuiltinDefinitions()
+	definition, ok := definitions["browser_dom_fast_lane"]
+	if !ok {
+		t.Fatalf("missing browser_dom_fast_lane definition")
+	}
+	if definition.Invoke == nil {
+		t.Fatal("browser_dom_fast_lane invoke = nil, want handler")
+	}
+	if definition.CanonicalKey != "browser_dom_fast_lane" {
+		t.Fatalf("CanonicalKey = %q, want browser_dom_fast_lane", definition.CanonicalKey)
+	}
+	required, ok := definition.Schema["required"].([]string)
+	if !ok {
+		t.Fatalf("schema required = %#v, want []string", definition.Schema["required"])
+	}
+	if !containsString(required, "recipe_key") || !containsString(required, "target_url") {
+		t.Fatalf("required = %#v, want recipe_key and target_url", required)
+	}
+}
+
+func TestBuiltinDefinitionsInvokeDOMFastLaneTool(t *testing.T) {
+	t.Setenv("ODIN_HUGINN_DOM_FAST_LANE_DRIVER", writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"completed","tool_key":"browser_dom_fast_lane","summary":"Extracted fixture status table.","artifacts":{"recipe_key":"fixture_status","source_url":"http://127.0.0.1:18080/status-fixture","final_url":"http://127.0.0.1:18080/status-fixture","page_status":"Ready","selector_version":"fixture-v1","snapshot_excerpt":"Ready alpha green","screenshot_path":"/tmp/fixture-status.png"}}'
+`))
+
+	definitions := BuiltinDefinitions()
+	result, err := definitions["browser_dom_fast_lane"].Invoke(map[string]string{
+		"recipe_key": "fixture_status",
+		"target_url": "http://127.0.0.1:18080/status-fixture",
+		"label":      "fixture-status",
+		"wait_ms":    "0",
+		"headless":   "true",
+	})
+	if err != nil {
+		t.Fatalf("browser_dom_fast_lane invoke error = %v", err)
+	}
+	if result.CapabilityKey != "browser_dom_fast_lane" {
+		t.Fatalf("CapabilityKey = %q, want browser_dom_fast_lane", result.CapabilityKey)
+	}
+	if result.KeyFacts["status"] != "completed" {
+		t.Fatalf("status = %q, want completed", result.KeyFacts["status"])
+	}
+	if result.KeyFacts["recipe_key"] != "fixture_status" {
+		t.Fatalf("recipe_key = %q, want fixture_status", result.KeyFacts["recipe_key"])
+	}
+	if result.KeyFacts["selector_version"] != "fixture-v1" {
+		t.Fatalf("selector_version = %q, want fixture-v1", result.KeyFacts["selector_version"])
+	}
+	if !containsString(result.Artifacts, "page_status=Ready") {
+		t.Fatalf("artifacts = %+v, want page_status detail", result.Artifacts)
+	}
+	if !containsString(result.Artifacts, "screenshot_path=/tmp/fixture-status.png") {
+		t.Fatalf("artifacts = %+v, want screenshot path", result.Artifacts)
+	}
+}
+
+func TestBuiltinDefinitionsPreserveBlockedDOMFastLaneResult(t *testing.T) {
+	t.Setenv("ODIN_HUGINN_DOM_FAST_LANE_DRIVER", writeFixtureDriver(t, `#!/usr/bin/env bash
+printf '{"status":"blocked","tool_key":"browser_dom_fast_lane","summary":"Selector drift blocked fixture extraction.","artifacts":{"recipe_key":"fixture_status","intervention_reason":"selector_drift","selector_version":"fixture-v1"}}'
+`))
+
+	definitions := BuiltinDefinitions()
+	result, err := definitions["browser_dom_fast_lane"].Invoke(map[string]string{
+		"recipe_key": "fixture_status",
+		"target_url": "http://127.0.0.1:18080/status-fixture",
+	})
+	if err != nil {
+		t.Fatalf("browser_dom_fast_lane invoke error = %v", err)
+	}
+	if result.KeyFacts["status"] != "blocked" {
+		t.Fatalf("status = %q, want blocked", result.KeyFacts["status"])
+	}
+	if result.KeyFacts["intervention_reason"] != "selector_drift" {
+		t.Fatalf("intervention_reason = %q, want selector_drift", result.KeyFacts["intervention_reason"])
+	}
+	if !containsString(result.Artifacts, "intervention_reason=selector_drift") {
+		t.Fatalf("artifacts = %+v, want intervention reason", result.Artifacts)
+	}
+}
+
 func TestIndexToolDefinitionRejectsDuplicateKeys(t *testing.T) {
 	t.Parallel()
 

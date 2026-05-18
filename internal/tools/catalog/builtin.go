@@ -237,6 +237,83 @@ func BuiltinDefinitions() map[string]ToolDefinition {
 			},
 		},
 		{
+			Key:          "browser_dom_fast_lane",
+			CanonicalKey: "browser_dom_fast_lane",
+			Title:        "Browser DOM Fast Lane",
+			Summary:      "Runs a named read-only Browser Control recipe and returns typed DOM evidence.",
+			Scopes:       []string{"global", "project", "odin-core"},
+			Tags:         []string{"browser", "dom", "evidence", "live"},
+			CostHint:     CostHintMedium,
+			BudgetCost:   2,
+			SourceRef:    "builtin://browser_dom_fast_lane",
+			Schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"recipe_key":     map[string]any{"type": "string"},
+					"target_url":     map[string]any{"type": "string"},
+					"label":          map[string]any{"type": "string"},
+					"wait_ms":        map[string]any{"type": "string"},
+					"headless":       map[string]any{"type": "string"},
+					"allowed_domain": map[string]any{"type": "string"},
+				},
+				"required": []string{"recipe_key", "target_url"},
+			},
+			Invoke: func(input map[string]string) (StructuredResult, error) {
+				recipeKey, err := requiredString(input, "recipe_key")
+				if err != nil {
+					return StructuredResult{}, err
+				}
+				targetURL, err := requiredString(input, "target_url")
+				if err != nil {
+					return StructuredResult{}, err
+				}
+
+				result, err := invocation.Service{}.HuginnDOMFastLane(context.Background(), webdriver.DOMFastLaneRequest{
+					ToolKey: "browser_dom_fast_lane",
+					Input: webdriver.DOMFastLaneInput{
+						RecipeKey:     recipeKey,
+						TargetURL:     targetURL,
+						Label:         defaultString(input["label"], "dom-fast-lane"),
+						WaitMS:        defaultString(input["wait_ms"], "0"),
+						Headless:      defaultString(input["headless"], "true"),
+						AllowedDomain: input["allowed_domain"],
+					},
+				})
+				if err != nil {
+					return StructuredResult{}, err
+				}
+
+				return StructuredResult{
+					CapabilityKey: "browser_dom_fast_lane",
+					Summary:       result.Summary,
+					Artifacts: []string{
+						"status=" + result.Status,
+						"recipe_key=" + stringValue(result.Artifacts, "recipe_key"),
+						"source_url=" + stringValue(result.Artifacts, "source_url"),
+						"final_url=" + stringValue(result.Artifacts, "final_url"),
+						"page_status=" + stringValue(result.Artifacts, "page_status"),
+						"intervention_reason=" + stringValue(result.Artifacts, "intervention_reason"),
+						"screenshot_path=" + stringValue(result.Artifacts, "screenshot_path"),
+						"snapshot_excerpt=" + stringValue(result.Artifacts, "snapshot_excerpt"),
+						"selector_version=" + stringValue(result.Artifacts, "selector_version"),
+					},
+					KeyFacts: map[string]string{
+						"status":              result.Status,
+						"recipe_key":          stringValue(result.Artifacts, "recipe_key"),
+						"source_url":          stringValue(result.Artifacts, "source_url"),
+						"final_url":           stringValue(result.Artifacts, "final_url"),
+						"page_status":         stringValue(result.Artifacts, "page_status"),
+						"intervention_reason": stringValue(result.Artifacts, "intervention_reason"),
+						"screenshot_path":     stringValue(result.Artifacts, "screenshot_path"),
+						"selector_version":    stringValue(result.Artifacts, "selector_version"),
+					},
+					FollowOnOptions: []string{"review browser evidence", "fallback to attended browser"},
+					RawRef:          "builtin://browser_dom_fast_lane/result",
+					RawOutput:       result.RawOutput,
+				}, nil
+			},
+		},
+		{
 			Key:          "browser_x_post_visible_evidence",
 			CanonicalKey: "browser_x_post_visible_evidence",
 			Aliases:      []string{"huginn_x_post_visible_evidence"},
