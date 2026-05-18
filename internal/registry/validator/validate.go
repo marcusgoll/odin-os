@@ -408,7 +408,11 @@ func sourceRepoRoot(source registry.SourceFile) (string, error) {
 }
 
 func validateResolvedSkillHandlerPath(repoRoot string, resolvedPath string) error {
-	relativeToRepo, err := filepath.Rel(repoRoot, resolvedPath)
+	resolvedRepoRoot, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		return err
+	}
+	relativeToRepo, err := filepath.Rel(resolvedRepoRoot, resolvedPath)
 	if err != nil {
 		return err
 	}
@@ -416,7 +420,7 @@ func validateResolvedSkillHandlerPath(repoRoot string, resolvedPath string) erro
 		return fmt.Errorf("must stay within the repo")
 	}
 
-	allowedRoot := filepath.Join(repoRoot, registry.SkillHandlerRoot)
+	allowedRoot := filepath.Join(resolvedRepoRoot, registry.SkillHandlerRoot)
 	relativeToAllowedRoot, err := filepath.Rel(allowedRoot, resolvedPath)
 	if err != nil {
 		return err

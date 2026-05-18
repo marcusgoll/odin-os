@@ -649,6 +649,32 @@ func TestValidateDocumentsRejectsHandlerThroughSymlinkedDirectoryOutsideAllowedR
 	assertDiagnosticMessage(t, diagnostics, `skill handler_ref "scripts/skills/linkdir/handler.sh" must resolve under scripts/skills`)
 }
 
+func TestValidateDocumentsAcceptsHandlerWhenRepoRootIsSymlink(t *testing.T) {
+	realRepoRoot := t.TempDir()
+	handlerPath := filepath.Join(realRepoRoot, "scripts", "skills", "triage.sh")
+	if err := os.MkdirAll(filepath.Dir(handlerPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(handler dir) error = %v", err)
+	}
+	if err := os.WriteFile(handlerPath, []byte("#!/usr/bin/env bash\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(handler) error = %v", err)
+	}
+
+	linkParent := t.TempDir()
+	linkRepoRoot := filepath.Join(linkParent, "odin-os-live")
+	if err := os.Symlink(realRepoRoot, linkRepoRoot); err != nil {
+		t.Fatalf("Symlink(repo root) error = %v", err)
+	}
+
+	document := makeValidDocument("skills/triage.md", "triage")
+	document.Source.Path = filepath.Join(linkRepoRoot, "registry", "skills", "triage.md")
+	document.Frontmatter.HandlerRef = "scripts/skills/triage.sh"
+
+	diagnostics := validator.ValidateDocuments([]registry.ParsedDocument{document})
+	if len(diagnostics) != 0 {
+		t.Fatalf("ValidateDocuments() diagnostics = %+v, want none", diagnostics)
+	}
+}
+
 func TestValidateDocumentsRejectsExistingDirectoryHandlerTarget(t *testing.T) {
 	repoRoot := t.TempDir()
 	handlerDir := filepath.Join(repoRoot, "scripts", "skills", "handler-dir")
