@@ -185,6 +185,26 @@ if [[ "$(jq -r '.ok // false' <<<"${set_state}")" != "true" ]]; then
     exit 0
 fi
 
+settings_bio_eval="$(python3 - "${bio_selector}" <<'PY'
+import json
+import sys
+
+selector = sys.argv[1]
+print(f"""(() => {{
+  const node = document.querySelector({json.dumps(selector)});
+  const value = node ? ("value" in node ? node.value : node.textContent || "") : "";
+  return {{
+    selector: {json.dumps(selector)},
+    value,
+    value_length: value.length,
+    current_url: location.href,
+    title: document.title
+  }};
+}})()""")
+PY
+)"
+settings_bio_state="$(json_object_or_empty "$(browser_evaluate "${settings_bio_eval}" 2>/dev/null || true)")"
+
 save_eval='(() => {
   const visible = (node) => {
     if (!node) return false;
@@ -277,10 +297,32 @@ import json
 import sys
 bio = sys.argv[1]
 print(f"""(() => {{
+  const bodyText = (document.body && document.body.innerText || "");
+  const compact = (value) => (value || "").replace(/\\s+/g, " ").trim();
+  const candidates = [];
+  const push = (source, node) => {{
+    if (!node) return;
+    const text = compact(node.innerText || node.textContent || "");
+    if (text && !candidates.some((item) => item.text === text)) {{
+      candidates.push({{source, text}});
+    }}
+  }};
+  for (const node of document.querySelectorAll("[data-testid='UserDescription'], [data-testid='UserProfileHeader_Items']")) {{
+    push(node.getAttribute("data-testid") || "profile_candidate", node);
+  }}
+  for (const node of document.querySelectorAll("main [dir='auto'], main span")) {{
+    const text = compact(node.innerText || node.textContent || "");
+    if (text && (text.includes({json.dumps(bio)}) || {json.dumps(bio)}.includes(text))) {{
+      push("matching_main_text", node);
+    }}
+    if (candidates.length >= 12) break;
+  }}
   return {{
     current_url: location.href,
     title: document.title,
-    bio_present: (document.body && document.body.innerText || "").includes({json.dumps(bio)})
+    bio_present: bodyText.includes({json.dumps(bio)}),
+    body_text_sample: bodyText.slice(0, 4000),
+    profile_bio_candidates: candidates.slice(0, 12)
   }};
 }})()""")
 PY
@@ -310,10 +352,11 @@ artifacts_json="$(jq -nc \
     --arg approval_id "${approval_id}" \
     --arg updated_at "${updated_at}" \
     --argjson save_state "${save_state}" \
+    --argjson settings_bio_state "${settings_bio_state}" \
     --argjson post_save_state "${post_save_state}" \
     --argjson profile_state "${profile_state}" \
     --argjson verify_state "${verify_state}" \
-    '{target_url: $target_url, current_url: $current_url, post_save_url: $post_save_url, profile_url: $profile_url, title: $title, observed_title: $title, bio: $bio, label: $label, task_id: $task_id, run_id: $run_id, approval_id: $approval_id, updated_at: $updated_at, save_clicked: true, bio_verified: ($verify_state.bio_present // false), save_state: $save_state, post_save_state: $post_save_state, profile_state: $profile_state, verify_state: $verify_state}')"
+    '{target_url: $target_url, current_url: $current_url, post_save_url: $post_save_url, profile_url: $profile_url, title: $title, observed_title: $title, bio: $bio, label: $label, task_id: $task_id, run_id: $run_id, approval_id: $approval_id, updated_at: $updated_at, save_clicked: true, bio_verified: ($verify_state.bio_present // false), settings_bio_state: $settings_bio_state, save_state: $save_state, post_save_state: $post_save_state, profile_state: $profile_state, verify_state: $verify_state, profile_body_text_sample: ($verify_state.body_text_sample // ""), profile_bio_candidates: ($verify_state.profile_bio_candidates // [])}')"
 
 if [[ "${bio_verified}" != "true" ]]; then
     emit_json "failed" "X profile bio verification failed after save." "${artifacts_json}"
