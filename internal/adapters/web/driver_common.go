@@ -15,6 +15,12 @@ func marshalDriverRequest(request any) ([]byte, error) {
 }
 
 func invokeDriverCommand(ctx context.Context, envVar string, requestBytes []byte, requestedToolKey string) (Response, error) {
+	return invokeDriverCommandAllowStatuses(ctx, envVar, requestBytes, requestedToolKey, map[string]struct{}{
+		"completed": {},
+	})
+}
+
+func invokeDriverCommandAllowStatuses(ctx context.Context, envVar string, requestBytes []byte, requestedToolKey string, allowedStatuses map[string]struct{}) (Response, error) {
 	command := strings.TrimSpace(os.Getenv(envVar))
 	if command == "" {
 		return Response{}, fmt.Errorf("driver command not configured")
@@ -50,8 +56,9 @@ func invokeDriverCommand(ctx context.Context, envVar string, requestBytes []byte
 	if response.Status == "" {
 		return Response{}, fmt.Errorf("driver response status is empty")
 	}
-	if !strings.EqualFold(strings.TrimSpace(response.Status), "completed") {
-		return Response{}, fmt.Errorf("driver response status %q is not completed", response.Status)
+	status := strings.ToLower(strings.TrimSpace(response.Status))
+	if _, ok := allowedStatuses[status]; !ok {
+		return Response{}, fmt.Errorf("driver response status %q is not allowed", response.Status)
 	}
 	if response.Artifacts == nil {
 		response.Artifacts = map[string]any{}
