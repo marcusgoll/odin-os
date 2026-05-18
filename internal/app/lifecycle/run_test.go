@@ -25,6 +25,7 @@ import (
 	"odin-os/internal/prompts"
 	"odin-os/internal/registry"
 	"odin-os/internal/runtime/checkpoints"
+	factorysvc "odin-os/internal/runtime/factory"
 	"odin-os/internal/runtime/jobs"
 	openroutersmoke "odin-os/internal/runtime/providers/openrouter_smoke"
 	runtimestate "odin-os/internal/runtime/state"
@@ -333,6 +334,85 @@ func TestRunFactoryStatusRejectsNormalWorkItem(t *testing.T) {
 	}
 	if strings.Contains(statusStdout.String(), `"factory_lane"`) {
 		t.Fatalf("stdout = %q, should not emit factory JSON", statusStdout.String())
+	}
+}
+
+func TestRunFactoryStatusShowsPhaseEvidence(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var startStdout bytes.Buffer
+
+	if err := Run(context.Background(), root, []string{"factory", "start", "--project", testProjectKey, "--title", "Show factory phases", "--json"}, strings.NewReader(""), &startStdout); err != nil {
+		t.Fatalf("Run(factory start) error = %v", err)
+	}
+	var start struct {
+		WorkItem struct {
+			ID  int64  `json:"id"`
+			Key string `json:"key"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(startStdout.Bytes(), &start); err != nil {
+		t.Fatalf("start json unmarshal error = %v\nstdout=%s", err, startStdout.String())
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+	run, err := store.StartRun(context.Background(), sqlite.StartRunParams{
+		TaskID:     start.WorkItem.ID,
+		Executor:   "codex_headless",
+		Attempt:    1,
+		Status:     "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if _, err := (factorysvc.Service{Store: store}).RecordPhaseEvidence(context.Background(), factorysvc.PhaseEvidenceInput{
+		TaskID:  start.WorkItem.ID,
+		RunID:   &run.ID,
+		Phase:   factorysvc.PhasePRHandoff,
+		Summary: "PR handoff recorded",
+		Details: map[string]string{
+			"pr_handoff_id":  "handoff-123",
+			"blocked_reason": "waiting_for_green_checks",
+		},
+	}); err != nil {
+		t.Fatalf("RecordPhaseEvidence() error = %v", err)
+	}
+
+	var statusStdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"factory", "status", "--task", start.WorkItem.Key, "--json"}, strings.NewReader(""), &statusStdout); err != nil {
+		t.Fatalf("Run(factory status) error = %v", err)
+	}
+	var status struct {
+		FactoryLane   bool     `json:"factory_lane"`
+		Phase         string   `json:"phase"`
+		KnownPhases   []string `json:"known_phases"`
+		LatestRunID   int64    `json:"latest_run_id"`
+		PRHandoffID   string   `json:"pr_handoff_id"`
+		BlockedReason string   `json:"blocked_reason"`
+		WorkItem      struct {
+			ID  int64  `json:"id"`
+			Key string `json:"key"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(statusStdout.Bytes(), &status); err != nil {
+		t.Fatalf("status json unmarshal error = %v\nstdout=%s", err, statusStdout.String())
+	}
+	if !status.FactoryLane || status.WorkItem.ID != start.WorkItem.ID || status.WorkItem.Key != start.WorkItem.Key {
+		t.Fatalf("status = %+v, want same factory work item", status)
+	}
+	if status.Phase != "pr_handoff" || status.LatestRunID != run.ID || status.PRHandoffID != "handoff-123" || status.BlockedReason != "waiting_for_green_checks" {
+		t.Fatalf("phase evidence status = %+v", status)
+	}
+	for _, phase := range []string{"admitted", "pr_handoff"} {
+		if !containsString(status.KnownPhases, phase) {
+			t.Fatalf("known phases = %#v, missing %q", status.KnownPhases, phase)
+		}
 	}
 }
 

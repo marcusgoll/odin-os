@@ -274,6 +274,152 @@ func TestStatusReadsFactoryLaneTask(t *testing.T) {
 	}
 }
 
+func TestRecordPhaseEvidenceAppendsFactoryArtifact(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFactoryStore(t)
+	defer store.Close()
+
+	service := Service{
+		Store: store,
+		Jobs:  jobs.Service{Store: store, Registry: writeFactoryRegistry(t)},
+	}
+	admission, err := service.AdmitOperatorStart(ctx, AdmitOperatorInput{
+		ProjectKey:  "alpha",
+		Title:       "Implement phase evidence",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("AdmitOperatorStart() error = %v", err)
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     admission.Task.ID,
+		Executor:   "codex_headless",
+		Attempt:    1,
+		Status:     "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+
+	status, err := service.RecordPhaseEvidence(ctx, PhaseEvidenceInput{
+		TaskID:  admission.Task.ID,
+		RunID:   &run.ID,
+		Phase:   PhaseVerification,
+		Summary: "verification passed",
+		Details: map[string]string{
+			"pr_handoff_id":    "pr-123",
+			"blocked_reason":   "waiting_for_checks",
+			"empty_is_dropped": "",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RecordPhaseEvidence() error = %v", err)
+	}
+	if status.Phase != string(PhaseVerification) {
+		t.Fatalf("Status.Phase = %q, want %q", status.Phase, PhaseVerification)
+	}
+	if status.LatestRunID == nil || *status.LatestRunID != run.ID {
+		t.Fatalf("LatestRunID = %v, want %d", status.LatestRunID, run.ID)
+	}
+	if status.PRHandoffID != "pr-123" || status.BlockedReason != "waiting_for_checks" {
+		t.Fatalf("status pr/blocker = %q/%q", status.PRHandoffID, status.BlockedReason)
+	}
+	if !containsFactoryPhase(status.KnownPhases, string(PhaseAdmitted)) || !containsFactoryPhase(status.KnownPhases, string(PhaseVerification)) {
+		t.Fatalf("KnownPhases = %#v, want admitted and verification", status.KnownPhases)
+	}
+
+	updated, err := store.GetTask(ctx, admission.Task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	var artifacts []laneArtifact
+	if err := json.Unmarshal([]byte(updated.ArtifactsJSON), &artifacts); err != nil {
+		t.Fatalf("ArtifactsJSON unmarshal error = %v", err)
+	}
+	var found bool
+	for _, artifact := range artifacts {
+		if artifact.Type == "factory_phase" && artifact.Phase == string(PhaseVerification) && artifact.RunID != nil && *artifact.RunID == run.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("artifacts = %#v, want verification factory_phase with run id", artifacts)
+	}
+
+	runArtifacts, err := store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{RunID: run.ID, ArtifactType: "factory_phase"})
+	if err != nil {
+		t.Fatalf("ListRunArtifacts() error = %v", err)
+	}
+	if len(runArtifacts) != 1 || runArtifacts[0].Summary != "verification passed" {
+		t.Fatalf("run artifacts = %#v, want one factory_phase artifact", runArtifacts)
+	}
+}
+
+func TestStatusSummarizesFactoryPhases(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFactoryStore(t)
+	defer store.Close()
+
+	service := Service{
+		Store: store,
+		Jobs:  jobs.Service{Store: store, Registry: writeFactoryRegistry(t)},
+	}
+	admission, err := service.AdmitOperatorStart(ctx, AdmitOperatorInput{
+		ProjectKey:  "alpha",
+		Title:       "Summarize factory phases",
+		RequestedBy: "operator",
+	})
+	if err != nil {
+		t.Fatalf("AdmitOperatorStart() error = %v", err)
+	}
+	run, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     admission.Task.ID,
+		Executor:   "codex_headless",
+		Attempt:    1,
+		Status:     "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if _, err := service.RecordPhaseEvidence(ctx, PhaseEvidenceInput{TaskID: admission.Task.ID, Phase: PhaseSpecification, Summary: "spec ready"}); err != nil {
+		t.Fatalf("RecordPhaseEvidence(specification) error = %v", err)
+	}
+	if _, err := service.RecordPhaseEvidence(ctx, PhaseEvidenceInput{
+		TaskID:  admission.Task.ID,
+		RunID:   &run.ID,
+		Phase:   PhasePRHandoff,
+		Summary: "PR opened",
+		Details: map[string]string{"pr_handoff_id": "handoff-77"},
+	}); err != nil {
+		t.Fatalf("RecordPhaseEvidence(pr_handoff) error = %v", err)
+	}
+
+	status, err := service.Status(ctx, admission.Task.Key)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if status.Phase != string(PhasePRHandoff) {
+		t.Fatalf("Phase = %q, want pr_handoff", status.Phase)
+	}
+	for _, phase := range []string{string(PhaseAdmitted), string(PhaseSpecification), string(PhasePRHandoff)} {
+		if !containsFactoryPhase(status.KnownPhases, phase) {
+			t.Fatalf("KnownPhases = %#v, missing %q", status.KnownPhases, phase)
+		}
+	}
+	if status.LatestRunID == nil || *status.LatestRunID != run.ID {
+		t.Fatalf("LatestRunID = %v, want %d", status.LatestRunID, run.ID)
+	}
+	if status.PRHandoffID != "handoff-77" {
+		t.Fatalf("PRHandoffID = %q, want handoff-77", status.PRHandoffID)
+	}
+}
+
 func TestStatusRejectsNonFactoryAndInvalidFactoryTasks(t *testing.T) {
 	t.Parallel()
 
@@ -346,6 +492,36 @@ func TestStatusRejectsNonFactoryAndInvalidFactoryTasks(t *testing.T) {
 				t.Fatalf("Status() error = %q, want invalid factory task containing %q", err.Error(), tc.wantError)
 			}
 		})
+	}
+}
+
+func TestStatusRejectsNonFactoryTask(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFactoryStore(t)
+	defer store.Close()
+	project := createFactoryTestProject(t, ctx, store)
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:     project.ID,
+		Key:           "normal-task",
+		Title:         "Normal task",
+		Status:        "queued",
+		Scope:         "project",
+		RequestedBy:   "operator",
+		WorkKind:      "project",
+		ArtifactsJSON: `[]`,
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	_, err = (Service{Store: store}).Status(ctx, strconv.FormatInt(task.ID, 10))
+	if err == nil {
+		t.Fatal("Status() error = nil, want invalid factory task")
+	}
+	if !strings.Contains(err.Error(), "invalid factory task") {
+		t.Fatalf("Status() error = %q, want invalid factory task", err.Error())
 	}
 }
 
@@ -438,6 +614,15 @@ func createFactoryTestProject(t *testing.T, ctx context.Context, store *sqlite.S
 		t.Fatalf("CreateProject() error = %v", err)
 	}
 	return project
+}
+
+func containsFactoryPhase(phases []string, want string) bool {
+	for _, phase := range phases {
+		if phase == want {
+			return true
+		}
+	}
+	return false
 }
 
 func loadFactoryExecutorConfig(t *testing.T) executorrouter.Config {

@@ -486,7 +486,7 @@ func runFactory(ctx context.Context, app bootstrap.App, args []string, stdout io
 		if command.JSON {
 			return commands.WriteJSON(stdout, view)
 		}
-		_, err = fmt.Fprintf(stdout, "factory_lane=%t trigger=%s autonomy=%s phase=%s work_item=%s status=%s\n", view.FactoryLane, view.Trigger, view.Autonomy, view.Phase, view.WorkItem.Key, view.WorkItem.Status)
+		_, err = fmt.Fprintf(stdout, "factory_lane=%t trigger=%s autonomy=%s phase=%s known_phases=%s work_item=%s status=%s\n", view.FactoryLane, view.Trigger, view.Autonomy, view.Phase, strings.Join(view.KnownPhases, ","), view.WorkItem.Key, view.WorkItem.Status)
 		return err
 	default:
 		_, err := fmt.Fprintln(stdout, commands.FactoryUsage)
@@ -495,12 +495,16 @@ func runFactory(ctx context.Context, app bootstrap.App, args []string, stdout io
 }
 
 type factoryCommandView struct {
-	FactoryLane bool                `json:"factory_lane"`
-	Trigger     string              `json:"trigger"`
-	Autonomy    string              `json:"autonomy"`
-	Phase       string              `json:"phase"`
-	Created     bool                `json:"created,omitempty"`
-	WorkItem    factoryWorkItemView `json:"work_item"`
+	FactoryLane   bool                `json:"factory_lane"`
+	Trigger       string              `json:"trigger"`
+	Autonomy      string              `json:"autonomy"`
+	Phase         string              `json:"phase"`
+	KnownPhases   []string            `json:"known_phases,omitempty"`
+	LatestRunID   *int64              `json:"latest_run_id,omitempty"`
+	PRHandoffID   string              `json:"pr_handoff_id,omitempty"`
+	BlockedReason string              `json:"blocked_reason,omitempty"`
+	Created       bool                `json:"created,omitempty"`
+	WorkItem      factoryWorkItemView `json:"work_item"`
 }
 
 type factoryWorkItemView struct {
@@ -525,11 +529,15 @@ func newFactoryAdmissionView(result factorysvc.AdmissionResult) factoryCommandVi
 
 func newFactoryStatusView(result factorysvc.StatusResult) factoryCommandView {
 	return factoryCommandView{
-		FactoryLane: true,
-		Trigger:     result.Trigger,
-		Autonomy:    result.Autonomy,
-		Phase:       result.Phase,
-		WorkItem:    newFactoryWorkItemView(result.Task),
+		FactoryLane:   true,
+		Trigger:       result.Trigger,
+		Autonomy:      result.Autonomy,
+		Phase:         result.Phase,
+		KnownPhases:   append([]string(nil), result.KnownPhases...),
+		LatestRunID:   result.LatestRunID,
+		PRHandoffID:   result.PRHandoffID,
+		BlockedReason: result.BlockedReason,
+		WorkItem:      newFactoryWorkItemView(result.Task),
 	}
 }
 
