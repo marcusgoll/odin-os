@@ -168,9 +168,25 @@ Unknown action names fail closed as `external_mutation`.
   `approval_required`.
 - Mutation-class requests must not call `huginnbrowser.Adapter.Run`.
 - Approval records are visible through `odin review` and `odin approvals`.
-- This contract does not define an approved mutation continuation. Future
-  continuation work must name the exact resolver, approved payload, browser
-  session/profile boundary, and audit events before execution can occur.
+- Approved mutation continuation is exposed only through
+  `odin browser continue --approval-id <id>`. It loads the immutable
+  browser-mutation payload persisted with the Approval Request, verifies that
+  the approval is `approved`, starts a Run Attempt, invokes an allowlisted
+  mutation driver, records `browser_mutation_evidence`, and finishes the run.
+- The continuation command does not accept new action text, URLs, selectors, or
+  form values. If the approved payload is stale or incomplete, a new Approval
+  Request is required.
+- The v1 continuation driver is configured through
+  `ODIN_HUGINN_BROWSER_MUTATION_DRIVER` and must also be listed in
+  `ODIN_HUGINN_BROWSER_MUTATION_ALLOWED_COMMANDS`.
+- The mutation driver receives one JSON request and returns one JSON response.
+  The response must include `status`, `adapter_kind`, `action_kind`, and
+  redacted outcome evidence. It must not return credentials, cookies, tokens,
+  passwords, TOTP seeds, backup codes, or unredacted sensitive form values.
+- The first supported generic continuation slice is fixture-backed form submit.
+  Existing X and Robinhood drivers remain narrow compatibility lanes until they
+  are migrated onto this generic continuation contract without weakening their
+  approval boundaries.
 
 ## Timeout and cancellation
 
@@ -211,6 +227,8 @@ run artifacts, and runtime logs.
 - `odin browser run ... --json` reads back read-only goal evidence execution.
 - `odin browser run --task-id <id> ... --json` reads back work-linked browser
   evidence execution.
+- `odin browser continue --approval-id <id> --json` reads back approved
+  browser-mutation continuation evidence.
 - `odin review list --json` reads back pending browser mutation approvals and
   browser evidence counts for linked work.
 - `odin approvals ... --json` reads back approval state.

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	browserexecutor "odin-os/internal/executors/browser"
 	"odin-os/internal/runtime/browserprofileartifacts"
 	"odin-os/internal/runtime/browserprofilecrypto"
 	"odin-os/internal/runtime/browserprofilekeys"
@@ -112,6 +113,76 @@ func TestRunBrowserRunTaskRecordsWorkEvidence(t *testing.T) {
 	}
 	if shown.Status != "queued" {
 		t.Fatalf("task status = %q, want queued after successful evidence capture", shown.Status)
+	}
+}
+
+func TestRunBrowserContinueApprovedMutationRecordsEvidence(t *testing.T) {
+	ctx := context.Background()
+	app := newLifecycleReviewTestApp(t, ctx)
+	project, err := app.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "browser-work",
+		Name:          "Browser Work",
+		Scope:         "project",
+		GitRoot:       t.TempDir(),
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	task, err := app.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "browser-mutation-task",
+		Title:       "Submit fixture browser form",
+		Status:      "queued",
+		Scope:       "project",
+		RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	var approvalOut bytes.Buffer
+	if err := runBrowser(ctx, app, []string{"run", "--task-id", int64String(task.ID), "--url", "https://example.com/form", "--allowed-domain", "example.com", "--objective", "Submit fixture form", "--action", "submit_form", "--json"}, &approvalOut); err != nil {
+		t.Fatalf("runBrowser(mutation request) error = %v\n%s", err, approvalOut.String())
+	}
+	if output := approvalOut.String(); !strings.Contains(output, `"status": "approval_required"`) || !strings.Contains(output, `"approval_id": 1`) {
+		t.Fatalf("approval output = %s, want approval-required browser mutation", output)
+	}
+	if _, err := app.Store.ResolveApproval(ctx, sqlite.ResolveApprovalParams{
+		ApprovalID: 1,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "fixture proof",
+	}); err != nil {
+		t.Fatalf("ResolveApproval() error = %v", err)
+	}
+
+	driverPath := filepath.Join(t.TempDir(), "browser-mutation-driver.sh")
+	if err := os.WriteFile(driverPath, []byte(`#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+printf '%s' '{"status":"completed","adapter_kind":"huginn_browser_mutation_fixture","action_kind":"submit_form","final_url":"https://example.com/form/complete","summary":"Submitted fixture form with redacted evidence.","evidence":{"pre_action_visible_state":"Fixture form ready","post_action_visible_state":"Fixture form submitted"}}'
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(driver) error = %v", err)
+	}
+	t.Setenv(browserexecutor.MutationDriverEnvVar, driverPath)
+	t.Setenv(browserexecutor.MutationAllowedCommandsEnvVar, driverPath)
+
+	var continueOut bytes.Buffer
+	if err := runBrowser(ctx, app, []string{"continue", "--approval-id", "1", "--json"}, &continueOut); err != nil {
+		t.Fatalf("runBrowser(continue) error = %v\n%s", err, continueOut.String())
+	}
+	for _, want := range []string{
+		`"status": "completed"`,
+		`"evidence_type": "browser_mutation_evidence"`,
+		`"action_kind": "submit_form"`,
+		`"final_url": "https://example.com/form/complete"`,
+		`"post_action_visible_state": "Fixture form submitted"`,
+	} {
+		if !strings.Contains(continueOut.String(), want) {
+			t.Fatalf("continue output = %s, want %s", continueOut.String(), want)
+		}
 	}
 }
 

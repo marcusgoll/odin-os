@@ -15,6 +15,8 @@ date: 2026-04-23
 - `ODIN_HUGINN_VISUAL_DRIVER`
 - `ODIN_HUGINN_X_POST_DRIVER`
 - `ODIN_HUGINN_X_PUBLISH_DRIVER`
+- `ODIN_HUGINN_BROWSER_MUTATION_DRIVER`
+- `ODIN_HUGINN_BROWSER_MUTATION_ALLOWED_COMMANDS`
 - `ODIN_HUGINN_ROBINHOOD_TRANSFER_DRIVER`
 - `ODIN_CODEX_SANDBOX_MODE`
 
@@ -25,6 +27,7 @@ These env vars should point to executable commands. The repo-local driver script
 - `scripts/drivers/huginn-visual-audit.sh`
 - `scripts/drivers/huginn-x-post-evidence.sh`
 - `scripts/drivers/huginn-x-post-publish.sh`
+- `scripts/drivers/browser-mutation-fixture.sh`
 - `scripts/drivers/robinhood-transfer-flow.sh`
 
 Example:
@@ -47,6 +50,13 @@ The repo-local scripts reuse shell libraries inside `odin-os`.
 - `huginn-x-post-evidence.sh` sources `scripts/browser/browser-access.sh`
 - `huginn-x-post-publish.sh` sources `scripts/browser/browser-access.sh`
 - `robinhood-transfer-flow.sh` sources `scripts/browser/browser-access.sh`
+
+Generic browser mutation continuation drivers are intentionally separate from
+the read-only Huginn browser adapter. The repo-local fixture driver is
+`scripts/drivers/browser-mutation-fixture.sh`; operators must set both
+`ODIN_HUGINN_BROWSER_MUTATION_DRIVER` and
+`ODIN_HUGINN_BROWSER_MUTATION_ALLOWED_COMMANDS` to the exact executable path
+before `odin browser continue --approval-id <id>` can invoke a driver.
 
 Override paths when needed:
 

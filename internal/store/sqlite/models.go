@@ -1027,6 +1027,31 @@ type BlockTaskAndRequestApprovalParams struct {
 	RequestedBy string
 }
 
+type BrowserMutationRequest struct {
+	ID               int64
+	ApprovalID       int64
+	TaskID           int64
+	ActionKind       string
+	AllowedDomains   string
+	StartURL         string
+	BrowserSessionID *int64
+	PayloadJSON      string
+	PayloadHash      string
+	CreatedAt        time.Time
+}
+
+type BlockTaskAndRequestBrowserMutationApprovalParams struct {
+	TaskID             int64
+	RunID              *int64
+	RequestedBy        string
+	ActionKind         string
+	AllowedDomainsJSON string
+	StartURL           string
+	BrowserSessionID   *int64
+	PayloadJSON        string
+	PayloadHash        string
+}
+
 type ResolveApprovalParams struct {
 	ApprovalID int64
 	Status     string

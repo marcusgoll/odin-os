@@ -270,6 +270,110 @@ func TestPluginRunMutationCreatesApprovalAndDoesNotCallAdapter(t *testing.T) {
 	if evidenceEvent {
 		t.Fatalf("events = %+v, want no browser evidence because mutation did not execute", events)
 	}
+	mutationRequest, err := store.GetBrowserMutationRequestByApproval(ctx, response.ApprovalID)
+	if err != nil {
+		t.Fatalf("GetBrowserMutationRequestByApproval() error = %v", err)
+	}
+	if mutationRequest.ActionKind != "submit_form" || mutationRequest.StartURL != "https://example.com/form" || mutationRequest.PayloadHash == "" {
+		t.Fatalf("mutation request = %+v, want persisted immutable browser mutation payload", mutationRequest)
+	}
+}
+
+func TestContinueApprovedMutationInvokesDriverAndRecordsRunArtifact(t *testing.T) {
+	store := openBrowserTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	task := createBrowserApprovalTask(t, store)
+	response, err := Service{Store: store, Adapter: &recordingAdapter{}}.RunPlugin(ctx, PluginRequest{
+		RequestID:          "browser-plugin-mutation-1",
+		TaskID:             task.ID,
+		Objective:          "Submit the reviewed external form",
+		AllowedDomains:     []string{"example.com"},
+		StartURLs:          []string{"https://example.com/form"},
+		MaxPages:           1,
+		MaxDurationSeconds: 30,
+		Actions:            []string{"submit_form"},
+		RequestedBy:        "operator",
+	})
+	if err != nil {
+		t.Fatalf("RunPlugin() error = %v", err)
+	}
+	if _, err := store.ResolveApproval(ctx, sqlite.ResolveApprovalParams{
+		ApprovalID: response.ApprovalID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "fixture proof",
+	}); err != nil {
+		t.Fatalf("ResolveApproval() error = %v", err)
+	}
+
+	driver := &recordingMutationDriver{response: BrowserMutationDriverResponse{
+		Status:      "completed",
+		AdapterKind: "huginn_browser_mutation_fixture",
+		ActionKind:  "submit_form",
+		FinalURL:    "https://example.com/form/complete",
+		Summary:     "Submitted fixture form with redacted evidence.",
+		Evidence: map[string]any{
+			"pre_action_visible_state":  "Fixture form ready",
+			"post_action_visible_state": "Fixture form submitted",
+		},
+	}}
+	result, err := Service{Store: store, MutationDriver: driver}.ContinueApprovedMutation(ctx, response.ApprovalID)
+	if err != nil {
+		t.Fatalf("ContinueApprovedMutation() error = %v", err)
+	}
+	if !driver.called {
+		t.Fatal("mutation driver was not called")
+	}
+	if driver.request.ApprovalID != response.ApprovalID || driver.request.ActionKind != "submit_form" || driver.request.PayloadHash == "" {
+		t.Fatalf("driver request = %+v, want approved immutable payload", driver.request)
+	}
+	if result.Status != "completed" || result.RunID <= 0 || result.RunArtifactID <= 0 || result.EvidenceType != BrowserMutationEvidenceType {
+		t.Fatalf("result = %+v, want completed mutation evidence", result)
+	}
+	run, err := store.GetRun(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if run.Executor != BrowserMutationExecutor || run.Status != "completed" || run.TerminalReason != "browser_mutation_completed" {
+		t.Fatalf("run = %+v, want completed browser mutation run", run)
+	}
+	artifacts, err := store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{RunID: result.RunID, ArtifactType: BrowserMutationEvidenceType})
+	if err != nil {
+		t.Fatalf("ListRunArtifacts() error = %v", err)
+	}
+	if len(artifacts) != 1 || !strings.Contains(artifacts[0].DetailsJSON, `"payload_hash"`) || !strings.Contains(artifacts[0].DetailsJSON, `"post_action_visible_state"`) {
+		t.Fatalf("artifacts = %+v, want redacted browser mutation evidence", artifacts)
+	}
+}
+
+func TestContinueApprovedMutationRejectsPendingApproval(t *testing.T) {
+	store := openBrowserTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	task := createBrowserApprovalTask(t, store)
+	response, err := Service{Store: store}.RunPlugin(ctx, PluginRequest{
+		TaskID:             task.ID,
+		Objective:          "Submit the reviewed external form",
+		AllowedDomains:     []string{"example.com"},
+		StartURLs:          []string{"https://example.com/form"},
+		MaxPages:           1,
+		MaxDurationSeconds: 30,
+		Actions:            []string{"submit_form"},
+		RequestedBy:        "operator",
+	})
+	if err != nil {
+		t.Fatalf("RunPlugin() error = %v", err)
+	}
+	driver := &recordingMutationDriver{}
+	if _, err := (Service{Store: store, MutationDriver: driver}).ContinueApprovedMutation(ctx, response.ApprovalID); err == nil {
+		t.Fatal("ContinueApprovedMutation() error = nil, want pending approval rejection")
+	}
+	if driver.called {
+		t.Fatal("mutation driver was called before approval")
+	}
 }
 
 func TestPluginRunMutationRequiresTaskID(t *testing.T) {
@@ -819,4 +923,20 @@ func (adapter *recordingAdapter) Run(_ context.Context, request huginnbrowser.Re
 		return huginnbrowser.Response{}, adapter.err
 	}
 	return adapter.response, nil
+}
+
+type recordingMutationDriver struct {
+	called   bool
+	request  BrowserMutationDriverRequest
+	response BrowserMutationDriverResponse
+	err      error
+}
+
+func (driver *recordingMutationDriver) Run(_ context.Context, request BrowserMutationDriverRequest) (BrowserMutationDriverResponse, error) {
+	driver.called = true
+	driver.request = request
+	if driver.err != nil {
+		return BrowserMutationDriverResponse{}, driver.err
+	}
+	return driver.response, nil
 }

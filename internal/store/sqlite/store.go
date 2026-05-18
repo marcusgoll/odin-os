@@ -3366,6 +3366,145 @@ func (store *Store) BlockTaskAndRequestApproval(ctx context.Context, params Bloc
 	return task, approval, err
 }
 
+func (store *Store) BlockTaskAndRequestBrowserMutationApproval(ctx context.Context, params BlockTaskAndRequestBrowserMutationApprovalParams) (Task, Approval, BrowserMutationRequest, error) {
+	now := store.now()
+	var task Task
+	var approval Approval
+	var mutationRequest BrowserMutationRequest
+
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		if current.Status == "completed" || current.Status == "failed" {
+			return fmt.Errorf("task %d is already %s", params.TaskID, current.Status)
+		}
+		if current.Status == "blocked" {
+			return fmt.Errorf("task %d is already %s", params.TaskID, current.Status)
+		}
+
+		previousStatus := current.Status
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET status = ?, blocked_reason = ?, updated_at = ?
+			WHERE id = ?
+		`, "blocked", "approval_required", formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+
+		task = current
+		task.Status = "blocked"
+		task.BlockedReason = "approval_required"
+		task.UpdatedAt = now
+
+		projectID := task.ProjectID
+		if err := appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamTask,
+			StreamID:   task.ID,
+			EventType:  runtimeevents.EventTaskStatusChanged,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			Payload: runtimeevents.TaskStatusChangedPayload{
+				PreviousStatus: previousStatus,
+				Status:         task.Status,
+			},
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+
+		policySnapshotHash, runtimeSnapshotHash, err := store.approvalSnapshotHashesTx(ctx, tx, task, params.RunID)
+		if err != nil {
+			return err
+		}
+
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO approvals (task_id, run_id, status, requested_at, resolved_at, decision_by, reason, policy_snapshot_hash, runtime_snapshot_hash)
+			VALUES (?, ?, ?, ?, NULL, '', '', ?, ?)
+		`,
+			params.TaskID,
+			nullInt64(params.RunID),
+			"pending",
+			formatTime(now),
+			policySnapshotHash,
+			runtimeSnapshotHash,
+		)
+		if err != nil {
+			return err
+		}
+
+		approvalID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		approval = Approval{
+			ID:                  approvalID,
+			TaskID:              params.TaskID,
+			RunID:               params.RunID,
+			Status:              "pending",
+			RequestedAt:         now,
+			PolicySnapshotHash:  policySnapshotHash,
+			RuntimeSnapshotHash: runtimeSnapshotHash,
+		}
+
+		result, err = tx.ExecContext(ctx, `
+			INSERT INTO browser_mutation_requests (approval_id, task_id, action_kind, allowed_domains_json, start_url, browser_session_id, payload_json, payload_hash, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			approval.ID,
+			params.TaskID,
+			params.ActionKind,
+			params.AllowedDomainsJSON,
+			params.StartURL,
+			nullInt64(params.BrowserSessionID),
+			params.PayloadJSON,
+			params.PayloadHash,
+			formatTime(now),
+		)
+		if err != nil {
+			return err
+		}
+		mutationRequestID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		mutationRequest = BrowserMutationRequest{
+			ID:               mutationRequestID,
+			ApprovalID:       approval.ID,
+			TaskID:           params.TaskID,
+			ActionKind:       params.ActionKind,
+			AllowedDomains:   params.AllowedDomainsJSON,
+			StartURL:         params.StartURL,
+			BrowserSessionID: params.BrowserSessionID,
+			PayloadJSON:      params.PayloadJSON,
+			PayloadHash:      params.PayloadHash,
+			CreatedAt:        now,
+		}
+
+		return appendEventTx(ctx, tx, eventInsert{
+			StreamType: runtimeevents.StreamApproval,
+			StreamID:   approval.ID,
+			EventType:  runtimeevents.EventApprovalRequested,
+			Scope:      task.Scope,
+			ProjectID:  &projectID,
+			TaskID:     &task.ID,
+			RunID:      params.RunID,
+			Payload: runtimeevents.ApprovalRequestedPayload{
+				TaskID:      task.ID,
+				RunID:       params.RunID,
+				Status:      approval.Status,
+				RequestedBy: params.RequestedBy,
+			},
+			OccurredAt: now,
+		})
+	})
+
+	return task, approval, mutationRequest, err
+}
+
 func (store *Store) AwaitApproval(ctx context.Context, params AwaitApprovalParams) (Task, Run, Approval, error) {
 	now := store.now()
 	var task Task
@@ -7084,6 +7223,15 @@ func (store *Store) GetLatestTaskApproval(ctx context.Context, taskID int64) (Ap
 	return scanApproval(row)
 }
 
+func (store *Store) GetBrowserMutationRequestByApproval(ctx context.Context, approvalID int64) (BrowserMutationRequest, error) {
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, approval_id, task_id, action_kind, allowed_domains_json, start_url, browser_session_id, payload_json, payload_hash, created_at
+		FROM browser_mutation_requests
+		WHERE approval_id = ?
+	`, approvalID)
+	return scanBrowserMutationRequest(row)
+}
+
 func (store *Store) GetIncident(ctx context.Context, incidentID int64) (Incident, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT id, run_id, severity, status, summary, details_json, opened_at, updated_at
@@ -10724,6 +10872,33 @@ func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 	approval.PolicySnapshotHash = policySnapshotHash
 	approval.RuntimeSnapshotHash = runtimeSnapshotHash
 	return approval, nil
+}
+
+func scanBrowserMutationRequest(row interface{ Scan(...any) error }) (BrowserMutationRequest, error) {
+	var request BrowserMutationRequest
+	var browserSessionID sql.NullInt64
+	var createdAt string
+	if err := row.Scan(
+		&request.ID,
+		&request.ApprovalID,
+		&request.TaskID,
+		&request.ActionKind,
+		&request.AllowedDomains,
+		&request.StartURL,
+		&browserSessionID,
+		&request.PayloadJSON,
+		&request.PayloadHash,
+		&createdAt,
+	); err != nil {
+		return BrowserMutationRequest{}, err
+	}
+	var err error
+	request.BrowserSessionID = nullableInt64Ptr(browserSessionID)
+	request.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return BrowserMutationRequest{}, err
+	}
+	return request, nil
 }
 
 func scanIncident(row interface{ Scan(...any) error }) (Incident, error) {

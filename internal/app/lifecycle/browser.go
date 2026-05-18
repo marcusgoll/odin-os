@@ -62,6 +62,27 @@ type browserRunView struct {
 	ErrorMessage              string                                   `json:"error_message,omitempty"`
 }
 
+type browserMutationContinuationView struct {
+	Status             string         `json:"status"`
+	ApprovalID         int64          `json:"approval_id"`
+	TaskID             int64          `json:"task_id"`
+	RunID              int64          `json:"run_id"`
+	RunArtifactID      int64          `json:"run_artifact_id"`
+	EvidenceType       string         `json:"evidence_type"`
+	ActionKind         string         `json:"action_kind"`
+	PayloadHash        string         `json:"payload_hash"`
+	AllowedDomains     []string       `json:"allowed_domains"`
+	StartURL           string         `json:"start_url"`
+	BrowserSessionID   int64          `json:"browser_session_id,omitempty"`
+	AdapterStatus      string         `json:"adapter_status"`
+	AdapterKind        string         `json:"adapter_kind"`
+	FinalURL           string         `json:"final_url,omitempty"`
+	InterventionReason string         `json:"intervention_reason,omitempty"`
+	Evidence           map[string]any `json:"evidence,omitempty"`
+	ErrorCode          string         `json:"error_code,omitempty"`
+	ErrorMessage       string         `json:"error_message,omitempty"`
+}
+
 type browserSessionEnvelope struct {
 	Session browserSessionView `json:"session"`
 }
@@ -274,6 +295,9 @@ func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io
 		_, err := fmt.Fprintln(stdout, commands.BrowserUsage)
 		return err
 	}
+	if command.Name == "continue" {
+		return runBrowserContinue(ctx, app, command, stdout)
+	}
 	if command.Name == "session" {
 		return runBrowserSession(ctx, app, command, stdout)
 	}
@@ -337,6 +361,38 @@ func runBrowser(ctx context.Context, app bootstrap.App, args []string, stdout io
 		return commands.WriteJSON(stdout, view)
 	}
 	_, err = fmt.Fprintf(stdout, "browser goal=%d status=%s evidence=%d type=%s\n", view.GoalID, view.Status, view.EvidenceID, view.EvidenceType)
+	return err
+}
+
+func runBrowserContinue(ctx context.Context, app bootstrap.App, command commands.BrowserCommand, stdout io.Writer) error {
+	result, err := browserexecutor.Service{Store: app.Store}.ContinueApprovedMutation(ctx, command.ApprovalID)
+	if err != nil {
+		return err
+	}
+	view := browserMutationContinuationView{
+		Status:             result.Status,
+		ApprovalID:         result.ApprovalID,
+		TaskID:             result.TaskID,
+		RunID:              result.RunID,
+		RunArtifactID:      result.RunArtifactID,
+		EvidenceType:       result.EvidenceType,
+		ActionKind:         result.ActionKind,
+		PayloadHash:        result.PayloadHash,
+		AllowedDomains:     result.AllowedDomains,
+		StartURL:           result.StartURL,
+		BrowserSessionID:   result.BrowserSessionID,
+		AdapterStatus:      result.AdapterStatus,
+		AdapterKind:        result.AdapterKind,
+		FinalURL:           result.FinalURL,
+		InterventionReason: result.InterventionReason,
+		Evidence:           result.Evidence,
+		ErrorCode:          result.ErrorCode,
+		ErrorMessage:       result.ErrorMessage,
+	}
+	if command.JSON {
+		return commands.WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(stdout, "browser_mutation approval=%d status=%s run=%d artifact=%d action=%s\n", view.ApprovalID, view.Status, view.RunID, view.RunArtifactID, view.ActionKind)
 	return err
 }
 

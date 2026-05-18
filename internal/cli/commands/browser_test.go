@@ -25,6 +25,19 @@ func TestParseBrowserRunAcceptsTaskIDForWorkEvidence(t *testing.T) {
 	}
 }
 
+func TestParseBrowserContinueApprovalCommand(t *testing.T) {
+	command, err := ParseBrowser([]string{"continue", "--approval-id", "23", "--json"})
+	if err != nil {
+		t.Fatalf("ParseBrowser(continue) error = %v", err)
+	}
+	if command.Name != "continue" || command.ApprovalID != 23 || !command.JSON {
+		t.Fatalf("command = %+v, want parsed browser continuation command", command)
+	}
+	if _, err := ParseBrowser([]string{"continue", "--json"}); err == nil {
+		t.Fatal("ParseBrowser(continue missing approval id) error = nil, want error")
+	}
+}
+
 func TestParseBrowserRunAcceptsSafetyOptions(t *testing.T) {
 	command, err := ParseBrowser([]string{
 		"run",
