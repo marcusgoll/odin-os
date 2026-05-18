@@ -7,7 +7,7 @@ models:
     access: plan_backed_cli
     adapter: codex_headless
     capabilities: [judgment, code, frontend, backend, review, planning, tools]
-    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research, security_decision, production_deploy]
+    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research, test_writing, refactor, summarization, formatting, destructive, security_decision, production_deploy]
     supported_features: [headless_plan, tools, resume]
     context_window_tokens: 200000
     max_input_tokens: 160000
@@ -22,7 +22,7 @@ models:
     access: plan_backed_cli
     adapter: claude_code_headless
     capabilities: [judgment, code, frontend, backend, review, planning, tools]
-    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research, security_decision]
+    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research, test_writing, refactor, summarization, formatting, destructive, security_decision]
     supported_features: [headless_plan, tools, resume]
     context_window_tokens: 200000
     max_input_tokens: 160000
@@ -37,7 +37,7 @@ models:
     access: plan_backed_cli
     adapter: gemini_cli_headless
     capabilities: [code, review, planning, tools]
-    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research]
+    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research, test_writing, refactor, summarization, formatting]
     supported_features: [headless_plan, tools, resume]
     context_window_tokens: 1000000
     max_input_tokens: 900000
@@ -51,7 +51,7 @@ models:
     access: api
     adapter: openai_api
     capabilities: [judgment, code, review, planning]
-    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research]
+    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research, test_writing, refactor, summarization, formatting]
     supported_features: [cost_estimate, streaming, tools]
     context_window_tokens: 200000
     max_input_tokens: 160000
@@ -66,7 +66,7 @@ models:
     access: api
     adapter: anthropic_api
     capabilities: [judgment, code, review, planning]
-    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research]
+    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research, test_writing, refactor, summarization, formatting]
     supported_features: [cost_estimate, streaming, tools]
     context_window_tokens: 200000
     max_input_tokens: 160000
@@ -81,7 +81,7 @@ models:
     access: api
     adapter: google_api
     capabilities: [code, review, planning, research]
-    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research]
+    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research, test_writing, refactor, summarization, formatting]
     supported_features: [cost_estimate, streaming, tools]
     context_window_tokens: 1000000
     max_input_tokens: 900000

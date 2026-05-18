@@ -71,6 +71,18 @@ func TestCreateTaskFromActEnsuresRuntimeProjectAndCreatesQueuedTask(t *testing.T
 	}
 }
 
+func TestTaskClassForRoutingDoesNotClassifyLatestAsTestWriting(t *testing.T) {
+	t.Parallel()
+
+	intent := executionIntent{ActionClass: projects.ActionClassReadOnly}
+	if got := taskClassForRouting("Review latest PBS bidding package for next-month improvements", intent); got != "general" {
+		t.Fatalf("taskClassForRouting(latest review) = %q, want general", got)
+	}
+	if got := taskClassForRouting("Add tests for route fallback", intent); got != "test_writing" {
+		t.Fatalf("taskClassForRouting(test work) = %q, want test_writing", got)
+	}
+}
+
 func TestCreateTaskOnceReusesDeterministicKey(t *testing.T) {
 	t.Parallel()
 
