@@ -34,6 +34,11 @@ func TestOperationalHandlerServesInstallablePWAShellAssets(t *testing.T) {
 	for _, want := range []string{
 		`<link rel="manifest" href="/app/manifest.webmanifest">`,
 		`id="home-title"`,
+		`id="command-center-dashboard"`,
+		`id="odin-health-panel"`,
+		`id="live-execution-list"`,
+		`id="activity-timeline-list"`,
+		`id="detail-drawer"`,
 		`Action Required`,
 		`Approvals`,
 		`Failed/Blocked`,
@@ -48,6 +53,16 @@ func TestOperationalHandlerServesInstallablePWAShellAssets(t *testing.T) {
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("/app/ missing %q:\n%s", want, html)
+		}
+	}
+
+	appJS := pwaGetText(t, server.URL+"/app/app.js")
+	for _, want := range []string{
+		`/mobile/operator-snapshot`,
+		`data-detail-row`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Fatalf("app.js missing %q:\n%s", want, appJS)
 		}
 	}
 

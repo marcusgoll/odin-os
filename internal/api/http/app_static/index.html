@@ -29,7 +29,7 @@
 
       <section id="dashboard-error" class="state-banner danger" aria-live="polite" hidden></section>
 
-      <section class="section-stack" aria-label="Operator dashboard">
+      <section id="command-center-dashboard" class="command-center-grid" aria-label="Operator command center">
         <section class="operator-section urgent" aria-labelledby="action-required-title">
           <div class="section-heading">
             <h2 id="action-required-title">Action Required</h2>
@@ -38,6 +38,45 @@
           <div id="action-required-list" class="card-list"></div>
         </section>
 
+        <section id="odin-health-panel" class="operator-section" aria-labelledby="odin-health-title">
+          <div class="section-heading">
+            <h2 id="odin-health-title">Odin Health</h2>
+            <span id="odin-health-status" class="count-pill">unknown</span>
+          </div>
+          <div id="odin-health-detail" class="card-list"></div>
+        </section>
+
+        <section class="operator-section" aria-labelledby="live-execution-title">
+          <div class="section-heading">
+            <h2 id="live-execution-title">Live Execution</h2>
+            <span id="live-execution-count" class="count-pill">0</span>
+          </div>
+          <div id="live-execution-list" class="card-list"></div>
+        </section>
+
+        <section class="operator-section" aria-labelledby="activity-timeline-title">
+          <div class="section-heading">
+            <h2 id="activity-timeline-title">Activity Timeline</h2>
+            <span id="activity-timeline-count" class="count-pill">0</span>
+          </div>
+          <div id="activity-timeline-list" class="card-list"></div>
+        </section>
+      </section>
+
+      <aside id="detail-drawer" class="detail-drawer" aria-labelledby="detail-drawer-title" hidden>
+        <div class="detail-header">
+          <div>
+            <p id="detail-drawer-kicker" class="eyebrow">Selected row</p>
+            <h2 id="detail-drawer-title">Details</h2>
+          </div>
+          <button id="detail-drawer-close" class="ghost-button small" type="button" aria-label="Close detail panel">Close</button>
+        </div>
+        <p id="detail-drawer-summary" class="card-body"></p>
+        <div id="detail-drawer-actions" class="button-row detail-actions"></div>
+        <dl id="detail-drawer-facts" class="fact-grid detail-facts"></dl>
+      </aside>
+
+      <section class="section-stack secondary-stack" aria-label="Supporting operator queues">
         <section class="operator-section" aria-labelledby="failed-blocked-title">
           <div class="section-heading">
             <h2 id="failed-blocked-title">Failed/Blocked</h2>

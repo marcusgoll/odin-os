@@ -16,6 +16,7 @@ let chunks = [];
 let pendingApprovalDecision = null;
 let pendingReviewDecision = null;
 let registeredSession = false;
+const detailRows = new Map();
 
 function csrfToken() {
   return sessionStorage.getItem(csrfKey) || '';
@@ -155,6 +156,13 @@ function actionLink(label, href) {
   return link;
 }
 
+function disabledActionPill(label) {
+  const pill = document.createElement('span');
+  pill.className = 'action-pill';
+  pill.textContent = label;
+  return pill;
+}
+
 function handoffLink(item) {
   const deepLink = String(item?.deep_link || '');
   if (!deepLink) return '';
@@ -284,7 +292,8 @@ async function refreshDashboard() {
   }
   renderLoading();
   try {
-    const [status, overview, reviewQueue, approvals, browser, notifications] = await Promise.all([
+    const [snapshotResult, status, overview, reviewQueue, approvals, browser, notifications] = await Promise.all([
+      mobileFetch('/mobile/operator-snapshot').catch((error) => ({ snapshot_error: error })),
       mobileFetch('/mobile/status'),
       mobileFetch('/mobile/overview'),
       mobileFetch('/mobile/review-queue'),
@@ -292,15 +301,20 @@ async function refreshDashboard() {
       mobileFetch('/mobile/browser/status'),
       mobileFetch('/mobile/notifications/preferences'),
     ]);
-    renderDashboard({ status, overview, reviewQueue, approvals, browser, notifications });
+    const snapshot = snapshotResult.snapshot_error ? null : snapshotResult;
+    renderDashboard({ snapshot, status, overview, reviewQueue, approvals, browser, notifications });
+    if (snapshotResult.snapshot_error) {
+      showError(`Operator snapshot unavailable; loaded fallback projections: ${snapshotResult.snapshot_error.message}`);
+    }
   } catch (error) {
-    renderAuthRequired();
     if (error.code === 'admin_auth_required') {
+      renderAuthRequired();
       setRegisteredState(false);
       setStatus('Register this device to load Odin projections.');
       showError('');
       return;
     }
+    renderErrorState(error.message);
     showError(`Could not load Odin projections: ${error.message}`);
   }
 }
@@ -308,13 +322,19 @@ async function refreshDashboard() {
 function renderAuthRequired() {
   homeSummary.textContent = 'Register this device to load live projections.';
   setCount('#action-count', 0);
+  setCount('#live-execution-count', 0);
+  setCount('#activity-timeline-count', 0);
   setCount('#approvals-count', 0);
   setCount('#failed-blocked-count', 0);
   setCount('#inbox-count', 0);
   setCount('#running-work-count', 0);
   setCount('#browser-count', 0);
+  setCount('#odin-health-status', 'auth required');
   for (const id of [
     '#action-required-list',
+    '#odin-health-detail',
+    '#live-execution-list',
+    '#activity-timeline-list',
     '#approvals-list',
     '#failed-blocked-list',
     '#today-list',
@@ -327,19 +347,26 @@ function renderAuthRequired() {
     clearNode(node);
     node.appendChild(emptyCard('Device registration required', 'Use Register. No production mock data is shown.'));
   }
+  closeDetailDrawer();
 }
 
 function renderLoading() {
   homeSummary.textContent = 'Loading live Odin projections...';
   setStatus(registeredSession ? 'Device registered. Loading projections...' : 'Loading projections...');
   setCount('#action-count', '...');
+  setCount('#live-execution-count', '...');
+  setCount('#activity-timeline-count', '...');
   setCount('#approvals-count', '...');
   setCount('#failed-blocked-count', '...');
   setCount('#inbox-count', '...');
   setCount('#running-work-count', '...');
   setCount('#browser-count', '...');
+  setCount('#odin-health-status', 'loading');
   for (const id of [
     '#action-required-list',
+    '#odin-health-detail',
+    '#live-execution-list',
+    '#activity-timeline-list',
     '#approvals-list',
     '#failed-blocked-list',
     '#today-list',
@@ -352,19 +379,53 @@ function renderLoading() {
     clearNode(node);
     node.appendChild(emptyCard('Loading live projections', 'Odin is reading the current operator queues.'));
   }
+  closeDetailDrawer();
 }
 
-function renderDashboard({ status, overview, reviewQueue, approvals, browser, notifications }) {
+function renderErrorState(message) {
+  homeSummary.textContent = 'Odin projections could not be loaded.';
+  setStatus('Projection load failed. Refresh after checking the Odin service.');
+  setCount('#action-count', 0);
+  setCount('#live-execution-count', 0);
+  setCount('#activity-timeline-count', 0);
+  setCount('#approvals-count', 0);
+  setCount('#failed-blocked-count', 0);
+  setCount('#inbox-count', 0);
+  setCount('#running-work-count', 0);
+  setCount('#browser-count', 0);
+  setCount('#odin-health-status', 'error');
+  for (const id of [
+    '#action-required-list',
+    '#odin-health-detail',
+    '#live-execution-list',
+    '#activity-timeline-list',
+    '#approvals-list',
+    '#failed-blocked-list',
+    '#today-list',
+    '#inbox-list',
+    '#running-work-list',
+    '#browser-list',
+    '#quiet-list',
+  ]) {
+    const node = document.querySelector(id);
+    clearNode(node);
+    node.appendChild(emptyCard('Projection load failed', message || 'Refresh after checking Odin serve.'));
+  }
+  closeDetailDrawer();
+}
+
+function renderDashboard({ snapshot, status, overview, reviewQueue, approvals, browser, notifications }) {
   const reviewItems = reviewQueue.items || [];
   const approvalItems = approvals.items || [];
-  const actionCount = workbenchActionCount(reviewItems, approvalItems, browser);
+  const actionRows = snapshot?.action_required || [];
+  const actionCount = actionRows.length || workbenchActionCount(reviewItems, approvalItems, browser);
   const projectionCount = overview.actual_use?.action_required_count ?? reviewItems.length;
   setStatus('Device registered for this browser session.');
   homeSummary.textContent = actionCount > 0
     ? `${actionCount} live action card${actionCount === 1 ? '' : 's'} ready. Odin overview reports ${projectionCount} action-required row${projectionCount === 1 ? '' : 's'}.`
     : 'No action-required rows in current projections.';
 
-  renderActionRequired(overview, reviewItems, approvalItems, browser);
+  renderCommandCenterSnapshot(snapshot, overview, reviewItems, approvalItems, browser);
   renderApprovals(approvalItems);
   renderFailedBlocked(overview, reviewItems);
   renderToday(status, overview, notifications);
@@ -372,6 +433,231 @@ function renderDashboard({ status, overview, reviewQueue, approvals, browser, no
   renderRunningWork(overview);
   renderBrowser(browser);
   renderQuietLater(overview, notifications);
+}
+
+function renderCommandCenterSnapshot(snapshot, overview, reviewItems, approvalItems, browser) {
+  detailRows.clear();
+  renderOdinHealth(snapshot?.odin_health, overview);
+  renderSnapshotList({
+    selector: '#action-required-list',
+    countSelector: '#action-count',
+    rows: snapshot?.action_required || [],
+    emptyTitle: 'No action-required rows',
+    emptyDetail: 'Odin overview has no review, blocked, failed, or browser intervention rows right now.',
+    section: 'action_required',
+    reviewItems,
+    approvalItems,
+    fallback: () => renderActionRequiredFallback(overview, reviewItems, approvalItems, browser),
+  });
+  renderSnapshotList({
+    selector: '#live-execution-list',
+    countSelector: '#live-execution-count',
+    rows: snapshot?.live_execution || [],
+    emptyTitle: 'No active run attempts',
+    emptyDetail: 'Running work appears only when Odin reports active run attempts.',
+    section: 'live_execution',
+    reviewItems,
+    approvalItems,
+    fallback: () => renderLiveExecutionFallback(overview),
+  });
+  renderSnapshotList({
+    selector: '#activity-timeline-list',
+    countSelector: '#activity-timeline-count',
+    rows: snapshot?.activity || [],
+    emptyTitle: 'No recent activity rows',
+    emptyDetail: 'Activity appears when Odin exposes runtime events in the operator snapshot.',
+    section: 'activity',
+    reviewItems,
+    approvalItems,
+  });
+}
+
+function renderOdinHealth(health, overview) {
+  const node = document.querySelector('#odin-health-detail');
+  clearNode(node);
+  const status = health?.status || overview?.readiness?.status || 'unknown';
+  setCount('#odin-health-status', status);
+  if (!health) {
+    const card = projectionCard('info', `Readiness: ${status}`, 'fallback projection', overview?.readiness?.note || 'Snapshot health is unavailable; overview readiness is still shown.');
+    appendCardFacts(card, [
+      compactID('active_runs', overview?.actual_use?.active_run_count),
+      compactID('action_required', overview?.actual_use?.action_required_count),
+    ]);
+    node.appendChild(card);
+    return;
+  }
+  const card = snapshotRowCard({
+    id: 'odin-health',
+    label: `Health: ${status}`,
+    summary: health.summary || 'Odin health detail is available.',
+    severity: health.ready ? 'info' : 'warning',
+    command: health.command || 'odin healthcheck',
+    details: health.details || {},
+  }, 'odin_health');
+  node.appendChild(card);
+}
+
+function renderSnapshotList({ selector, countSelector, rows, emptyTitle, emptyDetail, section, reviewItems, approvalItems, fallback }) {
+  const node = document.querySelector(selector);
+  clearNode(node);
+  if (!rows.length && fallback) {
+    fallback();
+    return;
+  }
+  setCount(countSelector, rows.length);
+  if (!rows.length) {
+    node.appendChild(emptyCard(emptyTitle, emptyDetail));
+    return;
+  }
+  rows.slice(0, 8).forEach((row) => {
+    node.appendChild(snapshotRowCard(hydrateDetailRow(row, reviewItems, approvalItems), section));
+  });
+}
+
+function renderLiveExecutionFallback(overview) {
+  const node = document.querySelector('#live-execution-list');
+  clearNode(node);
+  const activeRuns = overview?.observability?.active_runs || [];
+  setCount('#live-execution-count', activeRuns.length);
+  for (const run of activeRuns.slice(0, 5)) {
+    const card = projectionCard('info', run.work_item_key, run.status, `Run ${run.run_id}, attempt ${run.attempt}, ${run.executor}`);
+    appendCardFacts(card, [
+      compactID('run', run.run_id),
+      compactID('task', run.task_id),
+      compactID('executor', run.executor),
+    ]);
+    node.appendChild(card);
+  }
+  if (!activeRuns.length) {
+    node.appendChild(emptyCard('No active run attempts', 'Running work appears only when Odin reports active run attempts.'));
+  }
+}
+
+function hydrateDetailRow(row, reviewItems, approvalItems) {
+  const details = row?.details || {};
+  const queueID = row?.id || details.queue_id;
+  const objectID = String(details.object_id || '').trim();
+  return {
+    ...row,
+    sourceReviewItem: (reviewItems || []).find((item) => item.queue_id === queueID),
+    sourceApprovalItem: (approvalItems || []).find((item) => String(item.approval_id) === objectID || `approval:${item.approval_id}` === queueID),
+  };
+}
+
+function snapshotRowCard(row, section) {
+  const detailID = `${section}:${row.id || row.label || detailRows.size}`;
+  detailRows.set(detailID, { ...row, section });
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `status-card detail-row ${severityClass(row.severity)}`.trim();
+  button.setAttribute('data-detail-row', detailID);
+  button.setAttribute('aria-label', `Open details for ${row.label || row.id || section}`);
+  button.addEventListener('click', () => openDetailDrawer(detailID));
+
+  const rowHeader = document.createElement('div');
+  rowHeader.className = 'card-row';
+  const h3 = document.createElement('h3');
+  h3.textContent = row.label || row.id || 'Operator row';
+  rowHeader.appendChild(h3);
+  if (row.severity) {
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = humanizeToken(row.severity);
+    rowHeader.appendChild(badge);
+  }
+  button.appendChild(rowHeader);
+
+  const summary = document.createElement('p');
+  summary.className = 'card-body';
+  summary.textContent = row.summary || 'Open for source identifiers and command hints.';
+  button.appendChild(summary);
+
+  appendCardFacts(button, [
+    compactID('id', row.id),
+    compactID('command', row.command),
+  ]);
+  return button;
+}
+
+function severityClass(severity) {
+  switch (String(severity || '').toLowerCase()) {
+    case 'critical':
+    case 'error':
+    case 'danger':
+      return 'danger';
+    case 'warning':
+    case 'warn':
+      return 'warn';
+    case 'info':
+    case 'healthy':
+      return 'info';
+    default:
+      return '';
+  }
+}
+
+function openDetailDrawer(detailID) {
+  const row = detailRows.get(detailID);
+  if (!row) return;
+  const drawer = document.querySelector('#detail-drawer');
+  document.querySelector('#detail-drawer-kicker').textContent = humanizeToken(row.section || 'selected row');
+  document.querySelector('#detail-drawer-title').textContent = row.label || row.id || 'Details';
+  document.querySelector('#detail-drawer-summary').textContent = row.summary || 'No summary provided by the snapshot.';
+
+  const actions = document.querySelector('#detail-drawer-actions');
+  clearNode(actions);
+  if (row.command) actions.appendChild(disabledActionPill(row.command));
+  if (row.deep_link) actions.appendChild(actionLink('Open source', row.deep_link));
+  for (const control of detailAllowedActionControls(row)) actions.appendChild(control);
+
+  const facts = document.querySelector('#detail-drawer-facts');
+  clearNode(facts);
+  appendDetailFact(facts, 'row_id', row.id);
+  appendDetailFact(facts, 'section', row.section);
+  appendDetailFact(facts, 'severity', row.severity);
+  appendDetailFact(facts, 'command_hint', row.command);
+  for (const [key, value] of Object.entries(row.details || {})) {
+    appendDetailFact(facts, key, value);
+  }
+
+  drawer.hidden = false;
+  drawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function detailAllowedActionControls(row) {
+  const allowed = Array.isArray(row.details?.allowed_actions) ? row.details.allowed_actions : [];
+  if (!allowed.length) return [];
+  return allowed.map((action) => {
+    if (row.sourceApprovalItem && ['approve', 'deny', 'clarify'].includes(action)) {
+      const className = action === 'approve' ? 'primary small' : action === 'deny' ? 'danger-button small' : 'ghost-button small';
+      return actionButton(actionLabel(action), className, () => openApprovalConfirmation(row.sourceApprovalItem, action));
+    }
+    if (row.sourceReviewItem) {
+      const className = action === 'reject' ? 'danger-button small' : action === 'complete' ? 'primary small' : 'ghost-button small';
+      return actionButton(actionLabel(action), className, () => openReviewDecision(row.sourceReviewItem, action));
+    }
+    return disabledActionPill(actionLabel(action));
+  });
+}
+
+function appendDetailFact(parent, key, value) {
+  if (value === undefined || value === null || value === '') return;
+  const dt = document.createElement('dt');
+  const dd = document.createElement('dd');
+  dt.textContent = humanizeToken(key);
+  dd.textContent = detailValue(value);
+  parent.append(dt, dd);
+}
+
+function detailValue(value) {
+  if (Array.isArray(value)) return value.map(detailValue).join(', ');
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function closeDetailDrawer() {
+  const drawer = document.querySelector('#detail-drawer');
+  if (drawer) drawer.hidden = true;
 }
 
 function workbenchActionCount(reviewItems, approvalItems, browser) {
@@ -388,7 +674,7 @@ function workbenchActionCount(reviewItems, approvalItems, browser) {
   return approvalCount + reviewActionCount + browserRunnerCount;
 }
 
-function renderActionRequired(overview, reviewItems, approvalItems, browser) {
+function renderActionRequiredFallback(overview, reviewItems, approvalItems, browser) {
   const node = document.querySelector('#action-required-list');
   clearNode(node);
   const items = [];
@@ -815,6 +1101,8 @@ document.querySelector('#register-device').addEventListener('click', async () =>
 });
 
 document.querySelector('#refresh-dashboard').addEventListener('click', refreshDashboard);
+
+document.querySelector('#detail-drawer-close').addEventListener('click', closeDetailDrawer);
 
 document.querySelector('#capture-fab').addEventListener('click', () => {
   captureDetails.open = true;
