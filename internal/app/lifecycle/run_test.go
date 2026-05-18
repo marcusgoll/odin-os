@@ -204,6 +204,26 @@ func TestRunWithoutArgsPrintsUsageInsteadOfStartingShell(t *testing.T) {
 	}
 }
 
+func TestRunFactoryHelpUsesTopLevelDispatcher(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"factory", "--help"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(factory --help) error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "usage: odin factory start --project <key> --title <text>") {
+		t.Fatalf("stdout = %q, want factory usage", output)
+	}
+	if strings.Contains(output, "unknown command") {
+		t.Fatalf("stdout = %q, should not contain unknown command", output)
+	}
+}
+
 func TestRunLeasesCleanupDryRunUsesCanonicalCommandPath(t *testing.T) {
 	t.Parallel()
 

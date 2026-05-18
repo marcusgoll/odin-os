@@ -76,7 +76,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal mobile browser x task initiative companion profile followup trigger scheduler transition skills design provider e2e\n\nRun detail: odin runs show <id>"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work factory scope jobs runs leases approvals review intake agenda logs knowledge memory goal mobile browser x task initiative companion profile followup trigger scheduler transition skills design provider e2e\n\nRun detail: odin runs show <id>"
 const runsUsage = "usage: odin runs [--json] | odin runs show <run-id> | odin runs routing (--run <run-id>|--task <id|key>) [--json]"
 
 const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<true|false>] [--dry-run|dry_run=<true|false>] [--json]"
@@ -346,6 +346,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 				Now: time.Now,
 			},
 		})
+	case "factory":
+		return runFactory(ctx, app, args[1:], stdout)
 	case "scope":
 		return runScope(app, args[1:], stdout)
 	case "jobs":
@@ -428,6 +430,20 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
+}
+
+func runFactory(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	_ = ctx
+	_ = app
+	if len(args) == 0 || isHelpArgs(args) {
+		_, err := fmt.Fprintln(stdout, commands.FactoryUsage)
+		return err
+	}
+	if _, err := commands.ParseFactory(args); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintln(stdout, commands.FactoryUsage)
+	return err
 }
 
 func isOperationalHelpCommand(command string) bool {
