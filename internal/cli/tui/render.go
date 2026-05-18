@@ -9,7 +9,6 @@ import (
 const (
 	defaultRenderWidth = 76
 	minRenderWidth     = 52
-	maxRenderWidth     = 160
 	wideRenderWidth    = 118
 	columnGap          = 2
 )
@@ -51,6 +50,9 @@ func RenderOverviewForTerminalSize(model Model, width int, height int, color boo
 
 func renderOverview(model Model, options renderOptions) string {
 	width := normalizedRenderWidth(options.Width)
+	if width >= wideRenderWidth {
+		return renderWideOperatorOverview(model, width, options.Height, options.Color)
+	}
 	panels := []panel{
 		actionPanel(model, options.Color),
 		healthPanel(model, options.Color),
@@ -69,16 +71,46 @@ func renderOverview(model Model, options renderOptions) string {
 	}
 
 	var builder strings.Builder
-	if width >= wideRenderWidth {
-		writeResponsivePanels(&builder, panels, width, options.Color)
-		return builder.String()
-	}
 	for index, panel := range panels {
 		writePanel(&builder, panel, width, options.Color)
 		if index < len(panels)-1 {
 			builder.WriteByte('\n')
 		}
 	}
+	return builder.String()
+}
+
+func renderWideOperatorOverview(model Model, width int, height int, color bool) string {
+	leftWidth := width * 45 / 100
+	if leftWidth < minRenderWidth {
+		leftWidth = minRenderWidth
+	}
+	if leftWidth > 92 {
+		leftWidth = 92
+	}
+	rightWidth := width - leftWidth - columnGap
+	if rightWidth < minRenderWidth {
+		rightWidth = minRenderWidth
+		leftWidth = width - rightWidth - columnGap
+	}
+
+	leftPanels := []panel{
+		compactActionPanel(model, color),
+		compactHealthPanel(model, color),
+		goalsPanel(model),
+		flowPanel(model),
+		recentWorkPanel(model),
+		agentsPanel(model),
+	}
+	left := renderPanelStackLines(leftPanels, leftWidth, color)
+	logRows := recentLogRows(model)
+	if height > 4 {
+		logRows = limitRows(logRows, height-2)
+	}
+	right := renderPanelLines(panel{Title: "RECENT LOGS", Rows: logRows}, rightWidth, color)
+
+	var builder strings.Builder
+	writePanelColumns(&builder, left, right, columnGap)
 	return builder.String()
 }
 
@@ -157,11 +189,33 @@ func compactLanePanel(model Model) panel {
 }
 
 func compactLogsPanel(model Model) panel {
+	return panel{Title: "RECENT LOGS", Rows: limitRows(recentLogRows(model), 3), Span: true}
+}
+
+func recentWorkPanel(model Model) panel {
+	rows := []string{}
+	if len(model.LiveExecution) > 0 {
+		rows = append(rows, "now")
+		rows = append(rows, indentRows(snapshotPanelRows(model.LiveExecution))...)
+	} else if model.ActiveRuns > 0 {
+		rows = append(rows, fmt.Sprintf("now active_runs=%d", model.ActiveRuns))
+	}
+	if len(model.Activity) > 0 {
+		rows = append(rows, "recent")
+		rows = append(rows, indentRows(snapshotPanelRows(model.Activity))...)
+	}
+	if len(rows) == 0 {
+		rows = []string{"none"}
+	}
+	return panel{Title: "RECENT WORK", Rows: limitRows(rows, 8)}
+}
+
+func recentLogRows(model Model) []string {
 	if model.LogsUnavailable != "" {
-		return panel{Title: "RECENT LOGS", Rows: []string{"Loki unavailable: " + model.LogsUnavailable}, Span: true}
+		return []string{"Loki unavailable: " + model.LogsUnavailable}
 	}
 	if len(model.Logs) == 0 {
-		return panel{Title: "RECENT LOGS", Rows: []string{"none"}, Span: true}
+		return []string{"none"}
 	}
 	rows := make([]string, 0, len(model.Logs))
 	for _, entry := range model.Logs {
@@ -174,7 +228,15 @@ func compactLogsPanel(model Model) panel {
 		}
 		rows = append(rows, line)
 	}
-	return panel{Title: "RECENT LOGS", Rows: limitRows(rows, 3), Span: true}
+	return rows
+}
+
+func indentRows(rows []string) []string {
+	indented := make([]string, 0, len(rows))
+	for _, row := range rows {
+		indented = append(indented, "  "+row)
+	}
+	return indented
 }
 
 func healthPanel(model Model, color bool) panel {
@@ -393,29 +455,13 @@ func approvalsPanel(model Model) panel {
 }
 
 func recentLogsPanel(model Model) panel {
-	rows := []string{"none"}
 	if model.LogsUnavailable != "" {
-		rows = []string{
+		return panel{Title: "RECENT LOGS", Rows: []string{
 			"Loki unavailable - runtime panels continue from store projections",
 			"unavailable: " + model.LogsUnavailable,
-		}
-		return panel{Title: "RECENT LOGS", Rows: rows, Span: true}
+		}, Span: true}
 	}
-	if len(model.Logs) > 0 {
-		rows = rows[:0]
-		for _, entry := range model.Logs {
-			line := strings.TrimSpace(entry.Line)
-			if line == "" {
-				line = "<empty>"
-			}
-			if entry.Timestamp != "" {
-				rows = append(rows, entry.Timestamp+"  "+line)
-				continue
-			}
-			rows = append(rows, line)
-		}
-	}
-	return panel{Title: "RECENT LOGS", Rows: rows, Span: true}
+	return panel{Title: "RECENT LOGS", Rows: recentLogRows(model), Span: true}
 }
 
 func estimatedOutputLines(panels []panel, width int) int {
@@ -570,6 +616,17 @@ func writePanel(builder *strings.Builder, panel panel, width int, color bool) {
 	}
 }
 
+func renderPanelStackLines(panels []panel, width int, color bool) []string {
+	lines := []string{}
+	for index, panel := range panels {
+		lines = append(lines, renderPanelLines(panel, width, color)...)
+		if index < len(panels)-1 {
+			lines = append(lines, strings.Repeat(" ", normalizedPanelWidth(width)))
+		}
+	}
+	return lines
+}
+
 func renderPanelLines(panel panel, width int, color bool) []string {
 	width = normalizedPanelWidth(width)
 	lines := []string{boxTop(panel.Title, width, color)}
@@ -629,9 +686,6 @@ func normalizedRenderWidth(width int) int {
 	}
 	if width < minRenderWidth {
 		return minRenderWidth
-	}
-	if width > maxRenderWidth {
-		return maxRenderWidth
 	}
 	return width
 }
