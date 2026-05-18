@@ -58,7 +58,6 @@ func renderOverview(model Model, options renderOptions) string {
 		pullRequestsPanel(model),
 		approvalsPanel(model),
 		recentLogsPanel(model),
-		legacyLogsPanel(),
 	}
 
 	var builder strings.Builder
@@ -314,10 +313,6 @@ func recentLogsPanel(model Model) panel {
 		}
 	}
 	return panel{Title: "RECENT LOGS", Rows: rows, Span: true}
-}
-
-func legacyLogsPanel() panel {
-	return panel{Title: "ODIN LOGS", Rows: []string{"see RECENT LOGS"}, Span: true}
 }
 
 func snapshotPanelRows(rows []SnapshotRow) []string {
