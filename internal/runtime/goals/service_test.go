@@ -208,12 +208,16 @@ func TestTickAutoStartsReadOnlyCreatedGoal(t *testing.T) {
 	if len(runs) != 1 || runs[0].Executor != "goal_runner" {
 		t.Fatalf("runs = %+v, want one goal_runner run", runs)
 	}
+	tasks := listGoalWorkItems(t, store)
+	if len(tasks) != 1 || tasks[0].Status != "queued" || tasks[0].ExecutionIntent != "read_only" {
+		t.Fatalf("goal work items = %+v, want one queued read-only task", tasks)
+	}
 	counts := countGoalRuntimeEvents(t, store)
 	if counts[runtimeevents.EventGoalRunStarted] != 1 {
 		t.Fatalf("goal_run.started events = %d, want 1", counts[runtimeevents.EventGoalRunStarted])
 	}
-	if counts[runtimeevents.EventGoalEvidenceRecorded] != 1 {
-		t.Fatalf("goal.evidence_recorded events = %d, want 1", counts[runtimeevents.EventGoalEvidenceRecorded])
+	if counts[runtimeevents.EventGoalEvidenceRecorded] != 2 {
+		t.Fatalf("goal.evidence_recorded events = %d, want auto-policy and work-item evidence", counts[runtimeevents.EventGoalEvidenceRecorded])
 	}
 }
 
@@ -243,6 +247,10 @@ func TestTickAutoStartsReadOnlyPlannedGoal(t *testing.T) {
 	}
 	if persisted.Status != sqlite.GoalStatusRunning || persisted.CurrentRunID == nil {
 		t.Fatalf("persisted goal = %+v, want running with current run", persisted)
+	}
+	tasks := listGoalWorkItems(t, store)
+	if len(tasks) != 1 || tasks[0].Status != "queued" {
+		t.Fatalf("goal work items = %+v, want one queued task", tasks)
 	}
 }
 
@@ -346,6 +354,10 @@ func TestTickDoesNotTreatEmbeddedXAsExternalAccountGoal(t *testing.T) {
 	if persisted.Status != sqlite.GoalStatusRunning || persisted.CurrentRunID == nil {
 		t.Fatalf("persisted goal = %+v, want running with current run", persisted)
 	}
+	tasks := listGoalWorkItems(t, store)
+	if len(tasks) != 1 || tasks[0].ExecutionIntent != "read_only" {
+		t.Fatalf("goal work items = %+v, want one read-only task", tasks)
+	}
 }
 
 func TestTickStartsApprovedGoalOnceThenKeepsExecutorBackedRunActive(t *testing.T) {
@@ -388,6 +400,10 @@ func TestTickStartsApprovedGoalOnceThenKeepsExecutorBackedRunActive(t *testing.T
 	if len(runs) != 1 {
 		t.Fatalf("runs len after first tick = %d, want 1", len(runs))
 	}
+	tasks := listGoalWorkItems(t, store)
+	if len(tasks) != 1 || tasks[0].ExecutionIntent != "mutation" {
+		t.Fatalf("goal work items after first tick = %+v, want one mutation task", tasks)
+	}
 
 	second, err := service.Tick(ctx)
 	if err != nil {
@@ -413,6 +429,10 @@ func TestTickStartsApprovedGoalOnceThenKeepsExecutorBackedRunActive(t *testing.T
 	if len(runs) != 1 {
 		t.Fatalf("runs len after second tick = %d, want no duplicate active run", len(runs))
 	}
+	tasks = listGoalWorkItems(t, store)
+	if len(tasks) != 1 {
+		t.Fatalf("goal work items after second tick = %d, want no duplicate task", len(tasks))
+	}
 	if runs[0].Executor != "goal_runner" {
 		t.Fatalf("run.Executor = %q, want goal_runner", runs[0].Executor)
 	}
@@ -429,8 +449,61 @@ func TestTickStartsApprovedGoalOnceThenKeepsExecutorBackedRunActive(t *testing.T
 	if counts[runtimeevents.EventGoalBlockerRecorded] != 0 {
 		t.Fatalf("goal.blocker_recorded events = %d, want no missing-executor blocker", counts[runtimeevents.EventGoalBlockerRecorded])
 	}
-	if counts[runtimeevents.EventGoalEvidenceRecorded] != 0 {
-		t.Fatalf("goal.evidence_recorded events = %d, want no missing-executor evidence", counts[runtimeevents.EventGoalEvidenceRecorded])
+	if counts[runtimeevents.EventGoalEvidenceRecorded] != 1 {
+		t.Fatalf("goal.evidence_recorded events = %d, want one work-item evidence event", counts[runtimeevents.EventGoalEvidenceRecorded])
+	}
+}
+
+func TestTickMaterializesWorkItemForLegacyActiveGoalRunnerRun(t *testing.T) {
+	ctx := context.Background()
+	store := openGoalServiceTestStore(t, "tick-legacy-active-goal-runner.db")
+	defer store.Close()
+
+	goal, err := store.CreateGoal(ctx, sqlite.CreateGoalParams{Title: "Approved deterministic implementation"})
+	if err != nil {
+		t.Fatalf("CreateGoal() error = %v", err)
+	}
+	for _, status := range []sqlite.GoalStatus{sqlite.GoalStatusPlanned, sqlite.GoalStatusApprovedForExecution, sqlite.GoalStatusRunning} {
+		if _, err := store.TransitionGoal(ctx, sqlite.TransitionGoalParams{GoalID: goal.ID, Status: status}); err != nil {
+			t.Fatalf("TransitionGoal(%s) error = %v", status, err)
+		}
+	}
+	run, err := store.CreateGoalRun(ctx, sqlite.CreateGoalRunParams{
+		GoalID:      goal.ID,
+		Status:      sqlite.GoalRunStatusRunning,
+		Executor:    "goal_runner",
+		Attempts:    1,
+		MaxAttempts: 1,
+		LeaseOwner:  "goal_tick",
+	})
+	if err != nil {
+		t.Fatalf("CreateGoalRun() error = %v", err)
+	}
+
+	result, err := NewService(store).Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick() error = %v", err)
+	}
+	if result.Observed != 1 || result.Started != 1 || len(result.Results) != 1 || result.Results[0].Reason != TickReasonWorkItemMaterialized {
+		t.Fatalf("Tick() = %+v, want one work item materialized", result)
+	}
+	if result.Results[0].GoalRunID == nil || *result.Results[0].GoalRunID != run.ID || result.Results[0].WorkItemID == nil || result.Results[0].WorkItemKey != "goal-1-run-1" {
+		t.Fatalf("Tick result = %+v, want goal run and work item refs", result.Results[0])
+	}
+	tasks := listGoalWorkItems(t, store)
+	if len(tasks) != 1 || tasks[0].Key != "goal-1-run-1" || tasks[0].Status != "queued" {
+		t.Fatalf("goal work items = %+v, want one queued goal task", tasks)
+	}
+	second, err := NewService(store).Tick(ctx)
+	if err != nil {
+		t.Fatalf("Tick(second) error = %v", err)
+	}
+	if second.Observed != 1 || second.Skipped != 1 || second.Results[0].Reason != TickReasonActiveRunExists {
+		t.Fatalf("second Tick() = %+v, want active run skip after task exists", second)
+	}
+	tasks = listGoalWorkItems(t, store)
+	if len(tasks) != 1 {
+		t.Fatalf("goal work items after second tick = %d, want no duplicate", len(tasks))
 	}
 }
 
@@ -643,7 +716,57 @@ func openGoalServiceTestStore(t *testing.T, name string) *sqlite.Store {
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatalf("Migrate() error = %v", err)
 	}
+	for _, key := range []string{"odin-core", "pbs", "cfipros", "marcusgoll"} {
+		if _, err := store.CreateProject(context.Background(), sqlite.CreateProjectParams{
+			Key:           key,
+			Name:          key,
+			Scope:         "project",
+			GitRoot:       filepath.Join(t.TempDir(), key),
+			DefaultBranch: "main",
+			ManifestPath:  "config/projects.yaml",
+		}); err != nil {
+			t.Fatalf("CreateProject(%s) error = %v", key, err)
+		}
+	}
 	return store
+}
+
+func listGoalWorkItems(t *testing.T, store *sqlite.Store) []sqlite.Task {
+	t.Helper()
+
+	rows, err := store.DB().QueryContext(context.Background(), `
+		SELECT id
+		FROM tasks
+		WHERE requested_by = 'goal_runner'
+		ORDER BY id
+	`)
+	if err != nil {
+		t.Fatalf("query goal work items: %v", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan goal work item id: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("goal work item rows error: %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close goal work item rows: %v", err)
+	}
+	var tasks []sqlite.Task
+	for _, id := range ids {
+		task, err := store.GetTask(context.Background(), id)
+		if err != nil {
+			t.Fatalf("GetTask(%d) error = %v", id, err)
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks
 }
 
 func countGoalRuntimeEvents(t *testing.T, store *sqlite.Store) map[runtimeevents.Type]int {
