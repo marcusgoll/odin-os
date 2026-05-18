@@ -3276,6 +3276,16 @@ func deriveExplicitTaskExecutionIntent(manifest projects.Manifest, task sqlite.T
 	return intent
 }
 
+func TitleRequiresApproval(manifest projects.Manifest, title string) bool {
+	intent := applyManifestExecutionDefaults(manifest, classifyTaskExecutionIntent(title))
+	return projects.ApprovalRequiredForAction(manifest, intent.ActionClass).Required
+}
+
+func TitleExecutionIntent(manifest projects.Manifest, title string) (string, string) {
+	intent := deriveExplicitTaskExecutionIntent(manifest, sqlite.Task{Title: title})
+	return intent.Value, intent.Source
+}
+
 func normalizeIntentTitle(title string) string {
 	normalized := strings.ToLower(strings.TrimSpace(title))
 	normalized = strings.NewReplacer("_", " ", "-", " ").Replace(normalized)

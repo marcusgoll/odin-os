@@ -50,6 +50,7 @@ import (
 	conversationsvc "odin-os/internal/runtime/conversation"
 	delegationsvc "odin-os/internal/runtime/delegations"
 	runtimeevents "odin-os/internal/runtime/events"
+	factorysvc "odin-os/internal/runtime/factory"
 	goalruntime "odin-os/internal/runtime/goals"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
@@ -76,7 +77,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal mobile browser x task initiative companion profile followup trigger scheduler transition skills design provider e2e\n\nRun detail: odin runs show <id>"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work factory scope jobs runs leases approvals review intake agenda logs knowledge memory goal mobile browser x task initiative companion profile followup trigger scheduler transition skills design provider e2e\n\nRun detail: odin runs show <id>"
 const runsUsage = "usage: odin runs [--json] | odin runs show <run-id> | odin runs routing (--run <run-id>|--task <id|key>) [--json]"
 
 const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<true|false>] [--dry-run|dry_run=<true|false>] [--json]"
@@ -346,6 +347,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 				Now: time.Now,
 			},
 		})
+	case "factory":
+		return runFactory(ctx, app, args[1:], stdout)
 	case "scope":
 		return runScope(app, args[1:], stdout)
 	case "jobs":
@@ -427,6 +430,174 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runVerifyBackup(ctx, appbackup.Service{RepoRoot: root, RuntimeRoot: cfg.RuntimeRoot}, args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
+	}
+}
+
+func runFactory(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	if len(args) == 0 || isHelpArgs(args) {
+		_, err := fmt.Fprintln(stdout, commands.FactoryUsage)
+		return err
+	}
+	command, err := commands.ParseFactory(args)
+	if err != nil {
+		return err
+	}
+	service := factorysvc.Service{
+		Store: app.Store,
+		Jobs: jobs.Service{
+			Store:              app.Store,
+			RuntimeRoot:        app.RuntimeRoot,
+			Registry:           app.Registry,
+			Executors:          app.Executors,
+			ExecutorConfig:     app.ExecutorConfig,
+			PromptRenderer:     app.PromptRenderer,
+			PromptTemplateName: app.PromptTemplateName,
+			Transitions:        projects.Service{Store: app.Store},
+			Leases: leases.Manager{
+				Store:        app.Store,
+				Git:          gitadapter.Adapter{},
+				WorktreeRoot: worktrees.DefaultRoot(),
+			},
+			Now: time.Now,
+		},
+	}
+	switch command.Action {
+	case "start":
+		result, err := service.AdmitOperatorStart(ctx, factorysvc.AdmitOperatorInput{
+			ProjectKey:  command.Project,
+			Title:       command.Title,
+			RequestedBy: "operator",
+		})
+		if err != nil {
+			return err
+		}
+		view := newFactoryAdmissionView(result)
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "factory_lane=%t trigger=%s autonomy=%s phase=%s work_item=%s status=%s created=%t\n", view.FactoryLane, view.Trigger, view.Autonomy, view.Phase, view.WorkItem.Key, view.WorkItem.Status, view.Created)
+		return err
+	case "status":
+		result, err := service.Status(ctx, command.Task)
+		if err != nil {
+			return err
+		}
+		view := newFactoryStatusView(result)
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "factory_lane=%t trigger=%s autonomy=%s phase=%s known_phases=%s work_item=%s status=%s\n", view.FactoryLane, view.Trigger, view.Autonomy, view.Phase, strings.Join(view.KnownPhases, ","), view.WorkItem.Key, view.WorkItem.Status)
+		return err
+	case "merge-gate":
+		result, err := service.EvaluateMergeGate(ctx, command.Task)
+		if err != nil {
+			return err
+		}
+		view := newFactoryMergeGateView(result)
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "factory_lane=true merge_gate=passed merged=%t phase=%s pr_handoff_id=%d deploy_handoff_id=%s\n", view.Merged, view.Phase, view.PullRequestHandoff.ID, view.DeployHandoffID)
+		return err
+	default:
+		_, err := fmt.Fprintln(stdout, commands.FactoryUsage)
+		return err
+	}
+}
+
+type factoryCommandView struct {
+	FactoryLane   bool                `json:"factory_lane"`
+	Trigger       string              `json:"trigger"`
+	Autonomy      string              `json:"autonomy"`
+	Phase         string              `json:"phase"`
+	KnownPhases   []string            `json:"known_phases,omitempty"`
+	LatestRunID   *int64              `json:"latest_run_id,omitempty"`
+	PRHandoffID   string              `json:"pr_handoff_id,omitempty"`
+	BlockedReason string              `json:"blocked_reason,omitempty"`
+	Created       bool                `json:"created,omitempty"`
+	WorkItem      factoryWorkItemView `json:"work_item"`
+}
+
+type factoryWorkItemView struct {
+	ID                    int64  `json:"id"`
+	Key                   string `json:"key"`
+	Status                string `json:"status"`
+	WorkKind              string `json:"work_kind,omitempty"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
+}
+
+type factoryMergeGateView struct {
+	FactoryLane        bool                          `json:"factory_lane"`
+	MergeGate          string                        `json:"merge_gate"`
+	Merged             bool                          `json:"merged"`
+	Phase              string                        `json:"phase"`
+	CommitSHA          string                        `json:"commit_sha,omitempty"`
+	URL                string                        `json:"url,omitempty"`
+	DeployHandoffID    string                        `json:"deploy_handoff_id,omitempty"`
+	WorkItem           factoryWorkItemView           `json:"work_item"`
+	PullRequestHandoff factoryPullRequestHandoffView `json:"pull_request_handoff"`
+}
+
+type factoryPullRequestHandoffView struct {
+	ID     int64  `json:"id"`
+	Repo   string `json:"repo"`
+	Number int    `json:"number"`
+	URL    string `json:"url"`
+}
+
+func newFactoryAdmissionView(result factorysvc.AdmissionResult) factoryCommandView {
+	return factoryCommandView{
+		FactoryLane: true,
+		Trigger:     result.Trigger,
+		Autonomy:    result.Autonomy,
+		Phase:       result.Phase,
+		Created:     result.Created,
+		WorkItem:    newFactoryWorkItemView(result.Task),
+	}
+}
+
+func newFactoryStatusView(result factorysvc.StatusResult) factoryCommandView {
+	return factoryCommandView{
+		FactoryLane:   true,
+		Trigger:       result.Trigger,
+		Autonomy:      result.Autonomy,
+		Phase:         result.Phase,
+		KnownPhases:   append([]string(nil), result.KnownPhases...),
+		LatestRunID:   result.LatestRunID,
+		PRHandoffID:   result.PRHandoffID,
+		BlockedReason: result.BlockedReason,
+		WorkItem:      newFactoryWorkItemView(result.Task),
+	}
+}
+
+func newFactoryWorkItemView(task sqlite.Task) factoryWorkItemView {
+	return factoryWorkItemView{
+		ID:                    task.ID,
+		Key:                   task.Key,
+		Status:                task.Status,
+		WorkKind:              task.WorkKind,
+		ExecutionIntent:       task.ExecutionIntent,
+		ExecutionIntentSource: task.ExecutionIntentSource,
+	}
+}
+
+func newFactoryMergeGateView(result factorysvc.MergeGateResult) factoryMergeGateView {
+	return factoryMergeGateView{
+		FactoryLane:     true,
+		MergeGate:       "passed",
+		Merged:          result.Merged,
+		Phase:           result.Phase,
+		CommitSHA:       result.CommitSHA,
+		URL:             result.URL,
+		DeployHandoffID: result.DeployHandoffID,
+		WorkItem:        newFactoryWorkItemView(result.Task),
+		PullRequestHandoff: factoryPullRequestHandoffView{
+			ID:     result.Handoff.ID,
+			Repo:   result.Handoff.Repo,
+			Number: result.Handoff.Number,
+			URL:    result.Handoff.URL,
+		},
 	}
 }
 
@@ -2880,6 +3051,19 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 					existing = loaded
 				}
 			}
+			if command.Factory && strings.TrimSpace(existing.WorkKind) != factorysvc.WorkKindFactoryLane {
+				promoted, createdNow, err := promoteAcceptedIntakeToFactoryLane(ctx, app, item)
+				if err != nil {
+					return err
+				}
+				task = &promoted
+				workCreated = createdNow
+				decision = "accepted"
+				eventType = runtimeevents.EventIntakeReviewAccepted
+				status = "accepted"
+				summary = "Draft task accepted by operator and promoted to factory lane work item"
+				break
+			}
 			task = &existing
 			workCreated = false
 			decision = "accepted"
@@ -2927,7 +3111,14 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 			policyReason = policy.Reason
 			break
 		}
-		created, createdNow, err := createTaskFromReviewedIntake(ctx, app, item)
+		var created sqlite.Task
+		var createdNow bool
+		var err error
+		if command.Factory {
+			created, createdNow, err = promoteAcceptedIntakeToFactoryLane(ctx, app, item)
+		} else {
+			created, createdNow, err = createTaskFromReviewedIntake(ctx, app, item)
+		}
 		if err != nil {
 			return err
 		}

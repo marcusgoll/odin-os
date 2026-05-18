@@ -25,6 +25,7 @@ import (
 	"odin-os/internal/prompts"
 	"odin-os/internal/registry"
 	"odin-os/internal/runtime/checkpoints"
+	factorysvc "odin-os/internal/runtime/factory"
 	"odin-os/internal/runtime/jobs"
 	openroutersmoke "odin-os/internal/runtime/providers/openrouter_smoke"
 	runtimestate "odin-os/internal/runtime/state"
@@ -202,6 +203,367 @@ func TestRunWithoutArgsPrintsUsageInsteadOfStartingShell(t *testing.T) {
 	if strings.Contains(output, "odin>") {
 		t.Fatalf("stdout = %q, should not contain repl prompt", output)
 	}
+}
+
+func TestRunFactoryHelpUsesTopLevelDispatcher(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"factory", "--help"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(factory --help) error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "usage: odin factory start --project <key> --title <text>") {
+		t.Fatalf("stdout = %q, want factory usage", output)
+	}
+	if strings.Contains(output, "unknown command") {
+		t.Fatalf("stdout = %q, should not contain unknown command", output)
+	}
+}
+
+func TestRunFactoryStartCreatesFactoryWorkItem(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"factory", "start", "--project", testProjectKey, "--title", "Implement factory status", "--json"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(factory start) error = %v", err)
+	}
+
+	var payload struct {
+		FactoryLane bool   `json:"factory_lane"`
+		Trigger     string `json:"trigger"`
+		Autonomy    string `json:"autonomy"`
+		Phase       string `json:"phase"`
+		Created     bool   `json:"created"`
+		WorkItem    struct {
+			ID                    int64  `json:"id"`
+			Key                   string `json:"key"`
+			Status                string `json:"status"`
+			WorkKind              string `json:"work_kind"`
+			ExecutionIntent       string `json:"execution_intent"`
+			ExecutionIntentSource string `json:"execution_intent_source"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json unmarshal error = %v\nstdout=%s", err, stdout.String())
+	}
+	if !payload.FactoryLane || payload.Trigger != "operator" || payload.Autonomy != "merge_when_green" || payload.Phase != "admitted" {
+		t.Fatalf("factory lane fields = %+v", payload)
+	}
+	if !payload.Created {
+		t.Fatal("created = false, want true")
+	}
+	if payload.WorkItem.ID == 0 || payload.WorkItem.Key == "" || payload.WorkItem.Status != "queued" {
+		t.Fatalf("work item = %+v, want queued task with id/key", payload.WorkItem)
+	}
+	if payload.WorkItem.WorkKind != "factory_lane" || payload.WorkItem.ExecutionIntent != "mutation" || payload.WorkItem.ExecutionIntentSource != "factory_lane:operator" {
+		t.Fatalf("work item intent = %+v, want factory mutation", payload.WorkItem)
+	}
+}
+
+func TestRunFactoryStatusReadsFactoryWorkItem(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var startStdout bytes.Buffer
+
+	if err := Run(context.Background(), root, []string{"factory", "start", "--project", testProjectKey, "--title", "Read factory status", "--json"}, strings.NewReader(""), &startStdout); err != nil {
+		t.Fatalf("Run(factory start) error = %v", err)
+	}
+	var start struct {
+		WorkItem struct {
+			ID  int64  `json:"id"`
+			Key string `json:"key"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(startStdout.Bytes(), &start); err != nil {
+		t.Fatalf("start json unmarshal error = %v\nstdout=%s", err, startStdout.String())
+	}
+
+	var statusStdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"factory", "status", "--task", start.WorkItem.Key, "--json"}, strings.NewReader(""), &statusStdout); err != nil {
+		t.Fatalf("Run(factory status) error = %v", err)
+	}
+	var status struct {
+		FactoryLane bool   `json:"factory_lane"`
+		Trigger     string `json:"trigger"`
+		Autonomy    string `json:"autonomy"`
+		Phase       string `json:"phase"`
+		WorkItem    struct {
+			ID     int64  `json:"id"`
+			Key    string `json:"key"`
+			Status string `json:"status"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(statusStdout.Bytes(), &status); err != nil {
+		t.Fatalf("status json unmarshal error = %v\nstdout=%s", err, statusStdout.String())
+	}
+	if status.WorkItem.ID != start.WorkItem.ID || status.WorkItem.Key != start.WorkItem.Key || status.WorkItem.Status != "queued" {
+		t.Fatalf("status work item = %+v, want start item id=%d key=%s", status.WorkItem, start.WorkItem.ID, start.WorkItem.Key)
+	}
+	if !status.FactoryLane || status.Trigger != "operator" || status.Autonomy != "merge_when_green" || status.Phase != "admitted" {
+		t.Fatalf("status lane fields = %+v", status)
+	}
+}
+
+func TestRunFactoryStatusRejectsNormalWorkItem(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var startStdout bytes.Buffer
+
+	if err := Run(context.Background(), root, []string{"work", "start", "--project", testProjectKey, "--title", "Normal delivery work", "--intent", "mutation"}, strings.NewReader(""), &startStdout); err != nil {
+		t.Fatalf("Run(work start) error = %v", err)
+	}
+	taskID := parseWorkItemIDFromOutput(t, startStdout.String())
+
+	var statusStdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"factory", "status", "--task", strconv.FormatInt(taskID, 10), "--json"}, strings.NewReader(""), &statusStdout)
+	if err == nil {
+		t.Fatal("Run(factory status normal work item) error = nil, want invalid factory task")
+	}
+	if !strings.Contains(err.Error(), "invalid factory task") || !strings.Contains(err.Error(), "is not \"factory_lane\"") {
+		t.Fatalf("Run(factory status normal work item) error = %q, want invalid factory task", err.Error())
+	}
+	if strings.Contains(statusStdout.String(), `"factory_lane"`) {
+		t.Fatalf("stdout = %q, should not emit factory JSON", statusStdout.String())
+	}
+}
+
+func TestRunFactoryStatusShowsPhaseEvidence(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var startStdout bytes.Buffer
+
+	if err := Run(context.Background(), root, []string{"factory", "start", "--project", testProjectKey, "--title", "Show factory phases", "--json"}, strings.NewReader(""), &startStdout); err != nil {
+		t.Fatalf("Run(factory start) error = %v", err)
+	}
+	var start struct {
+		WorkItem struct {
+			ID  int64  `json:"id"`
+			Key string `json:"key"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(startStdout.Bytes(), &start); err != nil {
+		t.Fatalf("start json unmarshal error = %v\nstdout=%s", err, startStdout.String())
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+	run, err := store.StartRun(context.Background(), sqlite.StartRunParams{
+		TaskID:     start.WorkItem.ID,
+		Executor:   "codex_headless",
+		Attempt:    1,
+		Status:     "running",
+		TaskStatus: "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if _, err := (factorysvc.Service{Store: store}).RecordPhaseEvidence(context.Background(), factorysvc.PhaseEvidenceInput{
+		TaskID:  start.WorkItem.ID,
+		RunID:   &run.ID,
+		Phase:   factorysvc.PhasePRHandoff,
+		Summary: "PR handoff recorded",
+		Details: map[string]string{
+			"pr_handoff_id":  "handoff-123",
+			"blocked_reason": "waiting_for_green_checks",
+		},
+	}); err != nil {
+		t.Fatalf("RecordPhaseEvidence() error = %v", err)
+	}
+
+	var statusStdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"factory", "status", "--task", start.WorkItem.Key, "--json"}, strings.NewReader(""), &statusStdout); err != nil {
+		t.Fatalf("Run(factory status) error = %v", err)
+	}
+	var status struct {
+		FactoryLane   bool     `json:"factory_lane"`
+		Phase         string   `json:"phase"`
+		KnownPhases   []string `json:"known_phases"`
+		LatestRunID   int64    `json:"latest_run_id"`
+		PRHandoffID   string   `json:"pr_handoff_id"`
+		BlockedReason string   `json:"blocked_reason"`
+		WorkItem      struct {
+			ID  int64  `json:"id"`
+			Key string `json:"key"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(statusStdout.Bytes(), &status); err != nil {
+		t.Fatalf("status json unmarshal error = %v\nstdout=%s", err, statusStdout.String())
+	}
+	if !status.FactoryLane || status.WorkItem.ID != start.WorkItem.ID || status.WorkItem.Key != start.WorkItem.Key {
+		t.Fatalf("status = %+v, want same factory work item", status)
+	}
+	if status.Phase != "pr_handoff" || status.LatestRunID != run.ID || status.PRHandoffID != "handoff-123" || status.BlockedReason != "waiting_for_green_checks" {
+		t.Fatalf("phase evidence status = %+v", status)
+	}
+	for _, phase := range []string{"admitted", "pr_handoff"} {
+		if !containsString(status.KnownPhases, phase) {
+			t.Fatalf("known phases = %#v, missing %q", status.KnownPhases, phase)
+		}
+	}
+}
+
+func TestRunFactoryMergeGateMergesGreenPullRequest(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var startStdout bytes.Buffer
+
+	if err := Run(context.Background(), root, []string{"factory", "start", "--project", testProjectKey, "--title", "Merge fixture PR", "--json"}, strings.NewReader(""), &startStdout); err != nil {
+		t.Fatalf("Run(factory start) error = %v", err)
+	}
+	var start struct {
+		WorkItem struct {
+			ID int64 `json:"id"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(startStdout.Bytes(), &start); err != nil {
+		t.Fatalf("start json unmarshal error = %v\nstdout=%s", err, startStdout.String())
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+	task, err := store.GetTask(context.Background(), start.WorkItem.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	handoff, err := store.UpsertPullRequestHandoff(context.Background(), sqlite.UpsertPullRequestHandoffParams{
+		ProjectID:     task.ProjectID,
+		Provider:      "github",
+		Repo:          "acme/alpha",
+		Number:        11,
+		URL:           "https://github.test/acme/alpha/pull/11",
+		State:         "open",
+		IssueURL:      "https://github.test/acme/alpha/issues/11",
+		Branch:        "factory/fixture",
+		Title:         "Merge fixture PR",
+		Summary:       "Green PR",
+		Tests:         []string{"checks:green", "branch_protection:satisfied", "mergeable:true"},
+		ReviewState:   "review_selected",
+		SelectedRoles: []string{"code"},
+	})
+	if err != nil {
+		t.Fatalf("UpsertPullRequestHandoff() error = %v", err)
+	}
+	if _, err := (factorysvc.Service{Store: store}).RecordPhaseEvidence(context.Background(), factorysvc.PhaseEvidenceInput{
+		TaskID:  task.ID,
+		Phase:   factorysvc.PhasePRHandoff,
+		Summary: "PR handoff ready",
+		Details: map[string]string{"pr_handoff_id": strconv.FormatInt(handoff.ID, 10)},
+	}); err != nil {
+		t.Fatalf("RecordPhaseEvidence() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"factory", "merge-gate", "--task", strconv.FormatInt(task.ID, 10), "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(factory merge-gate) error = %v", err)
+	}
+	var payload struct {
+		FactoryLane     bool   `json:"factory_lane"`
+		MergeGate       string `json:"merge_gate"`
+		Merged          bool   `json:"merged"`
+		Phase           string `json:"phase"`
+		CommitSHA       string `json:"commit_sha"`
+		DeployHandoffID string `json:"deploy_handoff_id"`
+		PullRequest     struct {
+			ID     int64  `json:"id"`
+			Repo   string `json:"repo"`
+			Number int    `json:"number"`
+		} `json:"pull_request_handoff"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("merge gate json unmarshal error = %v\nstdout=%s", err, stdout.String())
+	}
+	if !payload.FactoryLane || payload.MergeGate != "passed" || !payload.Merged || payload.Phase != "closeout" {
+		t.Fatalf("merge gate payload = %+v", payload)
+	}
+	if payload.CommitSHA == "" || payload.DeployHandoffID == "" {
+		t.Fatalf("merge gate commit/deploy handoff = %q/%q", payload.CommitSHA, payload.DeployHandoffID)
+	}
+	if payload.PullRequest.ID != handoff.ID || payload.PullRequest.Repo != "acme/alpha" || payload.PullRequest.Number != 11 {
+		t.Fatalf("pull request handoff = %+v, want handoff %d", payload.PullRequest, handoff.ID)
+	}
+}
+
+func TestRunFactoryStartBlocksHighRiskWork(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var startStdout bytes.Buffer
+
+	if err := Run(context.Background(), root, []string{"factory", "start", "--project", testProjectKey, "--title", "Force push branch", "--json"}, strings.NewReader(""), &startStdout); err != nil {
+		t.Fatalf("Run(factory start) error = %v", err)
+	}
+	var start struct {
+		WorkItem struct {
+			ID int64 `json:"id"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(startStdout.Bytes(), &start); err != nil {
+		t.Fatalf("start json unmarshal error = %v\nstdout=%s", err, startStdout.String())
+	}
+
+	var dispatchStdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "dispatch", "--task", strconv.FormatInt(start.WorkItem.ID, 10), "--json"}, strings.NewReader(""), &dispatchStdout); err != nil {
+		t.Fatalf("Run(work dispatch) error = %v", err)
+	}
+	var dispatch struct {
+		Dispatched bool   `json:"dispatched"`
+		Reason     string `json:"reason"`
+		Task       struct {
+			ID                    int64  `json:"id"`
+			Status                string `json:"status"`
+			ExecutionIntent       string `json:"execution_intent"`
+			ExecutionIntentSource string `json:"execution_intent_source"`
+			BlockedReason         string `json:"blocked_reason"`
+		} `json:"task"`
+	}
+	if err := json.Unmarshal(dispatchStdout.Bytes(), &dispatch); err != nil {
+		t.Fatalf("dispatch json unmarshal error = %v\nstdout=%s", err, dispatchStdout.String())
+	}
+	if dispatch.Dispatched || dispatch.Reason != "approval_required" {
+		t.Fatalf("dispatch = %+v, want approval_required without dispatch", dispatch)
+	}
+	if dispatch.Task.ID != start.WorkItem.ID || dispatch.Task.Status != "blocked" || dispatch.Task.BlockedReason != "approval_required" {
+		t.Fatalf("dispatch task = %+v, want blocked approval_required", dispatch.Task)
+	}
+	if dispatch.Task.ExecutionIntent != "destructive" || dispatch.Task.ExecutionIntentSource != "safety_classifier" {
+		t.Fatalf("dispatch intent = %q/%q, want destructive/safety_classifier", dispatch.Task.ExecutionIntent, dispatch.Task.ExecutionIntentSource)
+	}
+}
+
+func parseWorkItemIDFromOutput(t *testing.T, output string) int64 {
+	t.Helper()
+
+	for _, field := range strings.Fields(output) {
+		value, ok := strings.CutPrefix(field, "work_item_id=")
+		if !ok {
+			continue
+		}
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			t.Fatalf("parse work_item_id from %q: %v", output, err)
+		}
+		return id
+	}
+	t.Fatalf("stdout = %q, want work_item_id field", output)
+	return 0
 }
 
 func TestRunLeasesCleanupDryRunUsesCanonicalCommandPath(t *testing.T) {
@@ -2594,6 +2956,210 @@ func TestRunIntakeReviewAcceptRequiresApprovalForRiskyIntake(t *testing.T) {
 	}
 	if output := workStatusOutput.String(); !strings.Contains(output, "work_items=1") || !strings.Contains(output, "intake_approval_required_items=1") {
 		t.Fatalf("work status output = %s, want approval-required intake count", output)
+	}
+}
+
+func TestRunIntakeReviewAcceptFactoryPromotesToFactoryLane(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "Implement reviewed intake factory lane",
+		"--type", "request",
+		"--dedup-key", "factory-reviewed-intake",
+		"--requested-by", "codex",
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+	accepted := run("intake", "review", "accept", "intake-1", "--factory", "--json")
+	for _, want := range []string{
+		`"decision": "accepted"`,
+		`"key": "intake-review-1"`,
+	} {
+		if !strings.Contains(accepted, want) {
+			t.Fatalf("accept output = %s, want %s", accepted, want)
+		}
+	}
+
+	jobsOutput := run("jobs", "--json")
+	for _, want := range []string{
+		`"task_key": "intake-review-1"`,
+		`"work_kind": "factory_lane"`,
+		`"execution_intent": "mutation"`,
+		`"execution_intent_source": "factory_lane:intake_review"`,
+	} {
+		if !strings.Contains(jobsOutput, want) {
+			t.Fatalf("jobs output = %s, want %s", jobsOutput, want)
+		}
+	}
+
+	statusOutput := run("factory", "status", "--task", "intake-review-1", "--json")
+	for _, want := range []string{
+		`"factory_lane": true`,
+		`"trigger": "intake_review"`,
+		`"autonomy": "merge_when_green"`,
+		`"phase": "admitted"`,
+		`"work_kind": "factory_lane"`,
+		`"execution_intent_source": "factory_lane:intake_review"`,
+	} {
+		if !strings.Contains(statusOutput, want) {
+			t.Fatalf("factory status output = %s, want %s", statusOutput, want)
+		}
+	}
+}
+
+func TestRunIntakeReviewAcceptFactoryIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "Implement idempotent reviewed intake factory lane",
+		"--type", "request",
+		"--dedup-key", "factory-reviewed-intake-idempotent",
+		"--requested-by", "codex",
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+
+	first := run("intake", "review", "accept", "intake-1", "--factory", "--json")
+	if !strings.Contains(first, `"decision": "accepted"`) || !strings.Contains(first, `"key": "intake-review-1"`) {
+		t.Fatalf("first accept output = %s, want accepted intake-review-1", first)
+	}
+	second := run("intake", "review", "accept", "intake-1", "--factory", "--json")
+	if !strings.Contains(second, `"work_created": false`) || !strings.Contains(second, `"key": "intake-review-1"`) {
+		t.Fatalf("second accept output = %s, want reused intake-review-1", second)
+	}
+
+	jobsOutput := run("jobs", "--json")
+	if strings.Count(jobsOutput, `"task_key": "intake-review-1"`) != 1 {
+		t.Fatalf("jobs output = %s, want exactly one factory work item", jobsOutput)
+	}
+}
+
+func TestRunIntakeReviewAcceptFactoryKeepsRiskyApprovalGate(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "Delete production data through factory lane",
+		"--type", "request",
+		"--dedup-key", "factory-reviewed-intake-risky",
+		"--requested-by", "codex",
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+	accepted := run("intake", "review", "accept", "intake-1", "--factory", "--json")
+	for _, want := range []string{
+		`"decision": "approval_required"`,
+		`"work_created": false`,
+		`"approval_required": true`,
+		`"policy_reason": "risky_intake_requires_operator_approval"`,
+	} {
+		if !strings.Contains(accepted, want) {
+			t.Fatalf("accept output = %s, want %s", accepted, want)
+		}
+	}
+	if strings.Contains(accepted, `"work_item"`) {
+		t.Fatalf("accept output = %s, must not include work item before approval", accepted)
+	}
+
+	jobsOutput := run("jobs", "--json")
+	if strings.Contains(jobsOutput, `"task_key": "intake-review-1"`) || strings.Contains(jobsOutput, `"work_kind": "factory_lane"`) {
+		t.Fatalf("jobs output = %s, want no factory work before approval", jobsOutput)
+	}
+}
+
+func TestRunIntakeReviewAcceptFactoryDefersForcePushToJobsApprovalGate(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "Force push branch",
+		"--type", "request",
+		"--dedup-key", "factory-force-push-branch",
+		"--requested-by", "codex",
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+	accepted := run("intake", "review", "accept", "intake-1", "--factory", "--json")
+	if !strings.Contains(accepted, `"decision": "accepted"`) || !strings.Contains(accepted, `"key": "intake-review-1"`) {
+		t.Fatalf("accept output = %s, want accepted factory work item", accepted)
+	}
+
+	jobsOutput := run("jobs", "--json")
+	for _, want := range []string{
+		`"task_key": "intake-review-1"`,
+		`"work_kind": "factory_lane"`,
+		`"execution_intent": "destructive"`,
+		`"execution_intent_source": "safety_classifier"`,
+	} {
+		if !strings.Contains(jobsOutput, want) {
+			t.Fatalf("jobs output = %s, want %s", jobsOutput, want)
+		}
+	}
+	if strings.Contains(jobsOutput, `"execution_intent_source": "factory_lane:intake_review"`) {
+		t.Fatalf("jobs output = %s, must not persist normal factory mutation source for force-push title", jobsOutput)
+	}
+
+	dispatchOutput := run("work", "dispatch", "--task", "intake-review-1", "--json")
+	for _, want := range []string{
+		`"dispatched": false`,
+		`"reason": "approval_required"`,
+		`"status": "blocked"`,
+		`"execution_intent": "destructive"`,
+		`"execution_intent_source": "safety_classifier"`,
+	} {
+		if !strings.Contains(dispatchOutput, want) {
+			t.Fatalf("dispatch output = %s, want %s", dispatchOutput, want)
+		}
 	}
 }
 

@@ -62,3 +62,6 @@ for scenario in "${scenarios[@]}"; do
   echo "odin e2e $scenario" | tee ".odin/e2e/$name.log" | tee -a .odin/e2e/latest.log
   ./bin/odin e2e --scenario "$scenario" --json | tee ".odin/e2e/$name.json" | tee -a ".odin/e2e/$name.log" | tee -a .odin/e2e/latest.log | tee .odin/e2e/latest.json
 done
+
+echo "./bin/odin e2e --scenario fixtures/e2e/software-factory-lane.yaml --json" | tee -a .odin/e2e/latest.log
+./bin/odin e2e --scenario fixtures/e2e/software-factory-lane.yaml --json | tee .odin/e2e/software-factory-lane.explicit.json | tee -a .odin/e2e/latest.log | tee .odin/e2e/latest.json

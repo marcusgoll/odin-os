@@ -20,6 +20,7 @@ func TestFixtureSetRunsLocallyWithoutLiveSystems(t *testing.T) {
 		"workspace-safe-creation.yaml",
 		"prompt-rendering-brownfield.yaml",
 		"failure-analysis.yaml",
+		"software-factory-lane.yaml",
 	}
 
 	for _, fixture := range fixtures {
@@ -201,4 +202,74 @@ func equalStrings(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+func TestSoftwareFactoryLaneScenario(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := filepath.Clean(filepath.Join("..", ".."))
+	var stdout bytes.Buffer
+	err := Run(context.Background(), repoRoot, []string{
+		"--scenario", filepath.Join("fixtures", "e2e", "software-factory-lane.yaml"),
+		"--json",
+	}, &stdout)
+	if err != nil {
+		t.Fatalf("Run(software-factory-lane) error = %v\noutput:\n%s", err, stdout.String())
+	}
+
+	var report struct {
+		Status   string `json:"status"`
+		Scenario string `json:"scenario"`
+		Stages   []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+		} `json:"stages"`
+		GitHub struct {
+			Mode    string `json:"mode"`
+			Mutated bool   `json:"mutated"`
+		} `json:"github"`
+		Delivery struct {
+			WorkItemKey   string `json:"work_item_key"`
+			RunID         int64  `json:"run_id"`
+			PRReadyBranch string `json:"pr_ready_branch"`
+		} `json:"delivery"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput:\n%s", err, stdout.String())
+	}
+	if report.Status != "passed" || report.Scenario != "software-factory-lane" {
+		t.Fatalf("report status/scenario = %q/%q\noutput:\n%s", report.Status, report.Scenario, stdout.String())
+	}
+	if report.GitHub.Mode != "fixture" || report.GitHub.Mutated {
+		t.Fatalf("github = %+v, want fixture without mutation", report.GitHub)
+	}
+	if report.Delivery.WorkItemKey == "" || report.Delivery.RunID == 0 || report.Delivery.PRReadyBranch == "" {
+		t.Fatalf("delivery = %+v, want factory work, run, and PR handoff", report.Delivery)
+	}
+	for _, want := range []string{
+		"factory_operator_start",
+		"intake_review_accept_factory",
+		"review_pr_handoff",
+		"factory_merge_gate",
+		"work_status_readback",
+		"review_list_readback",
+	} {
+		if !reportHasPassedStage(report.Stages, want) {
+			t.Fatalf("stages = %+v, missing passed stage %q", report.Stages, want)
+		}
+	}
+}
+
+func reportHasPassedStage(stages []struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+}, want string) bool {
+	for _, stage := range stages {
+		if stage.Name == want && stage.Status == "passed" {
+			return true
+		}
+	}
+	return false
 }

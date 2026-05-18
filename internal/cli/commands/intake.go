@@ -10,7 +10,7 @@ import (
 	"unicode"
 )
 
-const IntakeUsage = "usage: odin intake enqueue --source <source> --project <key> --title <title> --type <type> [--action-key <key>] [--dedup-key <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw create --text|--body <text> [--source <source>] [--json] | odin intake raw create --source <source> --title <title> --type <type> --dedup-key <key> [--project <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw list [--project <key>] [--status <status>] [--json] | odin intake raw show <id|key> [--json] | odin intake process --id <id|key> [--json] | odin intake review list [--json] | odin intake review show|accept|reject|clarify|archive <id|key> [--json] | odin intake approval list [--json] | odin intake approval show|approve|deny <id|key> [--json]"
+const IntakeUsage = "usage: odin intake enqueue --source <source> --project <key> --title <title> --type <type> [--action-key <key>] [--dedup-key <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw create --text|--body <text> [--source <source>] [--json] | odin intake raw create --source <source> --title <title> --type <type> --dedup-key <key> [--project <key>] [--requested-by <actor>] [--payload-file <path|-] [--json] | odin intake raw list [--project <key>] [--status <status>] [--json] | odin intake raw show <id|key> [--json] | odin intake process --id <id|key> [--json] | odin intake review list [--json] | odin intake review show|reject|clarify|archive <id|key> [--json] | odin intake review accept <id|key> [--factory] [--json] | odin intake approval list [--json] | odin intake approval show|approve|deny <id|key> [--json]"
 
 type IntakeCommand struct {
 	Name           string
@@ -27,6 +27,7 @@ type IntakeCommand struct {
 	RequestedBy    string
 	PayloadFile    string
 	RawText        string
+	Factory        bool
 	JSON           bool
 }
 
@@ -240,11 +241,19 @@ func parseIntakeReview(args []string) (IntakeCommand, error) {
 		return command, nil
 	case "show", "accept", "reject", "clarify", "archive":
 		if len(args) < 2 || strings.HasPrefix(args[1], "--") {
-			return IntakeCommand{}, fmt.Errorf("usage: odin intake review %s <id|key> [--json]", command.ReviewAction)
+			return IntakeCommand{}, fmt.Errorf("%s", intakeReviewActionUsage(command.ReviewAction))
 		}
 		command.ShowRef = args[1]
 		for index := 2; index < len(args); index++ {
 			switch args[index] {
+			case "--factory":
+				if command.ReviewAction != "accept" {
+					return IntakeCommand{}, fmt.Errorf("--factory is only supported for intake review accept")
+				}
+				if command.Factory {
+					return IntakeCommand{}, fmt.Errorf("duplicate --factory flag")
+				}
+				command.Factory = true
 			case "--json":
 				if command.JSON {
 					return IntakeCommand{}, fmt.Errorf("duplicate --json flag")
@@ -258,6 +267,13 @@ func parseIntakeReview(args []string) (IntakeCommand, error) {
 	default:
 		return IntakeCommand{}, fmt.Errorf("unsupported intake review subcommand: %s", args[0])
 	}
+}
+
+func intakeReviewActionUsage(action string) string {
+	if action == "accept" {
+		return "usage: odin intake review accept <id|key> [--factory] [--json]"
+	}
+	return fmt.Sprintf("usage: odin intake review %s <id|key> [--json]", action)
 }
 
 func parseIntakeApproval(args []string) (IntakeCommand, error) {

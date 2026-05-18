@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"odin-os/internal/store/sqlite"
@@ -206,6 +207,71 @@ func TestParseIntakeReviewCommands(t *testing.T) {
 		if command.Name != "review" || command.ReviewAction != action || command.ShowRef != "intake-42" || !command.JSON {
 			t.Fatalf("command = %+v, want review %s intake-42 json", command, action)
 		}
+	}
+}
+
+func TestParseIntakeReviewAcceptFactory(t *testing.T) {
+	t.Parallel()
+
+	command, err := ParseIntake([]string{"review", "accept", "intake-42", "--factory", "--json"})
+	if err != nil {
+		t.Fatalf("ParseIntake(review accept --factory) error = %v", err)
+	}
+	if command.Name != "review" || command.ReviewAction != "accept" || command.ShowRef != "intake-42" || !command.Factory || !command.JSON {
+		t.Fatalf("command = %+v, want review accept intake-42 factory json", command)
+	}
+}
+
+func TestParseIntakeReviewRejectsFactoryForNonAcceptActions(t *testing.T) {
+	t.Parallel()
+
+	for _, action := range []string{"show", "reject", "clarify", "archive"} {
+		action := action
+		t.Run(action, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := ParseIntake([]string{"review", action, "intake-42", "--factory", "--json"})
+			if err == nil {
+				t.Fatalf("ParseIntake(review %s --factory) error = nil, want error", action)
+			}
+			if !strings.Contains(err.Error(), "--factory is only supported for intake review accept") {
+				t.Fatalf("ParseIntake(review %s --factory) error = %q, want factory accept-only error", action, err.Error())
+			}
+		})
+	}
+}
+
+func TestIntakeUsageDocumentsReviewAcceptFactoryOnly(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(IntakeUsage, "odin intake review accept <id|key> [--factory] [--json]") {
+		t.Fatalf("IntakeUsage = %q, want accept-specific --factory usage", IntakeUsage)
+	}
+	if !strings.Contains(IntakeUsage, "odin intake review show|reject|clarify|archive <id|key> [--json]") {
+		t.Fatalf("IntakeUsage = %q, want non-accept review usage without --factory", IntakeUsage)
+	}
+	if strings.Contains(IntakeUsage, "show|accept|reject|clarify|archive <id|key> [--factory]") {
+		t.Fatalf("IntakeUsage = %q, must not imply --factory applies to non-accept review actions", IntakeUsage)
+	}
+}
+
+func TestParseIntakeReviewAcceptUsageDocumentsFactory(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseIntake([]string{"review", "accept", "--factory"})
+	if err == nil {
+		t.Fatal("ParseIntake(review accept --factory) error = nil, want usage error")
+	}
+	if !strings.Contains(err.Error(), "usage: odin intake review accept <id|key> [--factory] [--json]") {
+		t.Fatalf("ParseIntake(review accept --factory) error = %q, want accept factory usage", err.Error())
+	}
+
+	_, err = ParseIntake([]string{"review", "reject", "--factory"})
+	if err == nil {
+		t.Fatal("ParseIntake(review reject --factory) error = nil, want usage error")
+	}
+	if !strings.Contains(err.Error(), "usage: odin intake review reject <id|key> [--json]") || strings.Contains(err.Error(), "--factory]") {
+		t.Fatalf("ParseIntake(review reject --factory) error = %q, want reject usage without factory", err.Error())
 	}
 }
 
