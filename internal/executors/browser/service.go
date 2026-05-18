@@ -175,8 +175,9 @@ type PluginRunner interface {
 }
 
 type Service struct {
-	Store   *sqlite.Store
-	Adapter huginnbrowser.Adapter
+	Store          *sqlite.Store
+	Adapter        huginnbrowser.Adapter
+	MutationDriver MutationDriver
 }
 
 func (service Service) RunPlugin(ctx context.Context, request PluginRequest) (PluginResponse, error) {
@@ -240,9 +241,26 @@ func (service Service) RunPlugin(ctx context.Context, request PluginRequest) (Pl
 			ErrorMessage:    err.Error(),
 		}, err
 	}
-	blockedTask, approval, err := service.Store.BlockTaskAndRequestApproval(ctx, sqlite.BlockTaskAndRequestApprovalParams{
-		TaskID:      request.TaskID,
-		RequestedBy: defaultString(strings.TrimSpace(request.RequestedBy), defaultEvidenceCreatedBy),
+	mutationApproval, err := newBrowserMutationApprovalRequest(request)
+	if err != nil {
+		return PluginResponse{
+			Status:          "failed",
+			RequestID:       strings.TrimSpace(request.RequestID),
+			RiskClass:       riskClass,
+			MutatingActions: mutatingActions(request.Actions),
+			ErrorCode:       "invalid_request",
+			ErrorMessage:    err.Error(),
+		}, err
+	}
+	blockedTask, approval, _, err := service.Store.BlockTaskAndRequestBrowserMutationApproval(ctx, sqlite.BlockTaskAndRequestBrowserMutationApprovalParams{
+		TaskID:             request.TaskID,
+		RequestedBy:        defaultString(strings.TrimSpace(request.RequestedBy), defaultEvidenceCreatedBy),
+		ActionKind:         mutationApproval.ActionKind,
+		AllowedDomainsJSON: mutationApproval.AllowedDomainsJSON,
+		StartURL:           mutationApproval.StartURL,
+		BrowserSessionID:   mutationApproval.BrowserSessionID,
+		PayloadJSON:        mutationApproval.PayloadJSON,
+		PayloadHash:        mutationApproval.PayloadHash,
 	})
 	if err != nil {
 		return PluginResponse{

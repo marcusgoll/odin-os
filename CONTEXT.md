@@ -104,6 +104,10 @@ _Avoid_: manual hack, hidden step, background credential handling
 A closed coarse token that states why a **Browser Intervention** requires human action across workflows.
 _Avoid_: driver error, UI failure, workflow-specific blocker string
 
+**Browser Mutation Continuation**:
+The post-approval execution step that lets **Browser Control** perform one exact external browser action from a reviewed payload, then records visible outcome evidence back on the owning **Work Item** and **Run Attempt**.
+_Avoid_: generic bot mode, autonomous browsing, free-form web control
+
 **Capability Gateway**:
 The Odin-owned runtime surface for dynamic capability discovery, versioned descriptor lookup, policy-gated invocation, and run readback across tools, skills, commands, workflows, and agents.
 _Avoid_: plugin manager, marketplace runtime, provider-specific tool router
@@ -237,6 +241,8 @@ _Avoid_: analytics scrape, crawler result
 - A **Browser Intervention** should expose exactly one coarse **Browser Intervention Reason** from the closed v1 set `login_required`, `mfa_required`, `captcha_required`, `human_confirmation_required`, `unexpected_live_blocker`
 - Workflow-specific browser details such as `google_login_required`, `blocked_on_mfa`, `compose_surface_missing`, and `post_button_not_ready` should remain driver artifacts or **Run Attempt** evidence and should not expand the shared **Browser Intervention Reason** vocabulary automatically
 - `unexpected_live_blocker` should be used only when human step-in is required but no narrower shared **Browser Intervention Reason** fits; ordinary browser startup, selector, typing, navigation, or click failures remain driver or execution failures rather than **Browser Interventions**
+- A **Browser Mutation Continuation** must be narrower than general browser autonomy: it consumes one approved **Approval Request**, one approved payload, one bounded allowed-domain set, and one supported action kind, then records action outcome evidence without granting open-ended browser control
+- Sign-in, MFA, CAPTCHA, and human confirmation during a **Browser Mutation Continuation** remain **Browser Interventions**; they do not authorize credential capture, background login, or unreviewed continuation past a changed payload
 - In v1, **Capability Gateway** is the canonical runtime concept for capability discovery and controlled invocation; "plugin" is packaging language only and must not become a parallel runtime authority
 - V1 capability kinds are `tool`, `skill`, `agent`, `command`, and `workflow`; a future **Plugin Package** may publish those normal capabilities but must not introduce a separate plugin kind, executor lane, approval model, or policy system
 - In v1, generic **Browser Control** should reuse the existing `/tool` **Operator Surface** and builtin tool catalog rather than introducing a parallel `/browser` command family
