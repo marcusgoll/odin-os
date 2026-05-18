@@ -160,7 +160,7 @@ func requestXBioChange(ctx context.Context, app bootstrap.App, command commands.
 		StartURL:          mutationRequest.StartURL,
 		PayloadHash:       mutationRequest.PayloadHash,
 		NextCommands: xBioRequestNextCommands{
-			Approve: fmt.Sprintf("odin approvals resolve %d approve operator approved X bio mutation", approval.ID),
+			Approve: fmt.Sprintf("odin approvals resolve %d approve approved X bio mutation", approval.ID),
 			Apply:   fmt.Sprintf("odin x bio apply --approval-id %d --json", approval.ID),
 		},
 	}, nil
