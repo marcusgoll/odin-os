@@ -373,13 +373,13 @@ Run:
 cd /home/orchestrator/odin-os && go test -count=1 ./internal/api/http ./internal/cli/tui ./internal/app/lifecycle
 cd /home/orchestrator/odin-os && node scripts/tests/assert-odin-pwa-static.mjs
 cd /home/orchestrator/odin-os && go build -o ./bin/odin ./cmd/odin
-cd /home/orchestrator/odin-os && tmp=$(mktemp -d); ODIN_ROOT="$tmp" ./bin/odin tui --once --prometheus-url http://127.0.0.1:1 --loki-url http://127.0.0.1:1; code=$?; rm -rf "$tmp"; test "$code" -ne 0
+cd /home/orchestrator/odin-os && tmp=$(mktemp -d); ODIN_ROOT="$tmp" ./bin/odin tui --once --prometheus-url http://127.0.0.1:1 --loki-url http://127.0.0.1:1 >/tmp/odin-tui-unavailable.out 2>&1; code=$?; rm -rf "$tmp"; test "$code" -eq 0; grep -q "HEALTH        UNKNOWN" /tmp/odin-tui-unavailable.out; grep -q "TELEMETRY     unavailable" /tmp/odin-tui-unavailable.out; ! grep -q "HEALTHY" /tmp/odin-tui-unavailable.out; rm -f /tmp/odin-tui-unavailable.out
 ```
 
 Expected:
 
 ```text
-Go tests pass, static PWA assertion passes, build succeeds, and unavailable Prometheus still makes odin tui fail closed.
+Go tests pass, static PWA assertion passes, build succeeds, and unavailable Prometheus still renders UNKNOWN/unavailable without claiming healthy.
 ```
 
 When a local `odin serve` plus Prometheus fixture path is available, also run:
