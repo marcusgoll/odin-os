@@ -598,6 +598,206 @@ func TestAdmitOperatorStartBlocksGovernanceWorkBehindApproval(t *testing.T) {
 	}
 }
 
+func TestMergeGateRefusesMissingPullRequestHandoff(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFactoryStore(t)
+	defer store.Close()
+	service := Service{Store: store, Jobs: jobs.Service{Store: store, Registry: writeFactoryRegistry(t)}}
+	admission, err := service.AdmitOperatorStart(ctx, AdmitOperatorInput{ProjectKey: "alpha", Title: "Merge without handoff", RequestedBy: "operator"})
+	if err != nil {
+		t.Fatalf("AdmitOperatorStart() error = %v", err)
+	}
+
+	_, err = service.EvaluateMergeGate(ctx, admission.Task.Key)
+	if err == nil {
+		t.Fatal("EvaluateMergeGate() error = nil, want missing handoff")
+	}
+	if !strings.Contains(err.Error(), "requires pull request handoff") {
+		t.Fatalf("EvaluateMergeGate() error = %q, want missing handoff", err.Error())
+	}
+}
+
+func TestMergeGateRefusesNonFactoryTask(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFactoryStore(t)
+	defer store.Close()
+	project := createFactoryTestProject(t, ctx, store)
+	task, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:     project.ID,
+		Key:           "normal-merge-task",
+		Title:         "Normal merge task",
+		Status:        "queued",
+		Scope:         "project",
+		RequestedBy:   "operator",
+		WorkKind:      "project",
+		ArtifactsJSON: `[]`,
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	_, err = (Service{Store: store}).EvaluateMergeGate(ctx, strconv.FormatInt(task.ID, 10))
+	if err == nil {
+		t.Fatal("EvaluateMergeGate() error = nil, want invalid factory task")
+	}
+	if !strings.Contains(err.Error(), "invalid factory task") {
+		t.Fatalf("EvaluateMergeGate() error = %q, want invalid factory task", err.Error())
+	}
+}
+
+func TestMergeGateRefusesPendingApproval(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFactoryStore(t)
+	defer store.Close()
+	service := Service{Store: store, Jobs: jobs.Service{Store: store, Registry: writeFactoryRegistry(t)}}
+	admission, handoff := createFactoryTaskWithPRHandoff(t, ctx, store, service)
+	if _, err := store.RequestApproval(ctx, sqlite.RequestApprovalParams{TaskID: admission.Task.ID, Status: "pending", RequestedBy: "test"}); err != nil {
+		t.Fatalf("RequestApproval() error = %v", err)
+	}
+	if handoff.ID == 0 {
+		t.Fatal("handoff fixture missing id")
+	}
+
+	_, err := service.EvaluateMergeGate(ctx, admission.Task.Key)
+	if err == nil {
+		t.Fatal("EvaluateMergeGate() error = nil, want pending approval")
+	}
+	if !strings.Contains(err.Error(), "pending approval") {
+		t.Fatalf("EvaluateMergeGate() error = %q, want pending approval", err.Error())
+	}
+}
+
+func TestMergeGateRefusesFailedChecks(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		state      PullRequestState
+		wantReason string
+	}{
+		{
+			name:       "failed_checks",
+			state:      PullRequestState{RequiredChecksGreen: false, BranchProtectionSatisfied: true, Mergeable: true},
+			wantReason: "required_checks_not_green",
+		},
+		{
+			name:       "missing_branch_protection",
+			state:      PullRequestState{RequiredChecksGreen: true, BranchProtectionSatisfied: false, Mergeable: true},
+			wantReason: "missing_branch_protection",
+		},
+		{
+			name:       "stale",
+			state:      PullRequestState{RequiredChecksGreen: true, BranchProtectionSatisfied: true, Mergeable: true, Stale: true},
+			wantReason: "stale_pr_state",
+		},
+		{
+			name:       "not_mergeable",
+			state:      PullRequestState{RequiredChecksGreen: true, BranchProtectionSatisfied: true, Mergeable: false},
+			wantReason: "pr_not_mergeable",
+		},
+		{
+			name:       "review_blockers",
+			state:      PullRequestState{RequiredChecksGreen: true, BranchProtectionSatisfied: true, Mergeable: true, UnresolvedReviewBlockers: []string{"security blocker"}},
+			wantReason: "unresolved_pr_blockers",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			store := openFactoryStore(t)
+			defer store.Close()
+			service := Service{
+				Store:             store,
+				Jobs:              jobs.Service{Store: store, Registry: writeFactoryRegistry(t)},
+				PullRequestState:  fakePRStateProvider{state: tc.state},
+				PullRequestMerger: fakePRMerger{result: MergeResult{Merged: true}},
+			}
+			admission, _ := createFactoryTaskWithPRHandoff(t, ctx, store, service)
+
+			_, err := service.EvaluateMergeGate(ctx, admission.Task.Key)
+			if err == nil {
+				t.Fatalf("EvaluateMergeGate() error = nil, want %s", tc.wantReason)
+			}
+			if !strings.Contains(err.Error(), tc.wantReason) {
+				t.Fatalf("EvaluateMergeGate() error = %q, want %s", err.Error(), tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestMergeGateMergesGreenPullRequestAndRecordsEvidence(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFactoryStore(t)
+	defer store.Close()
+	service := Service{
+		Store:             store,
+		Jobs:              jobs.Service{Store: store, Registry: writeFactoryRegistry(t)},
+		PullRequestState:  fakePRStateProvider{state: PullRequestState{RequiredChecksGreen: true, BranchProtectionSatisfied: true, Mergeable: true}},
+		PullRequestMerger: fakePRMerger{result: MergeResult{Merged: true, CommitSHA: "abc123", URL: "https://github.test/acme/alpha/pull/7"}},
+	}
+	admission, handoff := createFactoryTaskWithPRHandoff(t, ctx, store, service)
+
+	result, err := service.EvaluateMergeGate(ctx, admission.Task.Key)
+	if err != nil {
+		t.Fatalf("EvaluateMergeGate() error = %v", err)
+	}
+	if !result.Merged || result.CommitSHA != "abc123" || result.Handoff.ID != handoff.ID {
+		t.Fatalf("merge result = %+v, want merged handoff %d", result, handoff.ID)
+	}
+	status, err := service.Status(ctx, admission.Task.Key)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if status.Phase != string(PhaseCloseout) {
+		t.Fatalf("Status.Phase = %q, want closeout", status.Phase)
+	}
+	for _, phase := range []string{string(PhaseMerge), string(PhaseCloseout)} {
+		if !containsFactoryPhase(status.KnownPhases, phase) {
+			t.Fatalf("KnownPhases = %#v, missing %q", status.KnownPhases, phase)
+		}
+	}
+}
+
+func TestMergeGateCreatesDeployHandoffInsteadOfDeploying(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFactoryStore(t)
+	defer store.Close()
+	service := Service{
+		Store:             store,
+		Jobs:              jobs.Service{Store: store, Registry: writeFactoryRegistry(t)},
+		PullRequestState:  fakePRStateProvider{state: PullRequestState{RequiredChecksGreen: true, BranchProtectionSatisfied: true, Mergeable: true}},
+		PullRequestMerger: fakePRMerger{result: MergeResult{Merged: true, CommitSHA: "def456", URL: "https://github.test/acme/alpha/pull/8"}},
+	}
+	admission, _ := createFactoryTaskWithPRHandoff(t, ctx, store, service)
+
+	result, err := service.EvaluateMergeGate(ctx, admission.Task.Key)
+	if err != nil {
+		t.Fatalf("EvaluateMergeGate() error = %v", err)
+	}
+	if result.DeployHandoffID == "" {
+		t.Fatal("DeployHandoffID is empty, want deploy handoff")
+	}
+	updated, err := store.GetTask(ctx, admission.Task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if !strings.Contains(updated.ArtifactsJSON, `"deploy_action":"review_required"`) {
+		t.Fatalf("ArtifactsJSON = %s, want deploy review handoff and no deployment", updated.ArtifactsJSON)
+	}
+}
+
 func createFactoryTestProject(t *testing.T, ctx context.Context, store *sqlite.Store) sqlite.Project {
 	t.Helper()
 
@@ -614,6 +814,71 @@ func createFactoryTestProject(t *testing.T, ctx context.Context, store *sqlite.S
 		t.Fatalf("CreateProject() error = %v", err)
 	}
 	return project
+}
+
+func createFactoryTaskWithPRHandoff(t *testing.T, ctx context.Context, store *sqlite.Store, service Service) (AdmissionResult, sqlite.PullRequestHandoff) {
+	t.Helper()
+
+	if service.Store == nil {
+		service.Store = store
+	}
+	if service.Jobs.Store == nil {
+		service.Jobs.Store = store
+	}
+	admission, err := service.AdmitOperatorStart(ctx, AdmitOperatorInput{ProjectKey: "alpha", Title: "Merge green PR", RequestedBy: "operator"})
+	if err != nil {
+		t.Fatalf("AdmitOperatorStart() error = %v", err)
+	}
+	handoff, err := store.UpsertPullRequestHandoff(ctx, sqlite.UpsertPullRequestHandoffParams{
+		ProjectID:     admission.Task.ProjectID,
+		Provider:      "github",
+		Repo:          "acme/alpha",
+		Number:        7,
+		URL:           "https://github.test/acme/alpha/pull/7",
+		State:         "open",
+		IssueURL:      "https://github.test/acme/alpha/issues/1",
+		Branch:        "factory/green-pr",
+		Title:         "Merge green PR",
+		Summary:       "Ready to merge",
+		Tests:         []string{"checks:green", "branch_protection:satisfied", "mergeable:true"},
+		ReviewState:   "review_selected",
+		SelectedRoles: []string{"code"},
+	})
+	if err != nil {
+		t.Fatalf("UpsertPullRequestHandoff() error = %v", err)
+	}
+	if _, err := service.RecordPhaseEvidence(ctx, PhaseEvidenceInput{
+		TaskID:  admission.Task.ID,
+		Phase:   PhasePRHandoff,
+		Summary: "PR handoff ready",
+		Details: map[string]string{"pr_handoff_id": strconv.FormatInt(handoff.ID, 10)},
+	}); err != nil {
+		t.Fatalf("RecordPhaseEvidence(pr_handoff) error = %v", err)
+	}
+	return admission, handoff
+}
+
+type fakePRStateProvider struct {
+	state PullRequestState
+	err   error
+}
+
+func (provider fakePRStateProvider) Read(ctx context.Context, handoff sqlite.PullRequestHandoff) (PullRequestState, error) {
+	_ = ctx
+	_ = handoff
+	return provider.state, provider.err
+}
+
+type fakePRMerger struct {
+	result MergeResult
+	err    error
+}
+
+func (merger fakePRMerger) Merge(ctx context.Context, handoff sqlite.PullRequestHandoff, mode string) (MergeResult, error) {
+	_ = ctx
+	_ = handoff
+	_ = mode
+	return merger.result, merger.err
 }
 
 func containsFactoryPhase(phases []string, want string) bool {

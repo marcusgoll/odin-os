@@ -488,6 +488,17 @@ func runFactory(ctx context.Context, app bootstrap.App, args []string, stdout io
 		}
 		_, err = fmt.Fprintf(stdout, "factory_lane=%t trigger=%s autonomy=%s phase=%s known_phases=%s work_item=%s status=%s\n", view.FactoryLane, view.Trigger, view.Autonomy, view.Phase, strings.Join(view.KnownPhases, ","), view.WorkItem.Key, view.WorkItem.Status)
 		return err
+	case "merge-gate":
+		result, err := service.EvaluateMergeGate(ctx, command.Task)
+		if err != nil {
+			return err
+		}
+		view := newFactoryMergeGateView(result)
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "factory_lane=true merge_gate=passed merged=%t phase=%s pr_handoff_id=%d deploy_handoff_id=%s\n", view.Merged, view.Phase, view.PullRequestHandoff.ID, view.DeployHandoffID)
+		return err
 	default:
 		_, err := fmt.Fprintln(stdout, commands.FactoryUsage)
 		return err
@@ -514,6 +525,25 @@ type factoryWorkItemView struct {
 	WorkKind              string `json:"work_kind,omitempty"`
 	ExecutionIntent       string `json:"execution_intent,omitempty"`
 	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
+}
+
+type factoryMergeGateView struct {
+	FactoryLane        bool                          `json:"factory_lane"`
+	MergeGate          string                        `json:"merge_gate"`
+	Merged             bool                          `json:"merged"`
+	Phase              string                        `json:"phase"`
+	CommitSHA          string                        `json:"commit_sha,omitempty"`
+	URL                string                        `json:"url,omitempty"`
+	DeployHandoffID    string                        `json:"deploy_handoff_id,omitempty"`
+	WorkItem           factoryWorkItemView           `json:"work_item"`
+	PullRequestHandoff factoryPullRequestHandoffView `json:"pull_request_handoff"`
+}
+
+type factoryPullRequestHandoffView struct {
+	ID     int64  `json:"id"`
+	Repo   string `json:"repo"`
+	Number int    `json:"number"`
+	URL    string `json:"url"`
 }
 
 func newFactoryAdmissionView(result factorysvc.AdmissionResult) factoryCommandView {
@@ -549,6 +579,25 @@ func newFactoryWorkItemView(task sqlite.Task) factoryWorkItemView {
 		WorkKind:              task.WorkKind,
 		ExecutionIntent:       task.ExecutionIntent,
 		ExecutionIntentSource: task.ExecutionIntentSource,
+	}
+}
+
+func newFactoryMergeGateView(result factorysvc.MergeGateResult) factoryMergeGateView {
+	return factoryMergeGateView{
+		FactoryLane:     true,
+		MergeGate:       "passed",
+		Merged:          result.Merged,
+		Phase:           result.Phase,
+		CommitSHA:       result.CommitSHA,
+		URL:             result.URL,
+		DeployHandoffID: result.DeployHandoffID,
+		WorkItem:        newFactoryWorkItemView(result.Task),
+		PullRequestHandoff: factoryPullRequestHandoffView{
+			ID:     result.Handoff.ID,
+			Repo:   result.Handoff.Repo,
+			Number: result.Handoff.Number,
+			URL:    result.Handoff.URL,
+		},
 	}
 }
 

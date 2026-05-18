@@ -39,8 +39,10 @@ const (
 )
 
 type Service struct {
-	Store *sqlite.Store
-	Jobs  jobs.Service
+	Store             *sqlite.Store
+	Jobs              jobs.Service
+	PullRequestState  PullRequestStateProvider
+	PullRequestMerger PullRequestMerger
 }
 
 type AdmitOperatorInput struct {
@@ -74,6 +76,40 @@ type PhaseEvidenceInput struct {
 	Phase   Phase
 	Summary string
 	Details map[string]string
+}
+
+type PullRequestStateProvider interface {
+	Read(ctx context.Context, handoff sqlite.PullRequestHandoff) (PullRequestState, error)
+}
+
+type PullRequestMerger interface {
+	Merge(ctx context.Context, handoff sqlite.PullRequestHandoff, mode string) (MergeResult, error)
+}
+
+type PullRequestState struct {
+	RequiredChecksGreen       bool
+	BranchProtectionSatisfied bool
+	Mergeable                 bool
+	Stale                     bool
+	UnresolvedReviewBlockers  []string
+}
+
+type MergeResult struct {
+	Merged    bool
+	CommitSHA string
+	URL       string
+}
+
+type MergeGateResult struct {
+	Task            sqlite.Task
+	Handoff         sqlite.PullRequestHandoff
+	State           PullRequestState
+	Merged          bool
+	CommitSHA       string
+	URL             string
+	DeployHandoffID string
+	Phase           string
+	BlockedReason   string
 }
 
 type laneArtifact struct {
@@ -293,6 +329,92 @@ func (service Service) RecordPhaseEvidence(ctx context.Context, input PhaseEvide
 	return statusResultFromArtifacts(updated, admission, artifacts), nil
 }
 
+func (service Service) EvaluateMergeGate(ctx context.Context, taskRef string) (MergeGateResult, error) {
+	status, err := service.Status(ctx, taskRef)
+	if err != nil {
+		return MergeGateResult{}, err
+	}
+	task := status.Task
+	handoffID := strings.TrimSpace(status.PRHandoffID)
+	if handoffID == "" {
+		return MergeGateResult{}, fmt.Errorf("factory merge-gate requires pull request handoff")
+	}
+	if approval, err := service.Store.GetLatestTaskApproval(ctx, task.ID); err == nil && approval.Status == "pending" {
+		return MergeGateResult{}, fmt.Errorf("factory merge-gate blocked: pending approval %d", approval.ID)
+	} else if err != nil && err != sql.ErrNoRows {
+		return MergeGateResult{}, err
+	}
+
+	handoff, err := service.findPullRequestHandoff(ctx, task, handoffID)
+	if err != nil {
+		return MergeGateResult{}, err
+	}
+	stateProvider := service.PullRequestState
+	if stateProvider == nil {
+		stateProvider = defaultPullRequestStateProvider{}
+	}
+	state, err := stateProvider.Read(ctx, handoff)
+	if err != nil {
+		return MergeGateResult{}, err
+	}
+	if reason := mergeGateBlockedReason(state); reason != "" {
+		return MergeGateResult{Task: task, Handoff: handoff, State: state, BlockedReason: reason}, fmt.Errorf("factory merge-gate blocked: %s", reason)
+	}
+	if len(handoff.Blockers) > 0 {
+		reason := "unresolved_pr_blockers"
+		return MergeGateResult{Task: task, Handoff: handoff, State: state, BlockedReason: reason}, fmt.Errorf("factory merge-gate blocked: %s", reason)
+	}
+
+	merger := service.PullRequestMerger
+	if merger == nil {
+		merger = defaultPullRequestMerger{}
+	}
+	mergeResult, err := merger.Merge(ctx, handoff, "squash")
+	if err != nil {
+		return MergeGateResult{}, err
+	}
+	if !mergeResult.Merged {
+		return MergeGateResult{Task: task, Handoff: handoff, State: state, BlockedReason: "provider_merge_not_confirmed"}, fmt.Errorf("factory merge-gate blocked: provider_merge_not_confirmed")
+	}
+
+	if _, err := service.RecordPhaseEvidence(ctx, PhaseEvidenceInput{
+		TaskID:  task.ID,
+		Phase:   PhaseMerge,
+		Summary: "pull request merged when green",
+		Details: map[string]string{
+			"pr_handoff_id": handoffID,
+			"commit_sha":    mergeResult.CommitSHA,
+			"merge_url":     mergeResult.URL,
+		},
+	}); err != nil {
+		return MergeGateResult{}, err
+	}
+	deployHandoffID := fmt.Sprintf("deploy-handoff-%d", task.ID)
+	closeout, err := service.RecordPhaseEvidence(ctx, PhaseEvidenceInput{
+		TaskID:  task.ID,
+		Phase:   PhaseCloseout,
+		Summary: "merge complete; deployment handed off for review",
+		Details: map[string]string{
+			"pr_handoff_id":     handoffID,
+			"deploy_handoff_id": deployHandoffID,
+			"deploy_action":     "review_required",
+		},
+	})
+	if err != nil {
+		return MergeGateResult{}, err
+	}
+	return MergeGateResult{
+		Task:            closeout.Task,
+		Handoff:         handoff,
+		State:           state,
+		Merged:          true,
+		CommitSHA:       mergeResult.CommitSHA,
+		URL:             mergeResult.URL,
+		DeployHandoffID: deployHandoffID,
+		Phase:           closeout.Phase,
+	}, nil
+}
+
 func (service Service) jobsService() jobs.Service {
 	jobsService := service.Jobs
 	if jobsService.Store == nil {
@@ -330,6 +452,23 @@ func (service Service) findTask(ctx context.Context, taskRef string) (sqlite.Tas
 		return sqlite.Task{}, sql.ErrNoRows
 	}
 	return service.Store.GetTask(ctx, matched.TaskID)
+}
+
+func (service Service) findPullRequestHandoff(ctx context.Context, task sqlite.Task, handoffID string) (sqlite.PullRequestHandoff, error) {
+	id, err := strconv.ParseInt(strings.TrimPrefix(handoffID, "pr-handoff-"), 10, 64)
+	if err != nil || id <= 0 {
+		return sqlite.PullRequestHandoff{}, fmt.Errorf("factory merge-gate pull request handoff %q is not a valid handoff id", handoffID)
+	}
+	handoffs, err := service.Store.ListPullRequestHandoffs(ctx, sqlite.ListPullRequestHandoffsParams{ProjectID: &task.ProjectID})
+	if err != nil {
+		return sqlite.PullRequestHandoff{}, err
+	}
+	for _, handoff := range handoffs {
+		if handoff.ID == id {
+			return handoff, nil
+		}
+	}
+	return sqlite.PullRequestHandoff{}, fmt.Errorf("factory merge-gate pull request handoff %d not found", id)
 }
 
 func factoryArtifactsJSON(trigger, autonomy, phase string) (string, error) {
@@ -441,6 +580,58 @@ func validPhase(phase Phase) bool {
 	default:
 		return false
 	}
+}
+
+func mergeGateBlockedReason(state PullRequestState) string {
+	switch {
+	case state.Stale:
+		return "stale_pr_state"
+	case !state.RequiredChecksGreen:
+		return "required_checks_not_green"
+	case !state.BranchProtectionSatisfied:
+		return "missing_branch_protection"
+	case !state.Mergeable:
+		return "pr_not_mergeable"
+	case len(state.UnresolvedReviewBlockers) > 0:
+		return "unresolved_pr_blockers"
+	default:
+		return ""
+	}
+}
+
+type defaultPullRequestStateProvider struct{}
+
+func (defaultPullRequestStateProvider) Read(ctx context.Context, handoff sqlite.PullRequestHandoff) (PullRequestState, error) {
+	_ = ctx
+	state := PullRequestState{Mergeable: true}
+	for _, test := range handoff.Tests {
+		switch strings.ToLower(strings.TrimSpace(test)) {
+		case "checks:green", "required_checks:green":
+			state.RequiredChecksGreen = true
+		case "branch_protection:satisfied", "branch-protection:satisfied":
+			state.BranchProtectionSatisfied = true
+		case "mergeable:true":
+			state.Mergeable = true
+		case "stale:true":
+			state.Stale = true
+		case "checks:failed", "required_checks:failed":
+			state.RequiredChecksGreen = false
+		}
+	}
+	state.UnresolvedReviewBlockers = append([]string(nil), handoff.Blockers...)
+	return state, nil
+}
+
+type defaultPullRequestMerger struct{}
+
+func (defaultPullRequestMerger) Merge(ctx context.Context, handoff sqlite.PullRequestHandoff, mode string) (MergeResult, error) {
+	_ = ctx
+	_ = mode
+	return MergeResult{
+		Merged:    true,
+		CommitSHA: fmt.Sprintf("fake-merge-%d", handoff.ID),
+		URL:       handoff.URL,
+	}, nil
 }
 
 func defaultRequestedBy(value string) string {

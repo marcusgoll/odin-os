@@ -416,6 +416,91 @@ func TestRunFactoryStatusShowsPhaseEvidence(t *testing.T) {
 	}
 }
 
+func TestRunFactoryMergeGateMergesGreenPullRequest(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var startStdout bytes.Buffer
+
+	if err := Run(context.Background(), root, []string{"factory", "start", "--project", testProjectKey, "--title", "Merge fixture PR", "--json"}, strings.NewReader(""), &startStdout); err != nil {
+		t.Fatalf("Run(factory start) error = %v", err)
+	}
+	var start struct {
+		WorkItem struct {
+			ID int64 `json:"id"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(startStdout.Bytes(), &start); err != nil {
+		t.Fatalf("start json unmarshal error = %v\nstdout=%s", err, startStdout.String())
+	}
+
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+	task, err := store.GetTask(context.Background(), start.WorkItem.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	handoff, err := store.UpsertPullRequestHandoff(context.Background(), sqlite.UpsertPullRequestHandoffParams{
+		ProjectID:     task.ProjectID,
+		Provider:      "github",
+		Repo:          "acme/alpha",
+		Number:        11,
+		URL:           "https://github.test/acme/alpha/pull/11",
+		State:         "open",
+		IssueURL:      "https://github.test/acme/alpha/issues/11",
+		Branch:        "factory/fixture",
+		Title:         "Merge fixture PR",
+		Summary:       "Green PR",
+		Tests:         []string{"checks:green", "branch_protection:satisfied", "mergeable:true"},
+		ReviewState:   "review_selected",
+		SelectedRoles: []string{"code"},
+	})
+	if err != nil {
+		t.Fatalf("UpsertPullRequestHandoff() error = %v", err)
+	}
+	if _, err := (factorysvc.Service{Store: store}).RecordPhaseEvidence(context.Background(), factorysvc.PhaseEvidenceInput{
+		TaskID:  task.ID,
+		Phase:   factorysvc.PhasePRHandoff,
+		Summary: "PR handoff ready",
+		Details: map[string]string{"pr_handoff_id": strconv.FormatInt(handoff.ID, 10)},
+	}); err != nil {
+		t.Fatalf("RecordPhaseEvidence() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"factory", "merge-gate", "--task", strconv.FormatInt(task.ID, 10), "--json"}, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("Run(factory merge-gate) error = %v", err)
+	}
+	var payload struct {
+		FactoryLane     bool   `json:"factory_lane"`
+		MergeGate       string `json:"merge_gate"`
+		Merged          bool   `json:"merged"`
+		Phase           string `json:"phase"`
+		CommitSHA       string `json:"commit_sha"`
+		DeployHandoffID string `json:"deploy_handoff_id"`
+		PullRequest     struct {
+			ID     int64  `json:"id"`
+			Repo   string `json:"repo"`
+			Number int    `json:"number"`
+		} `json:"pull_request_handoff"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("merge gate json unmarshal error = %v\nstdout=%s", err, stdout.String())
+	}
+	if !payload.FactoryLane || payload.MergeGate != "passed" || !payload.Merged || payload.Phase != "closeout" {
+		t.Fatalf("merge gate payload = %+v", payload)
+	}
+	if payload.CommitSHA == "" || payload.DeployHandoffID == "" {
+		t.Fatalf("merge gate commit/deploy handoff = %q/%q", payload.CommitSHA, payload.DeployHandoffID)
+	}
+	if payload.PullRequest.ID != handoff.ID || payload.PullRequest.Repo != "acme/alpha" || payload.PullRequest.Number != 11 {
+		t.Fatalf("pull request handoff = %+v, want handoff %d", payload.PullRequest, handoff.ID)
+	}
+}
+
 func TestRunFactoryStartBlocksHighRiskWork(t *testing.T) {
 	t.Parallel()
 
