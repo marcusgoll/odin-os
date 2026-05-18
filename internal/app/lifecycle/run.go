@@ -3041,7 +3041,14 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 			policyReason = policy.Reason
 			break
 		}
-		created, createdNow, err := createTaskFromReviewedIntake(ctx, app, item)
+		var created sqlite.Task
+		var createdNow bool
+		var err error
+		if command.Factory {
+			created, createdNow, err = promoteAcceptedIntakeToFactoryLane(ctx, app, item)
+		} else {
+			created, createdNow, err = createTaskFromReviewedIntake(ctx, app, item)
+		}
 		if err != nil {
 			return err
 		}

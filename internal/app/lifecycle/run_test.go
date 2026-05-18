@@ -2794,6 +2794,211 @@ func TestRunIntakeReviewAcceptRequiresApprovalForRiskyIntake(t *testing.T) {
 	}
 }
 
+func TestRunIntakeReviewAcceptFactoryPromotesToFactoryLane(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "Implement reviewed intake factory lane",
+		"--type", "request",
+		"--dedup-key", "factory-reviewed-intake",
+		"--requested-by", "codex",
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+	accepted := run("intake", "review", "accept", "intake-1", "--factory", "--json")
+	for _, want := range []string{
+		`"decision": "accepted"`,
+		`"work_created": true`,
+		`"key": "intake-review-1"`,
+	} {
+		if !strings.Contains(accepted, want) {
+			t.Fatalf("accept output = %s, want %s", accepted, want)
+		}
+	}
+
+	jobsOutput := run("jobs", "--json")
+	for _, want := range []string{
+		`"task_key": "intake-review-1"`,
+		`"work_kind": "factory_lane"`,
+		`"execution_intent": "mutation"`,
+		`"execution_intent_source": "factory_lane:intake_review"`,
+	} {
+		if !strings.Contains(jobsOutput, want) {
+			t.Fatalf("jobs output = %s, want %s", jobsOutput, want)
+		}
+	}
+
+	statusOutput := run("factory", "status", "--task", "intake-review-1", "--json")
+	for _, want := range []string{
+		`"factory_lane": true`,
+		`"trigger": "intake_review"`,
+		`"autonomy": "merge_when_green"`,
+		`"phase": "admitted"`,
+		`"work_kind": "factory_lane"`,
+		`"execution_intent_source": "factory_lane:intake_review"`,
+	} {
+		if !strings.Contains(statusOutput, want) {
+			t.Fatalf("factory status output = %s, want %s", statusOutput, want)
+		}
+	}
+}
+
+func TestRunIntakeReviewAcceptFactoryIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "Implement idempotent reviewed intake factory lane",
+		"--type", "request",
+		"--dedup-key", "factory-reviewed-intake-idempotent",
+		"--requested-by", "codex",
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+
+	first := run("intake", "review", "accept", "intake-1", "--factory", "--json")
+	if !strings.Contains(first, `"work_created": true`) || !strings.Contains(first, `"key": "intake-review-1"`) {
+		t.Fatalf("first accept output = %s, want created intake-review-1", first)
+	}
+	second := run("intake", "review", "accept", "intake-1", "--factory", "--json")
+	if !strings.Contains(second, `"work_created": false`) || !strings.Contains(second, `"key": "intake-review-1"`) {
+		t.Fatalf("second accept output = %s, want reused intake-review-1", second)
+	}
+
+	jobsOutput := run("jobs", "--json")
+	if strings.Count(jobsOutput, `"task_key": "intake-review-1"`) != 1 {
+		t.Fatalf("jobs output = %s, want exactly one factory work item", jobsOutput)
+	}
+}
+
+func TestRunIntakeReviewAcceptFactoryKeepsRiskyApprovalGate(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "Delete production data through factory lane",
+		"--type", "request",
+		"--dedup-key", "factory-reviewed-intake-risky",
+		"--requested-by", "codex",
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+	accepted := run("intake", "review", "accept", "intake-1", "--factory", "--json")
+	for _, want := range []string{
+		`"decision": "approval_required"`,
+		`"work_created": false`,
+		`"approval_required": true`,
+		`"policy_reason": "risky_intake_requires_operator_approval"`,
+	} {
+		if !strings.Contains(accepted, want) {
+			t.Fatalf("accept output = %s, want %s", accepted, want)
+		}
+	}
+	if strings.Contains(accepted, `"work_item"`) {
+		t.Fatalf("accept output = %s, must not include work item before approval", accepted)
+	}
+
+	jobsOutput := run("jobs", "--json")
+	if strings.Contains(jobsOutput, `"task_key": "intake-review-1"`) || strings.Contains(jobsOutput, `"work_kind": "factory_lane"`) {
+		t.Fatalf("jobs output = %s, want no factory work before approval", jobsOutput)
+	}
+}
+
+func TestRunIntakeReviewAcceptFactoryDefersForcePushToJobsApprovalGate(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout bytes.Buffer
+		if err := Run(context.Background(), root, args, strings.NewReader(""), &stdout); err != nil {
+			t.Fatalf("Run(%v) error = %v\nstdout=%s", args, err, stdout.String())
+		}
+		return stdout.String()
+	}
+
+	run(
+		"intake", "raw", "create",
+		"--source", "operator",
+		"--project", testProjectKey,
+		"--title", "Force push branch",
+		"--type", "request",
+		"--dedup-key", "factory-force-push-branch",
+		"--requested-by", "codex",
+		"--json",
+	)
+	run("intake", "process", "--id", "intake-1", "--json")
+	accepted := run("intake", "review", "accept", "intake-1", "--factory", "--json")
+	if !strings.Contains(accepted, `"work_created": true`) || !strings.Contains(accepted, `"key": "intake-review-1"`) {
+		t.Fatalf("accept output = %s, want factory work item creation", accepted)
+	}
+
+	jobsOutput := run("jobs", "--json")
+	for _, want := range []string{
+		`"task_key": "intake-review-1"`,
+		`"work_kind": "factory_lane"`,
+		`"execution_intent": "destructive"`,
+		`"execution_intent_source": "safety_classifier"`,
+	} {
+		if !strings.Contains(jobsOutput, want) {
+			t.Fatalf("jobs output = %s, want %s", jobsOutput, want)
+		}
+	}
+	if strings.Contains(jobsOutput, `"execution_intent_source": "factory_lane:intake_review"`) {
+		t.Fatalf("jobs output = %s, must not persist normal factory mutation source for force-push title", jobsOutput)
+	}
+
+	dispatchOutput := run("work", "dispatch", "--task", "intake-review-1", "--json")
+	for _, want := range []string{
+		`"dispatched": false`,
+		`"reason": "approval_required"`,
+		`"status": "blocked"`,
+		`"execution_intent": "destructive"`,
+		`"execution_intent_source": "safety_classifier"`,
+	} {
+		if !strings.Contains(dispatchOutput, want) {
+			t.Fatalf("dispatch output = %s, want %s", dispatchOutput, want)
+		}
+	}
+}
+
 func TestRunIntakePromotionPersistsDerivedGovernanceIntent(t *testing.T) {
 	t.Parallel()
 

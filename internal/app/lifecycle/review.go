@@ -15,9 +15,11 @@ import (
 	commands "odin-os/internal/cli/commands"
 	cliscope "odin-os/internal/cli/scope"
 	"odin-os/internal/core/followups"
+	"odin-os/internal/core/projects"
 	"odin-os/internal/core/workspaces"
 	browserexecutor "odin-os/internal/executors/browser"
 	approvalsvc "odin-os/internal/runtime/approvals"
+	factorysvc "odin-os/internal/runtime/factory"
 	jobsvc "odin-os/internal/runtime/jobs"
 	runtimeknowledge "odin-os/internal/runtime/knowledge"
 	"odin-os/internal/runtime/memoryproposal"
@@ -27,6 +29,9 @@ import (
 	"odin-os/internal/skills"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tools/invocation"
+	gitadapter "odin-os/internal/vcs/git"
+	"odin-os/internal/vcs/leases"
+	"odin-os/internal/vcs/worktrees"
 )
 
 const reviewUsage = "usage: odin review list [--json] [--source <source_type>] [--status <status>] [--severity <severity>] | odin review show <queue-id>|--id <queue-id> [--json] | odin review approve --id <queue-id> [--json] | odin review reject --id <queue-id> --reason <reason> [--json] | odin review act <queue-id> <accept|reject|archive|approve|deny|clarify|retry|follow-up> [--dry-run] [--json]"
@@ -1157,6 +1162,32 @@ func ensureGoalForIntakeGoalReview(ctx context.Context, store *sqlite.Store, ite
 		return sqlite.Goal{}, err
 	}
 	return goal, nil
+}
+
+func promoteAcceptedIntakeToFactoryLane(ctx context.Context, app bootstrap.App, item sqlite.IntakeItem) (sqlite.Task, bool, error) {
+	result, err := factorysvc.Service{
+		Store: app.Store,
+		Jobs: jobsvc.Service{
+			Store:              app.Store,
+			RuntimeRoot:        app.RuntimeRoot,
+			Registry:           app.Registry,
+			Executors:          app.Executors,
+			ExecutorConfig:     app.ExecutorConfig,
+			PromptRenderer:     app.PromptRenderer,
+			PromptTemplateName: app.PromptTemplateName,
+			Transitions:        projects.Service{Store: app.Store},
+			Leases: leases.Manager{
+				Store:        app.Store,
+				Git:          gitadapter.Adapter{},
+				WorktreeRoot: worktrees.DefaultRoot(),
+			},
+			Now: time.Now,
+		},
+	}.PromoteAcceptedIntake(ctx, item, item.Subject, nil)
+	if err != nil {
+		return sqlite.Task{}, false, err
+	}
+	return result.Task, result.Created, nil
 }
 
 func reviewQueueDetail(ctx context.Context, app bootstrap.App, ref reviewQueueRef, includePayload bool) (reviewQueueEntry, any, error) {

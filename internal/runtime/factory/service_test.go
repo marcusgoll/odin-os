@@ -64,6 +64,161 @@ func TestAdmitOperatorStartCreatesFactoryLaneWorkItem(t *testing.T) {
 	}
 }
 
+func TestPromoteAcceptedIntakeCreatesFactoryLaneWorkItem(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFactoryStore(t)
+	defer store.Close()
+
+	service := Service{
+		Store: store,
+		Jobs:  jobs.Service{Store: store, Registry: writeFactoryRegistry(t)},
+	}
+	result, err := service.PromoteAcceptedIntake(ctx, sqlite.IntakeItem{
+		ID:       42,
+		Scope:    "project",
+		ScopeKey: "alpha",
+		Subject:  "Implement reviewed intake factory lane",
+	}, "Implement reviewed intake factory lane", []string{"factory lane accepts reviewed intake"})
+	if err != nil {
+		t.Fatalf("PromoteAcceptedIntake() error = %v", err)
+	}
+	if !result.Created {
+		t.Fatal("Created = false, want true")
+	}
+	if result.Task.Key != "intake-review-42" || result.Task.WorkKind != WorkKindFactoryLane {
+		t.Fatalf("Task key/work_kind = %q/%q, want intake-review-42/%s", result.Task.Key, result.Task.WorkKind, WorkKindFactoryLane)
+	}
+	if result.Task.ExecutionIntent != "mutation" || result.Task.ExecutionIntentSource != "factory_lane:intake_review" {
+		t.Fatalf("Task intent = %q/%q, want mutation/factory_lane:intake_review", result.Task.ExecutionIntent, result.Task.ExecutionIntentSource)
+	}
+	if result.Task.RequestedBy != "intake_review:intake-42" {
+		t.Fatalf("Task.RequestedBy = %q, want intake_review:intake-42", result.Task.RequestedBy)
+	}
+	if len(result.Task.AcceptanceCriteria) != 1 || result.Task.AcceptanceCriteria[0] != "factory lane accepts reviewed intake" {
+		t.Fatalf("Task.AcceptanceCriteria = %#v, want passed acceptance", result.Task.AcceptanceCriteria)
+	}
+	if result.Trigger != "intake_review" || result.Autonomy != AutonomyMergeWhenGreen || result.Phase != "admitted" {
+		t.Fatalf("result lane fields = %q/%q/%q", result.Trigger, result.Autonomy, result.Phase)
+	}
+
+	var artifacts []laneArtifact
+	if err := json.Unmarshal([]byte(result.Task.ArtifactsJSON), &artifacts); err != nil {
+		t.Fatalf("ArtifactsJSON unmarshal error = %v", err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("artifacts len = %d, want 1", len(artifacts))
+	}
+	artifact := artifacts[0]
+	if artifact.Type != WorkKindFactoryLane || artifact.ProfileKey != ProfileKey || artifact.Trigger != "intake_review" || artifact.Autonomy != AutonomyMergeWhenGreen || artifact.Phase != "admitted" {
+		t.Fatalf("artifact = %+v, want intake-review factory lane artifact", artifact)
+	}
+}
+
+func TestPromoteAcceptedIntakeIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFactoryStore(t)
+	defer store.Close()
+
+	service := Service{
+		Store: store,
+		Jobs:  jobs.Service{Store: store, Registry: writeFactoryRegistry(t)},
+	}
+	item := sqlite.IntakeItem{ID: 42, Scope: "project", ScopeKey: "alpha", Subject: "Implement idempotent factory promotion"}
+	first, err := service.PromoteAcceptedIntake(ctx, item, item.Subject, nil)
+	if err != nil {
+		t.Fatalf("first PromoteAcceptedIntake() error = %v", err)
+	}
+	second, err := service.PromoteAcceptedIntake(ctx, item, item.Subject, nil)
+	if err != nil {
+		t.Fatalf("second PromoteAcceptedIntake() error = %v", err)
+	}
+	if !first.Created || second.Created {
+		t.Fatalf("Created first/second = %t/%t, want true/false", first.Created, second.Created)
+	}
+	if first.Task.ID != second.Task.ID || second.Task.Key != "intake-review-42" {
+		t.Fatalf("tasks = %+v then %+v, want same intake-review task", first.Task, second.Task)
+	}
+
+	rows, err := store.DB().QueryContext(ctx, `SELECT COUNT(*) FROM tasks WHERE key = 'intake-review-42'`)
+	if err != nil {
+		t.Fatalf("count tasks query error = %v", err)
+	}
+	defer rows.Close()
+	var count int
+	if !rows.Next() {
+		t.Fatal("count tasks returned no row")
+	}
+	if err := rows.Scan(&count); err != nil {
+		t.Fatalf("count scan error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("task count = %d, want 1", count)
+	}
+}
+
+func TestPromoteAcceptedIntakeDefersHighRiskTitlesToJobsClassifier(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openFactoryStore(t)
+	defer store.Close()
+
+	registry := writeFactoryRegistry(t)
+	jobService := jobs.Service{
+		Store:          store,
+		Registry:       registry,
+		ExecutorConfig: loadFactoryExecutorConfig(t),
+		Executors: map[string]contract.Executor{
+			"codex_headless": contract.NewStaticExecutor("codex_headless", contract.ExecutorClassPlanBackedCLI, contract.HealthReport{Status: contract.HealthStatusHealthy}, contract.Capabilities{
+				SupportsHeadlessPlan: true,
+				TaskKinds:            []contract.TaskKind{contract.TaskKindGeneral},
+				Scopes:               []string{"project", "odin-core", "new-project"},
+			}),
+		},
+	}
+	service := Service{Store: store, Jobs: jobService}
+	admission, err := service.PromoteAcceptedIntake(ctx, sqlite.IntakeItem{
+		ID:       43,
+		Scope:    "project",
+		ScopeKey: "alpha",
+		Subject:  "Force push branch",
+	}, "Force push branch", nil)
+	if err != nil {
+		t.Fatalf("PromoteAcceptedIntake() error = %v", err)
+	}
+	if admission.Task.WorkKind != WorkKindFactoryLane {
+		t.Fatalf("Task.WorkKind = %q, want %q", admission.Task.WorkKind, WorkKindFactoryLane)
+	}
+	if admission.Task.ExecutionIntent != "destructive" || admission.Task.ExecutionIntentSource != "safety_classifier" {
+		t.Fatalf("Task intent = %q/%q, want destructive/safety_classifier", admission.Task.ExecutionIntent, admission.Task.ExecutionIntentSource)
+	}
+
+	if err := jobService.ExecuteNextQueued(ctx); err != nil {
+		t.Fatalf("ExecuteNextQueued() error = %v", err)
+	}
+	blocked, err := store.GetTask(ctx, admission.Task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if blocked.Status != "blocked" || blocked.BlockedReason != "approval_required" {
+		t.Fatalf("blocked task = %+v, want blocked approval_required", blocked)
+	}
+	if blocked.ExecutionIntent != "destructive" || blocked.ExecutionIntentSource != "safety_classifier" {
+		t.Fatalf("blocked intent = %q/%q, want destructive/safety_classifier", blocked.ExecutionIntent, blocked.ExecutionIntentSource)
+	}
+	approval, err := store.GetLatestTaskApproval(ctx, admission.Task.ID)
+	if err != nil {
+		t.Fatalf("GetLatestTaskApproval() error = %v", err)
+	}
+	if approval.Status != "pending" {
+		t.Fatalf("approval status = %q, want pending", approval.Status)
+	}
+}
+
 func TestStatusReadsFactoryLaneTask(t *testing.T) {
 	t.Parallel()
 

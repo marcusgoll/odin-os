@@ -19,8 +19,9 @@ const ProfileKey = "software-factory-lane-workflow"
 const AutonomyMergeWhenGreen = "merge_when_green"
 
 const (
-	operatorTrigger = "operator"
-	admittedPhase   = "admitted"
+	operatorTrigger     = "operator"
+	intakeReviewTrigger = "intake_review"
+	admittedPhase       = "admitted"
 )
 
 type Service struct {
@@ -107,6 +108,64 @@ func (service Service) AdmitOperatorStart(ctx context.Context, input AdmitOperat
 		Task:     result.Task,
 		Created:  result.Created,
 		Trigger:  operatorTrigger,
+		Autonomy: AutonomyMergeWhenGreen,
+		Phase:    admittedPhase,
+	}, nil
+}
+
+func (service Service) PromoteAcceptedIntake(ctx context.Context, item sqlite.IntakeItem, title string, acceptance []string) (AdmissionResult, error) {
+	projectKey := strings.TrimSpace(item.ScopeKey)
+	if item.Scope != "project" || projectKey == "" {
+		return AdmissionResult{}, fmt.Errorf("intake intake-%d has no project scope for factory promotion", item.ID)
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = strings.TrimSpace(item.Subject)
+	}
+	if title == "" {
+		return AdmissionResult{}, fmt.Errorf("factory intake promotion requires title")
+	}
+
+	jobsService := service.jobsService()
+	resolved := scope.Resolution{
+		Kind:       scope.ScopeProject,
+		ProjectKey: projectKey,
+	}
+	if projectKey == "odin-core" {
+		resolved.Kind = scope.ScopeOdinCore
+	}
+	manifest, ok := jobsService.Registry.Lookup(projectKey)
+	if !ok {
+		return AdmissionResult{}, fmt.Errorf("unknown project %q", projectKey)
+	}
+	artifactsJSON, err := factoryArtifactsJSON(intakeReviewTrigger, AutonomyMergeWhenGreen, admittedPhase)
+	if err != nil {
+		return AdmissionResult{}, err
+	}
+	executionIntent := "mutation"
+	executionIntentSource := "factory_lane:intake_review"
+	if jobs.TitleRequiresApproval(manifest, title) {
+		executionIntent = ""
+		executionIntentSource = ""
+	}
+	result, err := jobsService.CreateTaskOnce(ctx, jobs.CreateTaskParams{
+		Resolved:              resolved,
+		Title:                 title,
+		AcceptanceCriteria:    acceptance,
+		RequestedBy:           "intake_review:intake-" + strconv.FormatInt(item.ID, 10),
+		Key:                   "intake-review-" + strconv.FormatInt(item.ID, 10),
+		WorkKind:              WorkKindFactoryLane,
+		ArtifactsJSON:         artifactsJSON,
+		ExecutionIntent:       executionIntent,
+		ExecutionIntentSource: executionIntentSource,
+	})
+	if err != nil {
+		return AdmissionResult{}, err
+	}
+	return AdmissionResult{
+		Task:     result.Task,
+		Created:  result.Created,
+		Trigger:  intakeReviewTrigger,
 		Autonomy: AutonomyMergeWhenGreen,
 		Phase:    admittedPhase,
 	}, nil
