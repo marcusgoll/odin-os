@@ -88,6 +88,7 @@ func TestLoadDirLoadsRepositoryExamples(t *testing.T) {
 		"karpathy-guidelines":               registry.KindSkill,
 		"project-intake":                    registry.KindWorkflow,
 		"managed-project-delivery-workflow": registry.KindWorkflow,
+		"software-factory-lane-workflow":    registry.KindWorkflow,
 		"pixel-perfect-ui-ux-designer":      registry.KindSkill,
 	} {
 		item, ok := byKey[key]
@@ -101,6 +102,7 @@ func TestLoadDirLoadsRepositoryExamples(t *testing.T) {
 
 	for _, key := range []string{
 		"managed-project-delivery-workflow",
+		"software-factory-lane-workflow",
 		"local-deterministic-workflow",
 		"review-only-workflow",
 		"codex-code-workflow",
@@ -110,6 +112,68 @@ func TestLoadDirLoadsRepositoryExamples(t *testing.T) {
 		deliveryProfile := byKey[key]
 		if !containsString(deliveryProfile.Tags, "delivery_profile") {
 			t.Fatalf("%s tags = %v, want delivery_profile", key, deliveryProfile.Tags)
+		}
+	}
+}
+
+func TestLoadRegistryIncludesSoftwareFactoryLaneDeliveryProfile(t *testing.T) {
+	root := filepath.Clean(filepath.Join("..", "..", "..", "registry"))
+
+	snapshot, err := loader.LoadDir(root)
+	if err != nil {
+		t.Fatalf("LoadDir() error = %v", err)
+	}
+
+	if len(snapshot.Diagnostics) != 0 {
+		t.Fatalf("snapshot.Diagnostics = %v, want none", snapshot.Diagnostics)
+	}
+
+	item, ok := snapshot.ByKey["software-factory-lane-workflow"]
+	if !ok {
+		t.Fatal("snapshot.ByKey missing software-factory-lane-workflow")
+	}
+	if item.Kind != registry.KindWorkflow {
+		t.Fatalf("software-factory-lane-workflow kind = %q, want %q", item.Kind, registry.KindWorkflow)
+	}
+	if item.Title != "Software Factory Lane Workflow" {
+		t.Fatalf("software-factory-lane-workflow title = %q, want Software Factory Lane Workflow", item.Title)
+	}
+	if item.Status != "active" {
+		t.Fatalf("software-factory-lane-workflow status = %q, want active", item.Status)
+	}
+	for _, tag := range []string{"delivery_profile", "managed-project", "factory_lane"} {
+		if !containsString(item.Tags, tag) {
+			t.Fatalf("software-factory-lane-workflow tags = %v, want %q", item.Tags, tag)
+		}
+	}
+	if item.Entrypoint == "" {
+		t.Fatal("software-factory-lane-workflow entrypoint is empty")
+	}
+
+	contract := strings.Join([]string{
+		item.Summary,
+		item.Sections[registry.SectionPurpose],
+		item.Sections[registry.SectionWhenToUse],
+		item.Sections[registry.SectionProcedure],
+		item.Sections[registry.SectionConstraints],
+	}, "\n")
+	for _, required := range []string{
+		"managed-project delivery profile",
+		"admitted",
+		"specification",
+		"implementation_plan",
+		"implementation",
+		"verification",
+		"review",
+		"pr_handoff",
+		"green_check_wait",
+		"merge",
+		"closeout",
+		"separate queue",
+		"provider-specific worker",
+	} {
+		if !strings.Contains(contract, required) {
+			t.Fatalf("software-factory-lane-workflow contract missing %q", required)
 		}
 	}
 }
