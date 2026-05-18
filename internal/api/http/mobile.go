@@ -93,6 +93,15 @@ func registerMobileRoutes(mux *http.ServeMux, deps Dependencies, now func() time
 		writeMobileJSON(writer, http.StatusOK, view)
 	}))
 
+	mux.HandleFunc("GET /mobile/operator-snapshot", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
+		snapshot, err := buildOperatorSnapshot(request.Context(), deps, now)
+		if err != nil {
+			writeAPIError(writer, http.StatusServiceUnavailable, "operator_snapshot_unavailable", err.Error())
+			return
+		}
+		writeMobileJSON(writer, http.StatusOK, snapshot)
+	}))
+
 	mux.HandleFunc("GET /mobile/work-items", mobileAuthorized(deps, func(writer http.ResponseWriter, request *http.Request) {
 		if deps.ReadModels == nil {
 			writeAPIError(writer, http.StatusServiceUnavailable, "read_models_unavailable", "read models unavailable")

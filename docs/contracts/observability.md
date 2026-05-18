@@ -94,6 +94,8 @@ Operator projections remain read-only and must not mutate runtime state.
 
 Projection consumers may render derived status for readability, but canonical lifecycle ownership stays with the underlying domain object. Observability must not mint new Work Item, Run Attempt, Approval Request, or Follow-Up Obligation states.
 
+`GET /mobile/operator-snapshot` is an authenticated, read-only `odin serve` projection for command-center frontends. It composes existing health/readiness, overview Observability lane, mobile review queue, approval, run, event, and browser handoff read models into one snapshot with `action_required`, `odin_health`, `live_execution`, `activity`, and `browser` sections. Snapshot rows may include labels, summaries, severity, source detail payloads, read-only command hints such as `odin review list`, `odin approvals show <id>`, `odin runs show <id>`, and web deep links. The snapshot is not a second authority and must not decide approvals, resolve review items, fire triggers, retry work, or create/update runtime state.
+
 The Observability lane includes an `Activity Log` readback derived from the SQLite runtime event stream. It summarizes recent events with source identifiers such as event ID, event type, scope, project, work item, run, approval, timestamp, and a human-readable summary. It reuses the same provenance summarization used by `odin logs trail`.
 
 `odin logs show <event-id>` and `odin logs trail --task <id|key>`, `--run <id>`, or `--approval <id>` are read-only operator views over canonical runtime events. They may make event payloads easier to inspect, but they do not replace events, mutate state, or introduce a parallel log authority.

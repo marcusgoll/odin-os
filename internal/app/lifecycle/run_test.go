@@ -451,7 +451,7 @@ func TestRunTUIMissingPrometheusStillRendersOverviewPanels(t *testing.T) {
 		"┌─ SCHEDULES + ROUTINES ",
 		"┌─ PROJECT PRS + CI ",
 		"┌─ APPROVALS WAITING ",
-		"┌─ ODIN LOGS ",
+		"┌─ RECENT LOGS ",
 		"unavailable: unavailable telemetry",
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -617,7 +617,7 @@ func TestRunTUIOnceIncludesStoreBackedVisualPanels(t *testing.T) {
 		"┌─ PROJECT PRS + CI ",
 		"odin-core acme/odin-os#42 state=open ci=not_wired title=Visual TUI",
 		"┌─ APPROVALS WAITING ",
-		"┌─ ODIN LOGS ",
+		"┌─ RECENT LOGS ",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout = %q, want %q", stdout.String(), want)

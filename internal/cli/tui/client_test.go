@@ -44,7 +44,7 @@ func TestRunContinuousModeRefreshesUntilContextCanceled(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 	output := writer.String()
-	if count := strings.Count(output, "ODIN OBSERVABILITY"); count < 2 {
+	if count := strings.Count(output, "ODIN HEALTH"); count < 2 {
 		t.Fatalf("Run() rendered %d frame(s), want at least 2:\n%s", count, output)
 	}
 	if strings.Contains(output, "\x1b[2J") {
@@ -241,6 +241,240 @@ odin_os_telemetry_stale 0
 	}
 	if model.ActiveRuns != 1 || model.BlockedItems != 2 || model.ApprovalsWaiting != 3 || model.ReviewQueueItems != 4 || model.FailedWorkItems != 5 || model.RecoveryRecommendations != 6 {
 		t.Fatalf("model counts = %+v, want metrics fallback counts", model)
+	}
+}
+
+func TestRunMergesOdinSnapshot(t *testing.T) {
+	t.Parallel()
+
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writePrometheusQueryResponse(t, w, r.URL.Query().Get("query"))
+	}))
+	defer prometheus.Close()
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"result": []any{},
+			},
+		})
+	}))
+	defer loki.Close()
+
+	var sawAdminToken bool
+	odin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mobile/operator-snapshot" {
+			t.Fatalf("path = %s, want /mobile/operator-snapshot", r.URL.Path)
+		}
+		if got := r.Header.Get("X-Odin-Admin-Token"); got == "secret-token" {
+			sawAdminToken = true
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"generated_at": "2026-05-18T00:00:00Z",
+			"action_required": []map[string]any{
+				{
+					"id":       "approval:7",
+					"label":    "Approval alpha",
+					"summary":  "Approve deployment alpha",
+					"severity": "warning",
+					"command":  "odin approvals show 7",
+				},
+			},
+			"odin_health": map[string]any{
+				"status":  "healthy",
+				"ready":   true,
+				"summary": "runtime healthy",
+				"command": "odin healthcheck",
+			},
+			"live_execution": []map[string]any{
+				{
+					"id":       "run:9",
+					"label":    "Run 9",
+					"summary":  "work-alpha attempt 1 is running on codex",
+					"severity": "info",
+					"command":  "odin runs show 9",
+				},
+			},
+			"activity": []map[string]any{
+				{
+					"id":       "event:12",
+					"label":    "approval.requested",
+					"summary":  "Approval requested for alpha",
+					"severity": "info",
+					"command":  "odin logs show 12",
+				},
+			},
+		})
+	}))
+	defer odin.Close()
+
+	var stdout strings.Builder
+	err := Run(context.Background(), []string{
+		"--once",
+		"--prometheus-url", prometheus.URL,
+		"--loki-url", loki.URL,
+		"--odin-url", odin.URL,
+		"--admin-token", "secret-token",
+	}, &stdout)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !sawAdminToken {
+		t.Fatalf("Run() did not send X-Odin-Admin-Token")
+	}
+	for _, want := range []string{
+		"Approval alpha",
+		"odin approvals show 7",
+		"work-alpha attempt 1 is running on codex",
+		"odin runs show 9",
+		"approval.requested",
+		"odin logs show 12",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, want snapshot fragment %q", stdout.String(), want)
+		}
+	}
+}
+
+func TestRunOmitsSnapshotAdminTokenHeaderWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writePrometheusQueryResponse(t, w, r.URL.Query().Get("query"))
+	}))
+	defer prometheus.Close()
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"result": []any{},
+			},
+		})
+	}))
+	defer loki.Close()
+
+	var sawAdminToken bool
+	odin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Odin-Admin-Token") != "" {
+			sawAdminToken = true
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"action_required": []map[string]any{
+				{"id": "approval:7", "label": "Approval alpha"},
+			},
+		})
+	}))
+	defer odin.Close()
+
+	var stdout strings.Builder
+	err := Run(context.Background(), []string{
+		"--once",
+		"--prometheus-url", prometheus.URL,
+		"--loki-url", loki.URL,
+		"--odin-url", odin.URL,
+	}, &stdout)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if sawAdminToken {
+		t.Fatalf("Run() sent X-Odin-Admin-Token despite empty --admin-token")
+	}
+}
+
+func TestRunRendersSnapshotUnavailableWhenOdinSnapshotFails(t *testing.T) {
+	t.Parallel()
+
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writePrometheusQueryResponse(t, w, r.URL.Query().Get("query"))
+	}))
+	defer prometheus.Close()
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"result": []any{},
+			},
+		})
+	}))
+	defer loki.Close()
+	odin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "snapshot down", http.StatusServiceUnavailable)
+	}))
+	defer odin.Close()
+
+	var stdout strings.Builder
+	err := Run(context.Background(), []string{
+		"--once",
+		"--prometheus-url", prometheus.URL,
+		"--loki-url", loki.URL,
+		"--odin-url", odin.URL,
+	}, &stdout)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	for _, want := range []string{
+		"┌─ ACTION REQUIRED ",
+		"snapshot unavailable",
+		"HTTP 503",
+		"snapshot down",
+		"┌─ ODIN HEALTH ",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, want snapshot-unavailable fragment %q", stdout.String(), want)
+		}
+	}
+}
+
+func TestRunDoesNotFetchSnapshotWhenTelemetryIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"resultType": "vector",
+				"result":     []any{},
+			},
+		})
+	}))
+	defer prometheus.Close()
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"result": []any{},
+			},
+		})
+	}))
+	defer loki.Close()
+
+	var snapshotRequested bool
+	odin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		snapshotRequested = true
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"action_required": []map[string]any{
+				{"label": "Should not mask telemetry"},
+			},
+		})
+	}))
+	defer odin.Close()
+
+	var stdout strings.Builder
+	err := Run(context.Background(), []string{
+		"--once",
+		"--prometheus-url", prometheus.URL,
+		"--loki-url", loki.URL,
+		"--odin-url", odin.URL,
+	}, &stdout)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if snapshotRequested {
+		t.Fatalf("Run() fetched operator snapshot despite unavailable telemetry")
+	}
+	if !strings.Contains(stdout.String(), "TELEMETRY     unavailable") ||
+		strings.Contains(stdout.String(), "Should not mask telemetry") {
+		t.Fatalf("stdout = %q, want telemetry-unavailable frame without snapshot rows", stdout.String())
 	}
 }
 

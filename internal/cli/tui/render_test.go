@@ -36,7 +36,7 @@ func TestRenderOverviewStableTextOutput(t *testing.T) {
 	})
 
 	for _, want := range []string{
-		"┌─ ODIN OBSERVABILITY ",
+		"┌─ ODIN HEALTH ",
 		"│ HEALTH        DEGRADED",
 		"│ SCORE         87",
 		"│ TELEMETRY     fresh",
@@ -80,6 +80,137 @@ func TestRenderOverviewShowsActionRequiredPanel(t *testing.T) {
 	}
 }
 
+func TestRenderOverviewShowsCommandCenterPanels(t *testing.T) {
+	t.Parallel()
+
+	output := RenderOverview(Model{
+		TelemetryAvailable: true,
+		Status:             "healthy",
+		HealthScore:        92,
+		LifecyclePhase:     "run",
+		ActiveRuns:         1,
+		ActionRequired: []SnapshotRow{
+			{
+				ID:       "approval:7",
+				Label:    "Approval alpha",
+				Summary:  "Approve deployment alpha",
+				Severity: "warning",
+				Command:  "odin approvals show 7",
+			},
+		},
+		LiveExecution: []SnapshotRow{
+			{
+				ID:       "run:9",
+				Label:    "Run 9",
+				Summary:  "work-alpha attempt 1 is running on codex",
+				Severity: "info",
+				Command:  "odin runs show 9",
+			},
+		},
+		Activity: []SnapshotRow{
+			{
+				ID:       "event:12",
+				Label:    "approval.requested",
+				Summary:  "Approval requested for alpha",
+				Severity: "info",
+				Command:  "odin logs show 12",
+			},
+		},
+	})
+
+	for _, want := range []string{
+		"┌─ ACTION REQUIRED ",
+		"Approval alpha",
+		"odin approvals show 7",
+		"┌─ ODIN HEALTH ",
+		"┌─ LIVE EXECUTION ",
+		"work-alpha attempt 1 is running on codex",
+		"odin runs show 9",
+		"┌─ ACTIVITY ",
+		"approval.requested",
+		"odin logs show 12",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want command-center fragment %q", output, want)
+		}
+	}
+}
+
+func TestRenderOverviewPreservesSnapshotIDsWithLongMultiruneLabels(t *testing.T) {
+	t.Parallel()
+
+	output := RenderOverview(Model{
+		TelemetryAvailable: true,
+		Status:             "healthy",
+		HealthScore:        92,
+		ActionRequired: []SnapshotRow{
+			{
+				ID:       "approval:123456789",
+				Label:    "承認が必要な非常に長いラベル Approval alpha needs a long operator-facing description",
+				Summary:  "Approval summary",
+				Severity: "warning",
+			},
+		},
+		LiveExecution: []SnapshotRow{
+			{
+				ID:      "run:987654321",
+				Label:   "実行中の非常に長いラベル Run beta has a long operator-facing description",
+				Summary: "Run summary",
+			},
+		},
+	})
+
+	for _, want := range []string{
+		"id=approval:123456789",
+		"id=run:987654321",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want stable ID %q visible at default width", output, want)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(output, "\n"), "\n") {
+		if visibleLen(line) > defaultRenderWidth {
+			t.Fatalf("line width = %d, want <= %d: %q", visibleLen(line), defaultRenderWidth, line)
+		}
+	}
+}
+
+func TestRenderOverviewPreservesSnapshotCommandHintsWithLongLabels(t *testing.T) {
+	t.Parallel()
+
+	output := RenderOverview(Model{
+		TelemetryAvailable: true,
+		Status:             "healthy",
+		HealthScore:        92,
+		ActionRequired: []SnapshotRow{
+			{
+				ID:       "approval:2468",
+				Label:    "Long approval label that would otherwise consume nearly the entire boxed terminal row",
+				Summary:  "Approval summary",
+				Severity: "warning",
+				Command:  "odin approvals show 2468",
+			},
+		},
+		Activity: []SnapshotRow{
+			{
+				ID:      "event:1357",
+				Label:   "Long activity label that would otherwise hide the operator inspection command",
+				Summary: "Activity summary",
+				Command: "odin logs show 1357",
+			},
+		},
+	})
+
+	for _, want := range []string{
+		"inspect=odin approvals show 2468",
+		"inspect=odin logs show 1357",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want command hint %q visible at default width", output, want)
+		}
+	}
+}
+
 func TestRenderOverviewUsesBoxedCockpitLayout(t *testing.T) {
 	t.Parallel()
 
@@ -96,12 +227,12 @@ func TestRenderOverviewUsesBoxedCockpitLayout(t *testing.T) {
 	})
 
 	for _, want := range []string{
-		"┌─ ODIN OBSERVABILITY ",
+		"┌─ ODIN HEALTH ",
 		"│ HEALTH        DEGRADED",
 		"│ SCORE         87",
 		"│ TELEMETRY     fresh",
 		"│ PHASE         run",
-		"┌─ ODIN LOGS ",
+		"┌─ RECENT LOGS ",
 		"│ 1714521600000000000  {\"level\":\"info\",\"message\":\"ready\"}",
 		"└",
 	} {
@@ -121,7 +252,7 @@ func TestRenderOverviewShowsUnavailableLogs(t *testing.T) {
 		LifecyclePhase:     "run",
 		LogsUnavailable:    "loki query failed",
 	})
-	if !strings.Contains(output, "┌─ ODIN LOGS ") ||
+	if !strings.Contains(output, "┌─ RECENT LOGS ") ||
 		!strings.Contains(output, "│ Loki unavailable - runtime panels continue from store projections") ||
 		!strings.Contains(output, "│ unavailable: loki query failed") {
 		t.Fatalf("output = %q, want unavailable logs", output)
@@ -146,8 +277,8 @@ func TestRenderOverviewUsesResponsiveColumnsOnWideTerminals(t *testing.T) {
 		},
 	}, 140, false)
 
-	if !strings.Contains(output, "┐  ┌─ ACTION REQUIRED ") {
-		t.Fatalf("output = %q, want side-by-side observability and action panels", output)
+	if !strings.Contains(output, "┐  ┌─ ODIN HEALTH ") {
+		t.Fatalf("output = %q, want side-by-side action and health panels", output)
 	}
 	if !strings.Contains(output, "┐  ┌─ CURRENT GOALS ") {
 		t.Fatalf("output = %q, want side-by-side agents and goals panels", output)
@@ -170,7 +301,7 @@ func TestRenderOverviewAddsColorForTerminalOutput(t *testing.T) {
 	}, 76, true)
 
 	for _, want := range []string{
-		ansiCyan + "ODIN OBSERVABILITY" + ansiReset,
+		ansiCyan + "ODIN HEALTH" + ansiReset,
 		ansiGreen + "HEALTHY" + ansiReset,
 		ansiGreen + "100" + ansiReset,
 	} {

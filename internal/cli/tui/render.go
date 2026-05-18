@@ -47,15 +47,17 @@ func RenderOverviewForTerminal(model Model, width int, color bool) string {
 func renderOverview(model Model, options renderOptions) string {
 	width := normalizedRenderWidth(options.Width)
 	panels := []panel{
-		observabilityPanel(model, options.Color),
 		actionPanel(model, options.Color),
+		healthPanel(model, options.Color),
+		liveExecutionPanel(model),
+		activityPanel(model),
 		flowPanel(model),
 		agentsPanel(model),
 		goalsPanel(model),
 		schedulesPanel(model),
 		pullRequestsPanel(model),
 		approvalsPanel(model),
-		logsPanel(model),
+		recentLogsPanel(model),
 	}
 
 	var builder strings.Builder
@@ -72,7 +74,7 @@ func renderOverview(model Model, options renderOptions) string {
 	return builder.String()
 }
 
-func observabilityPanel(model Model, color bool) panel {
+func healthPanel(model Model, color bool) panel {
 	status := strings.ToUpper(model.Status)
 	if status == "" || !model.TelemetryAvailable || model.TelemetryStale {
 		status = "UNKNOWN"
@@ -101,10 +103,29 @@ func observabilityPanel(model Model, color bool) panel {
 		labelledRow("PHASE", phase),
 		labelledRow("ACTIVE RUNS", styleCount(model.ActiveRuns, model.ActiveRuns > 0, color)),
 	)
-	return panel{Title: "ODIN OBSERVABILITY", Rows: rows}
+	if model.OdinHealth.Summary != "" || model.OdinHealth.Status != "" || model.OdinHealth.Command != "" {
+		rows = append(rows,
+			labelledRow("READY", fmt.Sprintf("%t", model.OdinHealth.Ready)),
+			labelledRow("SNAPSHOT", valueOrUnknown(model.OdinHealth.Summary)),
+		)
+		if model.OdinHealth.Command != "" {
+			rows = append(rows, labelledRow("INSPECT", model.OdinHealth.Command))
+		}
+	}
+	return panel{Title: "ODIN HEALTH", Rows: rows}
 }
 
 func actionPanel(model Model, color bool) panel {
+	rows := snapshotPanelRows(model.ActionRequired)
+	if len(rows) > 0 {
+		if model.SnapshotUnavailable != "" {
+			rows = append([]string{model.SnapshotUnavailable}, rows...)
+		}
+		return panel{Title: "ACTION REQUIRED", Rows: rows, Span: true}
+	}
+	if model.SnapshotUnavailable != "" {
+		return panel{Title: "ACTION REQUIRED", Rows: []string{model.SnapshotUnavailable}, Span: true}
+	}
 	return panel{Title: "ACTION REQUIRED", Rows: []string{
 		labelledRow("APPROVALS", styleCount(model.ApprovalsWaiting, model.ApprovalsWaiting > 0, color)),
 		labelledRow("BLOCKED", styleCount(model.BlockedItems, model.BlockedItems > 0, color)),
@@ -112,6 +133,25 @@ func actionPanel(model Model, color bool) panel {
 		labelledRow("FAILED WORK", styleCount(model.FailedWorkItems, model.FailedWorkItems > 0, color)),
 		labelledRow("RECOVERY", styleCount(model.RecoveryRecommendations, model.RecoveryRecommendations > 0, color)),
 	}}
+}
+
+func liveExecutionPanel(model Model) panel {
+	rows := snapshotPanelRows(model.LiveExecution)
+	if len(rows) == 0 {
+		rows = []string{fmt.Sprintf("active_runs=%d", model.ActiveRuns)}
+		if model.ActiveRuns == 0 {
+			rows = []string{"none"}
+		}
+	}
+	return panel{Title: "LIVE EXECUTION", Rows: rows, Span: len(rows) > 2}
+}
+
+func activityPanel(model Model) panel {
+	rows := snapshotPanelRows(model.Activity)
+	if len(rows) == 0 {
+		rows = []string{"none"}
+	}
+	return panel{Title: "ACTIVITY", Rows: rows, Span: len(rows) > 2}
 }
 
 func flowPanel(model Model) panel {
@@ -249,14 +289,14 @@ func approvalsPanel(model Model) panel {
 	return panel{Title: "APPROVALS WAITING", Rows: rows}
 }
 
-func logsPanel(model Model) panel {
+func recentLogsPanel(model Model) panel {
 	rows := []string{"none"}
 	if model.LogsUnavailable != "" {
 		rows = []string{
 			"Loki unavailable - runtime panels continue from store projections",
 			"unavailable: " + model.LogsUnavailable,
 		}
-		return panel{Title: "ODIN LOGS", Rows: rows, Span: true}
+		return panel{Title: "RECENT LOGS", Rows: rows, Span: true}
 	}
 	if len(model.Logs) > 0 {
 		rows = rows[:0]
@@ -272,7 +312,38 @@ func logsPanel(model Model) panel {
 			rows = append(rows, line)
 		}
 	}
-	return panel{Title: "ODIN LOGS", Rows: rows, Span: true}
+	return panel{Title: "RECENT LOGS", Rows: rows, Span: true}
+}
+
+func snapshotPanelRows(rows []SnapshotRow) []string {
+	if len(rows) == 0 {
+		return nil
+	}
+	rendered := make([]string, 0, len(rows)*3)
+	for _, row := range rows {
+		headerParts := []string{}
+		if row.ID != "" {
+			headerParts = append(headerParts, "id="+row.ID)
+		}
+		if strings.TrimSpace(row.Severity) != "" {
+			headerParts = append(headerParts, "severity="+strings.TrimSpace(row.Severity))
+		}
+		if strings.TrimSpace(row.Label) != "" {
+			headerParts = append(headerParts, "label="+strings.TrimSpace(row.Label))
+		}
+		header := strings.Join(headerParts, " ")
+		if header == "" {
+			header = "none"
+		}
+		rendered = append(rendered, header)
+		if strings.TrimSpace(row.Summary) != "" {
+			rendered = append(rendered, "  "+strings.TrimSpace(row.Summary))
+		}
+		if strings.TrimSpace(row.Command) != "" {
+			rendered = append(rendered, "  inspect="+strings.TrimSpace(row.Command))
+		}
+	}
+	return rendered
 }
 
 func labelledRow(label string, value string) string {

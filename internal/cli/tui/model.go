@@ -20,6 +20,11 @@ type Model struct {
 	Schedules               []ScheduleRoutineRow
 	PullRequests            []PullRequestRow
 	Approvals               []ApprovalRow
+	SnapshotUnavailable     string
+	ActionRequired          []SnapshotRow
+	OdinHealth              SnapshotHealth
+	LiveExecution           []SnapshotRow
+	Activity                []SnapshotRow
 	Logs                    []LogEntry
 	LogsUnavailable         string
 }
@@ -76,6 +81,22 @@ type ApprovalRow struct {
 	Project  string
 	Status   string
 	Resolver string
+}
+
+type SnapshotRow struct {
+	ID       string
+	Label    string
+	Summary  string
+	Severity string
+	Command  string
+	DeepLink string
+}
+
+type SnapshotHealth struct {
+	Status  string
+	Ready   bool
+	Summary string
+	Command string
 }
 
 type LogEntry struct {

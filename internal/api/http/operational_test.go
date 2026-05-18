@@ -623,6 +623,207 @@ func TestOperationalHandlerExposesDashboardStatusWithoutSecretsOrTmuxDependency(
 	}
 }
 
+func TestMobileOperatorSnapshotExposesCommandCenterRows(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+	seedOperatorReadModels(t, ctx, store)
+	project := mustProject(t, ctx, store, "alpha")
+	if _, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "snapshot-failed-task",
+		Title:       "Snapshot failed task",
+		Status:      "failed",
+		Scope:       "project",
+		RequestedBy: "operator",
+		WorkKind:    "automation",
+	}); err != nil {
+		t.Fatalf("CreateTask(snapshot failed) error = %v", err)
+	}
+	store.Now = func() time.Time { return now }
+	store.BrowserSessionHandoffID = func() (string, error) { return "snapshot-browser-handoff", nil }
+	session, err := store.CreateBrowserSession(ctx, sqlite.CreateBrowserSessionParams{
+		Name:           "snapshot browser",
+		Domain:         "example.com",
+		AccountHint:    "operator",
+		PermissionTier: sqlite.BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession(snapshot) error = %v", err)
+	}
+	if _, err := store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(snapshot) error = %v", err)
+	}
+
+	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health:          healthsvc.Service{DB: store.DB()},
+		Metrics:         metricsvc.Service{DB: store.DB()},
+		Store:           store,
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+		AdminToken:      "mobile-token",
+		Now:             func() time.Time { return now },
+	}))
+	defer server.Close()
+
+	unauthorized, err := http.Get(server.URL + "/mobile/operator-snapshot")
+	if err != nil {
+		t.Fatalf("GET unauthenticated /mobile/operator-snapshot error = %v", err)
+	}
+	defer unauthorized.Body.Close()
+	if unauthorized.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated /mobile/operator-snapshot status = %d, want %d", unauthorized.StatusCode, http.StatusUnauthorized)
+	}
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/mobile/operator-snapshot", nil)
+	if err != nil {
+		t.Fatalf("NewRequest /mobile/operator-snapshot error = %v", err)
+	}
+	request.Header.Set("X-Odin-Admin-Token", "mobile-token")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("GET /mobile/operator-snapshot error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("/mobile/operator-snapshot status = %d body=%s, want %d", response.StatusCode, string(body), http.StatusOK)
+	}
+
+	var snapshot struct {
+		GeneratedAt    string `json:"generated_at"`
+		ActionRequired []struct {
+			ID       string         `json:"id"`
+			Label    string         `json:"label"`
+			Summary  string         `json:"summary"`
+			Severity string         `json:"severity"`
+			Command  string         `json:"command"`
+			DeepLink string         `json:"deep_link"`
+			Details  map[string]any `json:"details"`
+		} `json:"action_required"`
+		OdinHealth struct {
+			Status  string         `json:"status"`
+			Ready   bool           `json:"ready"`
+			Summary string         `json:"summary"`
+			Details map[string]any `json:"details"`
+		} `json:"odin_health"`
+		LiveExecution []struct {
+			ID      string         `json:"id"`
+			Label   string         `json:"label"`
+			Summary string         `json:"summary"`
+			Command string         `json:"command"`
+			Details map[string]any `json:"details"`
+		} `json:"live_execution"`
+		Activity []struct {
+			ID      string         `json:"id"`
+			Label   string         `json:"label"`
+			Summary string         `json:"summary"`
+			Command string         `json:"command"`
+			Details map[string]any `json:"details"`
+		} `json:"activity"`
+		Browser []struct {
+			ID       string         `json:"id"`
+			Label    string         `json:"label"`
+			Summary  string         `json:"summary"`
+			Severity string         `json:"severity"`
+			Command  string         `json:"command"`
+			DeepLink string         `json:"deep_link"`
+			Details  map[string]any `json:"details"`
+		} `json:"browser"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("decode operator snapshot error = %v", err)
+	}
+	if snapshot.GeneratedAt != now.Format(time.RFC3339) {
+		t.Fatalf("generated_at = %q, want %q", snapshot.GeneratedAt, now.Format(time.RFC3339))
+	}
+	if snapshot.OdinHealth.Status != "healthy" || !snapshot.OdinHealth.Ready || snapshot.OdinHealth.Summary == "" || len(snapshot.OdinHealth.Details) == 0 {
+		t.Fatalf("odin_health = %+v, want ready healthy details", snapshot.OdinHealth)
+	}
+	if len(snapshot.ActionRequired) == 0 {
+		t.Fatalf("action_required = %+v, want review/approval row", snapshot.ActionRequired)
+	}
+	if len(snapshot.LiveExecution) == 0 {
+		t.Fatalf("live_execution = %+v, want active run row", snapshot.LiveExecution)
+	}
+	if len(snapshot.Activity) == 0 {
+		t.Fatalf("activity = %+v, want runtime event row", snapshot.Activity)
+	}
+
+	var hasReviewOrApproval bool
+	var hasBlockedWork bool
+	var hasRecoveryGuidance bool
+	var hasInspectCommand bool
+	var hasDetailPayloads bool
+	for _, row := range snapshot.ActionRequired {
+		if strings.Contains(row.ID, "approval:") || strings.Contains(row.Label, "Approval") || strings.Contains(row.Command, "odin review list") {
+			hasReviewOrApproval = true
+		}
+		if strings.HasPrefix(row.ID, "blocked-work:") && strings.Contains(row.Command, "odin logs trail --task") && row.Severity == "warning" && row.Details["source_type"] == "blocked_work" {
+			hasBlockedWork = true
+		}
+		if strings.HasPrefix(row.ID, "recovery:") && strings.Contains(row.Command, "odin logs trail --task") && row.Details["source_type"] == "recovery_guidance" && row.Details["decision"] != "" {
+			hasRecoveryGuidance = true
+		}
+		if strings.Contains(row.Command, "odin review list") || strings.Contains(row.Command, "odin runs show") {
+			hasInspectCommand = true
+		}
+		if row.ID != "" && row.Label != "" && row.Summary != "" && row.Severity != "" && len(row.Details) > 0 {
+			hasDetailPayloads = true
+		}
+	}
+	for _, row := range snapshot.LiveExecution {
+		if strings.Contains(row.Command, "odin runs show") {
+			hasInspectCommand = true
+		}
+		if row.ID != "" && row.Label != "" && row.Summary != "" && len(row.Details) > 0 {
+			hasDetailPayloads = true
+		}
+	}
+	if !hasReviewOrApproval {
+		t.Fatalf("action_required = %+v, want review/approval row", snapshot.ActionRequired)
+	}
+	if !hasBlockedWork {
+		t.Fatalf("action_required = %+v, want blocked-work row with stable details and inspect command", snapshot.ActionRequired)
+	}
+	if !hasRecoveryGuidance {
+		t.Fatalf("action_required = %+v, want recovery guidance row with stable details and inspect command", snapshot.ActionRequired)
+	}
+	if !hasInspectCommand {
+		t.Fatalf("snapshot rows missing inspect command: action=%+v live=%+v", snapshot.ActionRequired, snapshot.LiveExecution)
+	}
+	if !hasDetailPayloads {
+		t.Fatalf("snapshot rows missing stable ids/labels/summaries/detail payloads: action=%+v live=%+v", snapshot.ActionRequired, snapshot.LiveExecution)
+	}
+	if len(snapshot.Browser) == 0 {
+		t.Fatalf("browser = %+v, want browser intervention row", snapshot.Browser)
+	}
+	var hasBrowserIntervention bool
+	for _, row := range snapshot.Browser {
+		if strings.HasPrefix(row.ID, "browser:browser-login:") &&
+			row.Details["source_type"] == "browser_attended_login" &&
+			row.Details["browser_event"] != "" &&
+			row.DeepLink != "" &&
+			row.Command == "odin review list" &&
+			row.Severity == "warning" &&
+			len(row.Details) > 0 {
+			hasBrowserIntervention = true
+		}
+	}
+	if !hasBrowserIntervention {
+		t.Fatalf("browser = %+v, want stable browser login intervention row", snapshot.Browser)
+	}
+}
+
 func TestOperationalHandlerIncludesTmuxProviderStatus(t *testing.T) {
 	t.Parallel()
 
