@@ -112,6 +112,97 @@ func TestCFIProsCEOOperatorReportsKPITruthAndApprovalBoundary(t *testing.T) {
 	}
 }
 
+func TestCFIProsCEOOperatorMapsCFIProsKPIExport(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("Abs(repo root) error = %v", err)
+	}
+	cfiprosRoot := t.TempDir()
+	writeFile(t, filepath.Join(cfiprosRoot, "docs", "api-reference", "endpoints", "students.md"), "student_count\nactive_students\n")
+	writeFile(t, filepath.Join(cfiprosRoot, "api", "app", "services", "organizations", "organization_service.py"), "student_count\ninstructor_count\n")
+	writeFile(t, filepath.Join(cfiprosRoot, "docs", "api-reference", "endpoints", "aktr.md"), "total_uploads\ntotal_codes_extracted\n")
+	writeFile(t, filepath.Join(cfiprosRoot, "OBSERVABILITY_VERIFICATION.md"), "/metrics\nPrometheus\naktr\nmetrics\n")
+	writeFile(t, filepath.Join(cfiprosRoot, "docs", "api-reference", "endpoints", "billing.md"), "subscriptions/status\ncheckout\nstripe_customer_id\n")
+	writeFile(t, filepath.Join(cfiprosRoot, "config", "deploy.api.yml"), "STRIPE_SECRET_KEY\nSTRIPE_WEBHOOK_SECRET\n")
+
+	payload, err := json.Marshal(map[string]any{
+		"input": map[string]any{
+			"checkpoint":        "daily_morning_launch_health",
+			"project_key":       "cfipros",
+			"approval_boundary": "internal CEO review only; external actions require approval",
+			"cfipros_repo_root": cfiprosRoot,
+			"kpi_export": map[string]any{
+				"status":               "measured",
+				"source":               "cfipros-api:/api/webhooks/n8n/ceo-kpis",
+				"as_of_utc":            "2026-05-18T12:30:00Z",
+				"approval_required":    true,
+				"external_side_effect": "none",
+				"metrics": []map[string]any{
+					{"key": "users_created_today", "value": 2, "unit": "count", "status": "measured"},
+					{"key": "users_onboarded_today", "value": 1, "unit": "count", "status": "measured"},
+					{"key": "students_created_today", "value": 1, "unit": "count", "status": "measured"},
+					{"key": "aktr_uploads_today", "value": 1, "unit": "count", "status": "measured"},
+					{"key": "aktr_codes_today", "value": 2, "unit": "count", "status": "measured"},
+					{"key": "failed_extractions_today", "value": 1, "unit": "count", "status": "measured"},
+					{"key": "paid_subscribers_total", "value": 2, "unit": "count", "status": "measured"},
+					{"key": "estimated_mrr_cents", "value": 12800, "unit": "cents", "status": "measured"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(payload) error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, filepath.Join(repoRoot, "scripts", "skills", "cfipros-ceo-operator.sh"))
+	cmd.Dir = repoRoot
+	cmd.Stdin = bytes.NewReader(payload)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("cfipros-ceo-operator.sh error = %v stderr=%s", err, stderr.String())
+	}
+
+	var response struct {
+		Status string         `json:"status"`
+		Output map[string]any `json:"output"`
+	}
+	if err := json.Unmarshal(stdout, &response); err != nil {
+		t.Fatalf("Unmarshal(response) error = %v\nstdout=%s", err, string(stdout))
+	}
+	kpiTruth := response.Output["kpi_truth"].(map[string]any)
+	if kpiTruth["collection_status"] != "measured_values_supplied" {
+		t.Fatalf("collection_status = %v, want measured_values_supplied", kpiTruth["collection_status"])
+	}
+	if kpiTruth["kpi_export_source"] != "cfipros-api:/api/webhooks/n8n/ceo-kpis" {
+		t.Fatalf("kpi_export_source = %v, want CFIPros export source", kpiTruth["kpi_export_source"])
+	}
+	metrics := kpiTruth["metrics"].([]any)
+	var sawActivation, sawProduct, sawPaid, sawQuality bool
+	for _, rawMetric := range metrics {
+		metric := rawMetric.(map[string]any)
+		switch metric["key"] {
+		case "activation_students":
+			sawActivation = metric["status"] == "measured" && strings.Contains(metric["value"].(string), "users_created_today=2")
+		case "product_value_aktr":
+			sawProduct = metric["status"] == "measured" && strings.Contains(metric["value"].(string), "aktr_codes_today=2")
+		case "paid_conversion":
+			sawPaid = metric["status"] == "measured" && strings.Contains(metric["value"].(string), "estimated_mrr_cents=12800")
+		case "quality_operations":
+			sawQuality = metric["status"] == "measured" && strings.Contains(metric["value"].(string), "failed_extractions_today=1")
+		}
+	}
+	if !sawActivation || !sawProduct || !sawPaid || !sawQuality {
+		t.Fatalf("metrics = %#v, want measured CFIPros export values", metrics)
+	}
+	if response.Output["approval_required"] != true || response.Output["external_side_effect"] != "none" {
+		t.Fatalf("approval fields = approval_required:%v external_side_effect:%v, want true/none", response.Output["approval_required"], response.Output["external_side_effect"])
+	}
+}
+
 func TestRunRestrictedCommandUsesRepoRootCwd(t *testing.T) {
 	t.Parallel()
 
