@@ -551,6 +551,8 @@ function snapshotRowCard(row, section) {
   button.type = 'button';
   button.className = `status-card detail-row ${severityClass(row.severity)}`.trim();
   button.setAttribute('data-detail-row', detailID);
+  button.setAttribute('aria-controls', 'detail-drawer');
+  button.setAttribute('aria-expanded', 'false');
   button.setAttribute('aria-label', `Open details for ${row.label || row.id || section}`);
   button.addEventListener('click', () => openDetailDrawer(detailID));
 
@@ -621,7 +623,11 @@ function openDetailDrawer(detailID) {
   }
 
   drawer.hidden = false;
+  document.querySelectorAll('[data-detail-row]').forEach((button) => {
+    button.setAttribute('aria-expanded', button.getAttribute('data-detail-row') === detailID ? 'true' : 'false');
+  });
   drawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  drawer.focus({ preventScroll: true });
 }
 
 function detailAllowedActionControls(row) {
@@ -632,12 +638,30 @@ function detailAllowedActionControls(row) {
       const className = action === 'approve' ? 'primary small' : action === 'deny' ? 'danger-button small' : 'ghost-button small';
       return actionButton(actionLabel(action), className, () => openApprovalConfirmation(row.sourceApprovalItem, action));
     }
-    if (row.sourceReviewItem) {
+    if (supportedReviewDecisionAction(row.sourceReviewItem, action)) {
       const className = action === 'reject' ? 'danger-button small' : action === 'complete' ? 'primary small' : 'ghost-button small';
       return actionButton(actionLabel(action), className, () => openReviewDecision(row.sourceReviewItem, action));
     }
-    return disabledActionPill(actionLabel(action));
+    return unsupportedDetailActionHint(action, row);
   });
+}
+
+function supportedReviewDecisionAction(item, action) {
+  if (!item) return false;
+  const normalized = String(action || '').toLowerCase();
+  if (item.source_type === 'intake_review') {
+    return ['reject', 'clarify', 'archive'].includes(normalized);
+  }
+  if (item.source_type === 'browser_attended_login') {
+    return ['complete', 'mark-complete'].includes(normalized);
+  }
+  return false;
+}
+
+function unsupportedDetailActionHint(action, row) {
+  const label = actionLabel(action);
+  const command = row.command ? `${label}: ${row.command}` : label;
+  return disabledActionPill(command);
 }
 
 function appendDetailFact(parent, key, value) {
@@ -658,6 +682,9 @@ function detailValue(value) {
 function closeDetailDrawer() {
   const drawer = document.querySelector('#detail-drawer');
   if (drawer) drawer.hidden = true;
+  document.querySelectorAll('[data-detail-row]').forEach((button) => {
+    button.setAttribute('aria-expanded', 'false');
+  });
 }
 
 function workbenchActionCount(reviewItems, approvalItems, browser) {

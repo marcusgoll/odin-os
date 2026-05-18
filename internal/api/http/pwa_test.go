@@ -39,6 +39,7 @@ func TestOperationalHandlerServesInstallablePWAShellAssets(t *testing.T) {
 		`id="live-execution-list"`,
 		`id="activity-timeline-list"`,
 		`id="detail-drawer"`,
+		`tabindex="-1"`,
 		`Action Required`,
 		`Approvals`,
 		`Failed/Blocked`,
@@ -60,6 +61,12 @@ func TestOperationalHandlerServesInstallablePWAShellAssets(t *testing.T) {
 	for _, want := range []string{
 		`/mobile/operator-snapshot`,
 		`data-detail-row`,
+		`aria-controls`,
+		`aria-expanded`,
+		`supportedReviewDecisionAction`,
+		`unsupportedDetailActionHint`,
+		`['reject', 'clarify', 'archive']`,
+		`['complete', 'mark-complete']`,
 	} {
 		if !strings.Contains(appJS, want) {
 			t.Fatalf("app.js missing %q:\n%s", want, appJS)
