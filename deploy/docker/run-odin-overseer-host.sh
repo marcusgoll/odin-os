@@ -125,7 +125,42 @@ docker run "${docker_args[@]}" \
   -v "$nginx_config:/etc/nginx/nginx.conf:ro" \
   --entrypoint /bin/sh \
   nginx:alpine \
-  -c 'export PATH="$HOME/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"; export PYTHONPATH="$HOME/.local/lib/python3.12/site-packages"; mkdir -p /tmp/nginx-client-body /tmp/nginx-proxy /tmp/nginx-fastcgi /tmp/nginx-uwsgi /tmp/nginx-scgi; /app/bin/odin serve & odin_pid=$!; trap "kill $odin_pid 2>/dev/null || true" TERM INT; exec nginx -c /etc/nginx/nginx.conf -g "daemon off;"'
+  -c '
+set -eu
+export PATH="$HOME/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PYTHONPATH="$HOME/.local/lib/python3.12/site-packages"
+mkdir -p /tmp/nginx-client-body /tmp/nginx-proxy /tmp/nginx-fastcgi /tmp/nginx-uwsgi /tmp/nginx-scgi
+
+/app/bin/odin serve &
+odin_pid=$!
+nginx -c /etc/nginx/nginx.conf -g "daemon off;" &
+nginx_pid=$!
+
+terminate() {
+  kill "$odin_pid" "$nginx_pid" 2>/dev/null || true
+  wait "$odin_pid" 2>/dev/null || true
+  wait "$nginx_pid" 2>/dev/null || true
+}
+trap "terminate; exit 143" TERM INT
+
+while :; do
+  if ! kill -0 "$odin_pid" 2>/dev/null; then
+    wait "$odin_pid"
+    status=$?
+    kill "$nginx_pid" 2>/dev/null || true
+    wait "$nginx_pid" 2>/dev/null || true
+    exit "$status"
+  fi
+  if ! kill -0 "$nginx_pid" 2>/dev/null; then
+    wait "$nginx_pid"
+    status=$?
+    kill "$odin_pid" 2>/dev/null || true
+    wait "$odin_pid" 2>/dev/null || true
+    exit "$status"
+  fi
+  sleep 2
+done
+'
 
 if [[ "$network" != "host" ]] && [[ -n "$monitoring_network" ]] && docker network inspect "$monitoring_network" >/dev/null 2>&1; then
   docker network connect --alias "$container_name" "$monitoring_network" "$container_name" >/dev/null
