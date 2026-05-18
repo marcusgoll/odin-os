@@ -163,10 +163,11 @@ func (service Service) ContinueApprovedMutation(ctx context.Context, approvalID 
 		return MutationContinuationResult{}, err
 	}
 	run, err := service.Store.StartRun(ctx, sqlite.StartRunParams{
-		TaskID:   approval.TaskID,
-		Executor: BrowserMutationExecutor,
-		Attempt:  attempt,
-		Status:   "running",
+		TaskID:     approval.TaskID,
+		Executor:   BrowserMutationExecutor,
+		Attempt:    attempt,
+		Status:     "running",
+		TaskStatus: "running",
 	})
 	if err != nil {
 		return MutationContinuationResult{}, err
@@ -213,10 +214,17 @@ func (service Service) ContinueApprovedMutation(ctx context.Context, approvalID 
 		return MutationContinuationResult{}, err
 	}
 	runStatus, terminalReason := mutationRunStatus(response)
+	taskStatus := "failed"
+	if runStatus == "completed" {
+		taskStatus = "completed"
+	} else if runStatus == "intervention_required" {
+		taskStatus = "blocked"
+	}
 	finishArtifacts := fmt.Sprintf(`[{"type":%q,"run_artifact_id":%d,"summary":%q}]`, BrowserMutationEvidenceType, artifact.ID, artifact.Summary)
-	if _, err := service.Store.FinishRun(ctx, sqlite.FinishRunParams{
+	if _, _, err := service.Store.FinishRunAndSetTaskStatus(ctx, sqlite.FinishRunAndSetTaskStatusParams{
 		RunID:          run.ID,
-		Status:         runStatus,
+		RunStatus:      runStatus,
+		TaskStatus:     taskStatus,
 		Summary:        defaultMutationEvidenceSummary(response),
 		TerminalReason: terminalReason,
 		ArtifactsJSON:  finishArtifacts,

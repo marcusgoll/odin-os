@@ -164,7 +164,11 @@ Current implementation: `registry/agents/marcus-social-analytics-advisor-compani
 ### Official interface posture
 
 - X activity must stay inside X's published automation rules: express consent is required for account actions, automated likes are prohibited, and automated replies need opt-in plus extra approval requirements.
-- The live Odin path for X is one explicitly approved post or one explicitly approved reply at a time through `/memory publish <id> via=huginn_x`; do not expand that path to likes, reposts or requotes, follows, DMs, or bulk posting.
+- The live Odin path for X profile bio changes is `odin x bio request ...`, `odin approvals resolve ...`, then `odin x bio apply --approval-id ...`. The task must stay browser-executor-owned after approval and can complete only after Odin records public-profile verification evidence.
+- The live Odin path for X posts and replies remains one explicitly approved `social_outcome` at a time through `/memory publish <id> via=huginn_x`; `odin x post request ...` and `odin x reply request ...` map operators back to that approved outcome lane until native command ownership is implemented.
+- Repost, quote, and share actions are future approval-gated command families only. They require content classification, source URL validation, policy checks, visible pre-action evidence, explicit operator approval, and post-action evidence before any implementation can execute them.
+- Likes stay out of execution. Odin may produce read-only like recommendations with rationale, but it must not click or submit likes.
+- Do not expand X automation to follows, DMs, bulk posting, engagement farming, or arbitrary browser actions.
 - LinkedIn publishing should use official paths such as Share on LinkedIn with `w_member_social` and `POST /v2/ugcPosts` when approved for use; otherwise keep LinkedIn posting manual.
 - Do not supplement LinkedIn workflows with scraped website data or unofficial browser tooling.
 

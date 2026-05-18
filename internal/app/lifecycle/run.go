@@ -75,7 +75,7 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal mobile browser task initiative companion profile followup trigger scheduler transition skills design e2e\n\nRun detail: odin runs show <id>"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal mobile browser x task initiative companion profile followup trigger scheduler transition skills design e2e\n\nRun detail: odin runs show <id>"
 
 const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<true|false>] [--dry-run|dry_run=<true|false>] [--json]"
 const capabilitiesUsage = "usage: odin capabilities list [--kind agent|skill|workflow|command|tool] [--scope <scope>] [--json]\n       odin capabilities show <id> [--version <version>] [--json]"
@@ -375,6 +375,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runMobilePreflight(cfg, args[1:], stdout)
 	case "browser":
 		return runBrowser(ctx, app, args[1:], stdout)
+	case "x":
+		return runX(ctx, app, args[1:], stdout)
 	case "transition":
 		return runTransition(ctx, app, args[1:], stdout)
 	case "task":
