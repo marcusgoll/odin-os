@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 script="${repo_root}/scripts/ops/homelab-release-dry-run.sh"
 runbook="${repo_root}/docs/operations/homelab-odin-runbook.md"
 proxy_config="${repo_root}/deploy/nginx/odin-pwa-proxy.conf"
+route_contract_checker="${repo_root}/scripts/ops/assert-public-proxy-route-contract.sh"
 overseer_launcher="${repo_root}/deploy/docker/run-odin-overseer-host.sh"
 env_example="${repo_root}/deploy/systemd/odin-os.env.example"
 makefile="${repo_root}/Makefile"
@@ -17,10 +18,12 @@ fail() {
 [[ -x "${script}" ]] || fail "dry-run script must be executable"
 [[ -f "${runbook}" ]] || fail "homelab runbook must exist"
 [[ -f "${proxy_config}" ]] || fail "repo-owned PWA proxy config must exist"
+[[ -x "${route_contract_checker}" ]] || fail "public proxy route contract checker must be executable"
 [[ -x "${overseer_launcher}" ]] || fail "repo-owned odin-overseer launcher must be executable"
 [[ -f "${env_example}" ]] || fail "env example must exist"
 
 grep -Fq "scripts/install-service.sh --dry-run --start" "${script}" || fail "script must prove service install dry-run"
+grep -Fq "scripts/ops/assert-public-proxy-route-contract.sh" "${script}" || fail "script must check the public proxy route contract"
 grep -Fq "./bin/odin backup --help" "${script}" || fail "script must check backup help"
 grep -Fq "./bin/odin restore --help" "${script}" || fail "script must check restore help"
 grep -Fq "./bin/odin verify-backup --help" "${script}" || fail "script must check verify-backup help"
@@ -77,6 +80,8 @@ grep -Fq 'ODIN_EMAIL_ACTION_SENDMAIL_PATH=/usr/bin/msmtp' "${env_example}" || fa
 grep -Fq -- "--network host" "${overseer_launcher}" || fail "overseer launcher must retain optional host network mode"
 grep -Fq -- "--cap-add NET_BIND_SERVICE" "${overseer_launcher}" || fail "overseer launcher must grant low-port bind capability only in host mode"
 grep -Fq "docker network connect --alias" "${overseer_launcher}" || fail "overseer launcher must attach monitoring network when bridged"
+grep -Fq 'ODIN_OVERSEER_ROUTE_CONTRACT_CHECKER:-$release_root/scripts/ops/assert-public-proxy-route-contract.sh' "${overseer_launcher}" || fail "overseer launcher must default route contract checker to the resolved release"
+grep -Fq '"$route_contract_checker" "$nginx_config"' "${overseer_launcher}" || fail "overseer launcher must check the public proxy route contract before container replacement"
 grep -Fq "PYTHONPATH" "${overseer_launcher}" || fail "overseer launcher must expose websockify python package path"
 grep -Fq '$release_root:/app:ro' "${overseer_launcher}" || fail "overseer launcher must mount the resolved release root"
 grep -Fq "/opt/google/chrome:/opt/google/chrome:ro" "${overseer_launcher}" || fail "overseer launcher must mount Chrome runtime"
@@ -88,5 +93,32 @@ grep -Fq "/usr/bin/xwininfo:/usr/bin/xwininfo:ro" "${overseer_launcher}" || fail
 grep -Fq "/usr/lib/python3.12:/usr/lib/python3.12:ro" "${overseer_launcher}" || fail "overseer launcher must mount python stdlib"
 grep -Fq '$family_ops_worktree:$family_ops_worktree:ro' "${overseer_launcher}" || fail "overseer launcher must mount family-ops cutover worktree"
 grep -Fq "browser session prove" "${repo_root}/docs/operations/browser-handoff-runner.md" || fail "browser handoff runbook must document saved-profile proof command"
+
+"${route_contract_checker}" "${proxy_config}" >/dev/null
+
+contract_tmp="$(mktemp -d)"
+cleanup() {
+  rm -rf "${contract_tmp}"
+}
+trap cleanup EXIT
+
+missing_email_actions="${contract_tmp}/missing-email-actions.conf"
+sed '/location \/email-actions\//,/^    }/d' "${proxy_config}" >"${missing_email_actions}"
+if "${route_contract_checker}" "${missing_email_actions}" >/dev/null 2>&1; then
+  fail "route contract must fail when /email-actions/ is missing"
+fi
+
+missing_pwa="${contract_tmp}/missing-pwa.conf"
+sed '/location = \/pwa/,/^    }/d' "${proxy_config}" >"${missing_pwa}"
+if "${route_contract_checker}" "${missing_pwa}" >/dev/null 2>&1; then
+  fail "route contract must fail when /pwa is missing"
+fi
+
+broad_api="${contract_tmp}/broad-api.conf"
+cp "${proxy_config}" "${broad_api}"
+printf '\n    location /api/ { proxy_pass http://odin_container_app; }\n' >>"${broad_api}"
+if "${route_contract_checker}" "${broad_api}" >/dev/null 2>&1; then
+  fail "route contract must fail when a broad /api/ route is exposed"
+fi
 
 echo "ok"

@@ -8,6 +8,7 @@ release_root="$(readlink -f "$release_link")"
 runtime_root="${ODIN_OVERSEER_RUNTIME_ROOT:-$HOME/.local/state/odin-os}"
 repo_root="${ODIN_OVERSEER_REPO_ROOT:-$HOME/odin-os}"
 nginx_config="${ODIN_OVERSEER_NGINX_CONFIG:-$release_root/deploy/nginx/odin-pwa-proxy.conf}"
+route_contract_checker="${ODIN_OVERSEER_ROUTE_CONTRACT_CHECKER:-$release_root/scripts/ops/assert-public-proxy-route-contract.sh}"
 network="${ODIN_OVERSEER_NETWORK:-infrastructure_default}"
 monitoring_network="${ODIN_OVERSEER_MONITORING_NETWORK:-odin-monitoring_default}"
 container_user="${ODIN_OVERSEER_USER:-0:0}"
@@ -38,6 +39,11 @@ if [[ ! -f "$nginx_config" ]]; then
   echo "missing nginx config: $nginx_config" >&2
   exit 1
 fi
+if [[ ! -x "$route_contract_checker" ]]; then
+  echo "missing public proxy route contract checker: $route_contract_checker" >&2
+  exit 1
+fi
+"$route_contract_checker" "$nginx_config"
 
 email_mounts=()
 if [[ -x "$msmtp_bin" ]]; then

@@ -43,11 +43,15 @@ git worktree list
 require_file "deploy/systemd/odin-os.service"
 require_file "deploy/systemd/odin-os.env.example"
 require_file "deploy/nginx/odin-pwa-proxy.conf"
+require_executable "scripts/ops/assert-public-proxy-route-contract.sh"
 require_executable "deploy/docker/run-odin-overseer-host.sh"
 require_executable "scripts/install-service.sh"
 require_executable "scripts/start.sh"
 require_executable "scripts/stop.sh"
 require_executable "scripts/healthcheck.sh"
+
+echo "== public proxy route contract =="
+scripts/ops/assert-public-proxy-route-contract.sh "deploy/nginx/odin-pwa-proxy.conf"
 
 echo "== build =="
 if [[ "${ODIN_HOMELAB_RELEASE_SKIP_BUILD:-0}" == "1" ]]; then
