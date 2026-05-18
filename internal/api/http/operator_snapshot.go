@@ -68,7 +68,7 @@ func buildOperatorSnapshot(ctx context.Context, deps Dependencies, now func() ti
 
 	snapshot := operatorSnapshot{
 		GeneratedAt:    status.GeneratedAt,
-		ActionRequired: operatorSnapshotActionRows(reviewItems),
+		ActionRequired: operatorSnapshotActionRows(reviewItems, overviewView),
 		OdinHealth:     operatorSnapshotHealthRow(status, overviewView),
 		LiveExecution:  operatorSnapshotLiveRows(overviewView),
 		Activity:       operatorSnapshotActivityRows(overviewView),
@@ -95,8 +95,8 @@ func operatorSnapshotHealthRow(status dashboardStatus, view overview.View) opera
 	}
 }
 
-func operatorSnapshotActionRows(items []mobileReviewItem) []operatorSnapshotRow {
-	rows := make([]operatorSnapshotRow, 0, len(items))
+func operatorSnapshotActionRows(items []mobileReviewItem, view overview.View) []operatorSnapshotRow {
+	rows := make([]operatorSnapshotRow, 0, len(items)+len(view.Observability.BlockedWork)+len(view.Observability.RecoveryGuidance))
 	for _, item := range items {
 		command := "odin review list"
 		if strings.HasPrefix(item.QueueID, "approval:") {
@@ -122,6 +122,55 @@ func operatorSnapshotActionRows(items []mobileReviewItem) []operatorSnapshotRow 
 				"browser_event":         item.BrowserEvent,
 				"real_browser_evidence": item.RealBrowserEvidence,
 				"notification":          item.Notification,
+			},
+		})
+	}
+	for _, blocked := range view.Observability.BlockedWork {
+		rows = append(rows, operatorSnapshotRow{
+			ID:       fmt.Sprintf("blocked-work:%d", blocked.TaskID),
+			Label:    "Blocked work",
+			Summary:  fmt.Sprintf("%s is blocked: %s", blocked.WorkItemKey, firstNonEmpty(blocked.Reason, "blocked")),
+			Severity: "warning",
+			Command:  fmt.Sprintf("odin logs trail --task %d", blocked.TaskID),
+			DeepLink: fmt.Sprintf("/work-items/%d", blocked.TaskID),
+			Details: map[string]any{
+				"source_type":    "blocked_work",
+				"task_id":        blocked.TaskID,
+				"work_item_key":  blocked.WorkItemKey,
+				"project_key":    blocked.ProjectKey,
+				"workspace_key":  blocked.WorkspaceKey,
+				"initiative_key": blocked.InitiativeKey,
+				"companion_key":  blocked.CompanionKey,
+				"work_kind":      blocked.WorkKind,
+				"source":         blocked.Source,
+				"reason":         blocked.Reason,
+			},
+		})
+	}
+	for _, guidance := range view.Observability.RecoveryGuidance {
+		rows = append(rows, operatorSnapshotRow{
+			ID:       fmt.Sprintf("recovery:%d", guidance.TaskID),
+			Label:    "Recovery guidance",
+			Summary:  fmt.Sprintf("%s recovery: %s", guidance.WorkItemKey, guidance.RecoveryRecommendation),
+			Severity: operatorSnapshotRecoverySeverity(guidance),
+			Command:  fmt.Sprintf("odin logs trail --task %d", guidance.TaskID),
+			DeepLink: fmt.Sprintf("/work-items/%d", guidance.TaskID),
+			Details: map[string]any{
+				"source_type":             "recovery_guidance",
+				"task_id":                 guidance.TaskID,
+				"work_item_key":           guidance.WorkItemKey,
+				"project_key":             guidance.ProjectKey,
+				"initiative_key":          guidance.InitiativeKey,
+				"companion_key":           guidance.CompanionKey,
+				"work_kind":               guidance.WorkKind,
+				"source":                  guidance.Source,
+				"status":                  guidance.Status,
+				"decision":                guidance.Decision,
+				"retry_eligible":          guidance.RetryEligible,
+				"retry_count":             guidance.RetryCount,
+				"max_attempts":            guidance.MaxAttempts,
+				"last_error":              guidance.LastError,
+				"recovery_recommendation": guidance.RecoveryRecommendation,
 			},
 		})
 	}
@@ -246,6 +295,13 @@ func operatorSnapshotRunSeverity(status string) string {
 	default:
 		return "info"
 	}
+}
+
+func operatorSnapshotRecoverySeverity(guidance overview.RetryRecoveryGuidanceSummary) string {
+	if guidance.RetryEligible {
+		return "warning"
+	}
+	return "critical"
 }
 
 func operatorSnapshotLabel(kind string, fallback string) string {

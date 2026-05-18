@@ -634,6 +634,35 @@ func TestMobileOperatorSnapshotExposesCommandCenterRows(t *testing.T) {
 	seedHealthyObservability(t, ctx, store)
 	seedRuntimeState(t, ctx, store, "ready")
 	seedOperatorReadModels(t, ctx, store)
+	project := mustProject(t, ctx, store, "alpha")
+	if _, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:   project.ID,
+		Key:         "snapshot-failed-task",
+		Title:       "Snapshot failed task",
+		Status:      "failed",
+		Scope:       "project",
+		RequestedBy: "operator",
+		WorkKind:    "automation",
+	}); err != nil {
+		t.Fatalf("CreateTask(snapshot failed) error = %v", err)
+	}
+	store.Now = func() time.Time { return now }
+	store.BrowserSessionHandoffID = func() (string, error) { return "snapshot-browser-handoff", nil }
+	session, err := store.CreateBrowserSession(ctx, sqlite.CreateBrowserSessionParams{
+		Name:           "snapshot browser",
+		Domain:         "example.com",
+		AccountHint:    "operator",
+		PermissionTier: sqlite.BrowserSessionPermissionTierAuthenticatedReadOnly,
+	})
+	if err != nil {
+		t.Fatalf("CreateBrowserSession(snapshot) error = %v", err)
+	}
+	if _, err := store.CreateBrowserSessionLoginRequest(ctx, sqlite.CreateBrowserSessionLoginRequestParams{
+		SessionID: session.ID,
+		ExpiresAt: now.Add(10 * time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateBrowserSessionLoginRequest(snapshot) error = %v", err)
+	}
 
 	server := httptest.NewServer(httpapi.NewOperationalHandler(httpapi.Dependencies{
 		Health:          healthsvc.Service{DB: store.DB()},
@@ -702,11 +731,13 @@ func TestMobileOperatorSnapshotExposesCommandCenterRows(t *testing.T) {
 			Details map[string]any `json:"details"`
 		} `json:"activity"`
 		Browser []struct {
-			ID      string         `json:"id"`
-			Label   string         `json:"label"`
-			Summary string         `json:"summary"`
-			Command string         `json:"command"`
-			Details map[string]any `json:"details"`
+			ID       string         `json:"id"`
+			Label    string         `json:"label"`
+			Summary  string         `json:"summary"`
+			Severity string         `json:"severity"`
+			Command  string         `json:"command"`
+			DeepLink string         `json:"deep_link"`
+			Details  map[string]any `json:"details"`
 		} `json:"browser"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&snapshot); err != nil {
@@ -729,11 +760,19 @@ func TestMobileOperatorSnapshotExposesCommandCenterRows(t *testing.T) {
 	}
 
 	var hasReviewOrApproval bool
+	var hasBlockedWork bool
+	var hasRecoveryGuidance bool
 	var hasInspectCommand bool
 	var hasDetailPayloads bool
 	for _, row := range snapshot.ActionRequired {
 		if strings.Contains(row.ID, "approval:") || strings.Contains(row.Label, "Approval") || strings.Contains(row.Command, "odin review list") {
 			hasReviewOrApproval = true
+		}
+		if strings.HasPrefix(row.ID, "blocked-work:") && strings.Contains(row.Command, "odin logs trail --task") && row.Severity == "warning" && row.Details["source_type"] == "blocked_work" {
+			hasBlockedWork = true
+		}
+		if strings.HasPrefix(row.ID, "recovery:") && strings.Contains(row.Command, "odin logs trail --task") && row.Details["source_type"] == "recovery_guidance" && row.Details["decision"] != "" {
+			hasRecoveryGuidance = true
 		}
 		if strings.Contains(row.Command, "odin review list") || strings.Contains(row.Command, "odin runs show") {
 			hasInspectCommand = true
@@ -753,14 +792,35 @@ func TestMobileOperatorSnapshotExposesCommandCenterRows(t *testing.T) {
 	if !hasReviewOrApproval {
 		t.Fatalf("action_required = %+v, want review/approval row", snapshot.ActionRequired)
 	}
+	if !hasBlockedWork {
+		t.Fatalf("action_required = %+v, want blocked-work row with stable details and inspect command", snapshot.ActionRequired)
+	}
+	if !hasRecoveryGuidance {
+		t.Fatalf("action_required = %+v, want recovery guidance row with stable details and inspect command", snapshot.ActionRequired)
+	}
 	if !hasInspectCommand {
 		t.Fatalf("snapshot rows missing inspect command: action=%+v live=%+v", snapshot.ActionRequired, snapshot.LiveExecution)
 	}
 	if !hasDetailPayloads {
 		t.Fatalf("snapshot rows missing stable ids/labels/summaries/detail payloads: action=%+v live=%+v", snapshot.ActionRequired, snapshot.LiveExecution)
 	}
-	if snapshot.Browser == nil {
-		t.Fatalf("browser = nil, want browser section array")
+	if len(snapshot.Browser) == 0 {
+		t.Fatalf("browser = %+v, want browser intervention row", snapshot.Browser)
+	}
+	var hasBrowserIntervention bool
+	for _, row := range snapshot.Browser {
+		if strings.HasPrefix(row.ID, "browser:browser-login:") &&
+			row.Details["source_type"] == "browser_attended_login" &&
+			row.Details["browser_event"] != "" &&
+			row.DeepLink != "" &&
+			row.Command == "odin review list" &&
+			row.Severity == "warning" &&
+			len(row.Details) > 0 {
+			hasBrowserIntervention = true
+		}
+	}
+	if !hasBrowserIntervention {
+		t.Fatalf("browser = %+v, want stable browser login intervention row", snapshot.Browser)
 	}
 }
 
