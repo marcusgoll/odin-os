@@ -241,6 +241,132 @@ func TestReadyzReturnsHealthyWhenRuntimeIsReady(t *testing.T) {
 	}
 }
 
+func TestReadyzUsesRecentCachedReportWhenLiveReadErrors(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+
+	handler := httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first /readyz status = %d body=%s, want %d", first.Code, first.Body.String(), http.StatusOK)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/readyz", nil).WithContext(canceledCtx))
+	if second.Code != http.StatusOK {
+		t.Fatalf("cached /readyz status = %d body=%s, want %d", second.Code, second.Body.String(), http.StatusOK)
+	}
+	if source := second.Header().Get("X-Odin-Health-Source"); source != "cache" {
+		t.Fatalf("X-Odin-Health-Source = %q, want cache", source)
+	}
+	var report struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(second.Body).Decode(&report); err != nil {
+		t.Fatalf("decode cached /readyz report error = %v", err)
+	}
+	if report.Status != "healthy" {
+		t.Fatalf("cached /readyz status = %q, want healthy", report.Status)
+	}
+}
+
+func TestMetricsUsesRecentCachedSnapshotWhenLiveCollectErrors(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "ready")
+
+	handler := httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first /metrics status = %d body=%s, want %d", first.Code, first.Body.String(), http.StatusOK)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/metrics", nil).WithContext(canceledCtx))
+	if second.Code != http.StatusOK {
+		t.Fatalf("cached /metrics status = %d body=%s, want %d", second.Code, second.Body.String(), http.StatusOK)
+	}
+	if source := second.Header().Get("X-Odin-Metrics-Source"); source != "cache" {
+		t.Fatalf("X-Odin-Metrics-Source = %q, want cache", source)
+	}
+	body := second.Body.String()
+	if !strings.Contains(body, "odin_active_runs") {
+		t.Fatalf("cached /metrics body = %q, want odin_active_runs metric", body)
+	}
+	if !strings.Contains(body, "odin_os_health_score") {
+		t.Fatalf("cached /metrics body = %q, want odin_os_health_score metric", body)
+	}
+}
+
+func TestReadyzDoesNotCacheDegradedReports(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openStore(t)
+	defer store.Close()
+
+	seedHealthyObservability(t, ctx, store)
+	seedRuntimeState(t, ctx, store, "booting")
+
+	handler := httpapi.NewOperationalHandler(httpapi.Dependencies{
+		Health: healthsvc.Service{DB: store.DB()},
+		Metrics: metricsvc.Service{
+			DB: store.DB(),
+		},
+		ReadModels:      store.DB(),
+		RegistryHealthy: true,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if first.Code != http.StatusServiceUnavailable {
+		t.Fatalf("first /readyz status = %d body=%s, want %d", first.Code, first.Body.String(), http.StatusServiceUnavailable)
+	}
+
+	seedRuntimeState(t, ctx, store, "ready")
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if second.Code != http.StatusOK {
+		t.Fatalf("second /readyz status = %d body=%s, want %d", second.Code, second.Body.String(), http.StatusOK)
+	}
+	if source := second.Header().Get("X-Odin-Health-Source"); source != "" {
+		t.Fatalf("X-Odin-Health-Source = %q, want live response without cached degraded report", source)
+	}
+}
+
 func TestReadyzFailsClosedWhenRuntimeIsNotReady(t *testing.T) {
 	t.Parallel()
 

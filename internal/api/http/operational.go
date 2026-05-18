@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	coreprojects "odin-os/internal/core/projects"
@@ -49,6 +50,98 @@ type Dependencies struct {
 	GitHubIssueIngester  GitHubIssueIngester
 	RegistrySnapshot     registry.Snapshot
 	Registry             coreprojects.Registry
+}
+
+const operationalProbeCacheFreshAge = 45 * time.Second
+const operationalProbeCacheMaxStaleAge = 5 * time.Minute
+const operationalProbeRefreshTimeout = 10 * time.Second
+
+type operationalProbeCache struct {
+	mu                sync.Mutex
+	readiness         cachedReadinessProbe
+	metrics           cachedMetricsProbe
+	metricsRefreshing bool
+}
+
+type cachedReadinessProbe struct {
+	report     healthsvc.Report
+	statusCode int
+	cachedAt   time.Time
+	ok         bool
+}
+
+type cachedMetricsProbe struct {
+	snapshot metricsvc.Snapshot
+	cachedAt time.Time
+	ok       bool
+}
+
+func (cache *operationalProbeCache) storeReadiness(cachedAt time.Time, report healthsvc.Report, ready bool) {
+	if !ready {
+		return
+	}
+	statusCode := http.StatusOK
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.readiness = cachedReadinessProbe{
+		report:     report,
+		statusCode: statusCode,
+		cachedAt:   cachedAt.UTC(),
+		ok:         true,
+	}
+}
+
+func (cache *operationalProbeCache) recentReadiness(now time.Time, maxAge time.Duration) (healthsvc.Report, int, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if !cache.readiness.ok || !recentProbeCacheHit(now, cache.readiness.cachedAt, maxAge) {
+		return healthsvc.Report{}, 0, false
+	}
+	return cache.readiness.report, cache.readiness.statusCode, true
+}
+
+func (cache *operationalProbeCache) storeMetrics(cachedAt time.Time, snapshot metricsvc.Snapshot) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.metrics = cachedMetricsProbe{
+		snapshot: snapshot,
+		cachedAt: cachedAt.UTC(),
+		ok:       true,
+	}
+}
+
+func (cache *operationalProbeCache) recentMetrics(now time.Time, maxAge time.Duration) (metricsvc.Snapshot, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if !cache.metrics.ok || !recentProbeCacheHit(now, cache.metrics.cachedAt, maxAge) {
+		return metricsvc.Snapshot{}, false
+	}
+	return cache.metrics.snapshot, true
+}
+
+func (cache *operationalProbeCache) refreshMetricsOnce(refresh func()) {
+	cache.mu.Lock()
+	if cache.metricsRefreshing {
+		cache.mu.Unlock()
+		return
+	}
+	cache.metricsRefreshing = true
+	cache.mu.Unlock()
+
+	go func() {
+		defer func() {
+			cache.mu.Lock()
+			cache.metricsRefreshing = false
+			cache.mu.Unlock()
+		}()
+		refresh()
+	}()
+}
+
+func recentProbeCacheHit(now time.Time, cachedAt time.Time, maxAge time.Duration) bool {
+	age := now.UTC().Sub(cachedAt.UTC())
+	return age >= 0 && age <= maxAge
 }
 
 type AdminActions interface {
@@ -136,6 +229,7 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 			return time.Now().UTC()
 		}
 	}
+	probeCache := &operationalProbeCache{}
 
 	mux := http.NewServeMux()
 	healthHandler := func(writer http.ResponseWriter, request *http.Request) {
@@ -152,11 +246,22 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/readyz", func(writer http.ResponseWriter, request *http.Request) {
+		if cachedReport, statusCode, ok := probeCache.recentReadiness(now(), operationalProbeCacheFreshAge); ok {
+			writer.Header().Set("X-Odin-Health-Source", "cache")
+			writeJSON(writer, statusCode, cachedReport)
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(request.Context(), 5*time.Second)
 		defer cancel()
 
 		report, ready, err := deps.Health.Readiness(ctx, deps.RegistryHealthy)
 		if err != nil {
+			if cachedReport, statusCode, ok := probeCache.recentReadiness(now(), operationalProbeCacheMaxStaleAge); ok {
+				writer.Header().Set("X-Odin-Health-Source", "stale-cache")
+				writeJSON(writer, statusCode, cachedReport)
+				return
+			}
 			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
@@ -165,6 +270,7 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		if !ready {
 			statusCode = http.StatusServiceUnavailable
 		}
+		probeCache.storeReadiness(now(), report, ready)
 		writeJSON(writer, statusCode, report)
 	})
 	mux.HandleFunc("GET /status", func(writer http.ResponseWriter, request *http.Request) {
@@ -338,15 +444,46 @@ func NewOperationalHandler(deps Dependencies) http.Handler {
 		handleGitHubIssuesWebhook(writer, request, deps)
 	})
 	mux.HandleFunc("/metrics", func(writer http.ResponseWriter, request *http.Request) {
+		if cachedSnapshot, ok := probeCache.recentMetrics(now(), operationalProbeCacheFreshAge); ok {
+			writer.Header().Set("X-Odin-Metrics-Source", "cache")
+			writer.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			writer.WriteHeader(http.StatusOK)
+			_, _ = writer.Write([]byte(metricsvc.Render(cachedSnapshot)))
+			return
+		}
+		if cachedSnapshot, ok := probeCache.recentMetrics(now(), operationalProbeCacheMaxStaleAge); ok {
+			probeCache.refreshMetricsOnce(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), operationalProbeRefreshTimeout)
+				defer cancel()
+				snapshot, err := deps.Metrics.Collect(ctx)
+				if err == nil {
+					probeCache.storeMetrics(now(), snapshot)
+				}
+			})
+			writer.Header().Set("X-Odin-Metrics-Source", "stale-cache")
+			writer.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			writer.WriteHeader(http.StatusOK)
+			_, _ = writer.Write([]byte(metricsvc.Render(cachedSnapshot)))
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(request.Context(), 3*time.Second)
 		defer cancel()
 
 		snapshot, err := deps.Metrics.Collect(ctx)
 		if err != nil {
+			if cachedSnapshot, ok := probeCache.recentMetrics(now(), operationalProbeCacheMaxStaleAge); ok {
+				writer.Header().Set("X-Odin-Metrics-Source", "cache")
+				writer.Header().Set("Content-Type", "text/plain; version=0.0.4")
+				writer.WriteHeader(http.StatusOK)
+				_, _ = writer.Write([]byte(metricsvc.Render(cachedSnapshot)))
+				return
+			}
 			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 
+		probeCache.storeMetrics(now(), snapshot)
 		writer.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write([]byte(metricsvc.Render(snapshot)))
