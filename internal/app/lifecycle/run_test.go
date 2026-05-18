@@ -3559,12 +3559,14 @@ func TestRunReviewApproveGoalDerivedItems(t *testing.T) {
 	}
 	assertGoalStatus(plannedGoalID, string(sqlite.GoalStatusApprovedForExecution))
 	workStatus := run("work", "status", "--json")
-	if !strings.Contains(workStatus, `"work_items": 1`) || !strings.Contains(workStatus, `"open_work_items": 1`) {
-		t.Fatalf("work status after goal approval = %s, want one open delivery work item", workStatus)
+	if !strings.Contains(workStatus, `"work_items": 2`) || !strings.Contains(workStatus, `"open_work_items": 2`) {
+		t.Fatalf("work status after goal approval = %s, want draft plus approved delivery work items", workStatus)
 	}
 	plannedTick := run("goal", "tick", "--json")
-	if !strings.Contains(plannedTick, `"goal_id": `+int64String(plannedGoalID)) || !strings.Contains(plannedTick, `"action": "started"`) {
-		t.Fatalf("goal tick after planned approval = %s, want approved planned goal moved into run path", plannedTick)
+	if !strings.Contains(plannedTick, `"goal_id": `+int64String(plannedGoalID)) ||
+		!strings.Contains(plannedTick, `"action": "started"`) ||
+		!strings.Contains(plannedTick, `"work_item_key": "goal-`+int64String(plannedGoalID)+`-run-`) {
+		t.Fatalf("goal tick after planned approval = %s, want approved planned goal moved into work item path", plannedTick)
 	}
 
 	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))

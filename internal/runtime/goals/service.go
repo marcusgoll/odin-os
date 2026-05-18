@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"odin-os/internal/store/sqlite"
@@ -43,6 +45,7 @@ const (
 	TickReasonNextWakePending      = "next_wake_pending"
 	TickReasonNoExecutor           = "no_executor"
 	TickReasonStatusSkipped        = "status_skipped"
+	TickReasonWorkItemMaterialized = "work_item_materialized"
 )
 
 type TickResult struct {
@@ -61,6 +64,13 @@ type TickGoalResult struct {
 	Action         string            `json:"action"`
 	Reason         string            `json:"reason,omitempty"`
 	GoalRunID      *int64            `json:"goal_run_id,omitempty"`
+	WorkItemID     *int64            `json:"work_item_id,omitempty"`
+	WorkItemKey    string            `json:"work_item_key,omitempty"`
+}
+
+type goalWorkItemRef struct {
+	ID  int64
+	Key string
 }
 
 func NewService(store *sqlite.Store) Service {
@@ -285,6 +295,10 @@ func (service Service) startApprovedGoal(ctx context.Context, goal sqlite.Goal) 
 	if err != nil {
 		return TickGoalResult{}, err
 	}
+	workItem, err := service.materializeGoalWorkItem(ctx, goal, run)
+	if err != nil {
+		return TickGoalResult{}, err
+	}
 	updated, err := service.Store.TransitionGoal(ctx, sqlite.TransitionGoalParams{
 		GoalID: goal.ID,
 		Status: sqlite.GoalStatusRunning,
@@ -295,7 +309,7 @@ func (service Service) startApprovedGoal(ctx context.Context, goal sqlite.Goal) 
 		return TickGoalResult{}, err
 	}
 	runID := run.ID
-	return service.observe(ctx, goal, TickActionStarted, TickReasonApprovedStarted, updated.Status, &runID)
+	return service.observeWithWorkItem(ctx, goal, TickActionStarted, TickReasonApprovedStarted, updated.Status, &runID, workItem)
 }
 
 func (service Service) blockRunningGoalWithoutExecutor(ctx context.Context, goal sqlite.Goal) (TickGoalResult, error) {
@@ -310,6 +324,13 @@ func (service Service) blockRunningGoalWithoutExecutor(ctx context.Context, goal
 			return service.observe(ctx, goal, TickActionSkipped, TickReasonNextWakePending, goal.Status, runID)
 		}
 		if activeRun.Executor != "" {
+			workItem, err := service.materializeGoalWorkItem(ctx, goal, activeRun)
+			if err != nil {
+				return TickGoalResult{}, err
+			}
+			if workItem != nil {
+				return service.observeWithWorkItem(ctx, goal, TickActionStarted, TickReasonWorkItemMaterialized, goal.Status, runID, workItem)
+			}
 			return service.observe(ctx, goal, TickActionSkipped, TickReasonActiveRunExists, goal.Status, runID)
 		}
 		if _, err := service.Store.UpdateGoalRunStatus(ctx, sqlite.UpdateGoalRunStatusParams{
@@ -396,6 +417,10 @@ func (service Service) recoverBlockedGoalWithExecutor(ctx context.Context, goal 
 }
 
 func (service Service) observe(ctx context.Context, goal sqlite.Goal, action string, reason string, status sqlite.GoalStatus, goalRunID *int64) (TickGoalResult, error) {
+	return service.observeWithWorkItem(ctx, goal, action, reason, status, goalRunID, nil)
+}
+
+func (service Service) observeWithWorkItem(ctx context.Context, goal sqlite.Goal, action string, reason string, status sqlite.GoalStatus, goalRunID *int64, workItem *goalWorkItemRef) (TickGoalResult, error) {
 	if err := service.Store.RecordGoalRunnerObserved(ctx, sqlite.RecordGoalRunnerObservedParams{
 		GoalID: goal.ID,
 		Action: action,
@@ -404,12 +429,142 @@ func (service Service) observe(ctx context.Context, goal sqlite.Goal, action str
 	}); err != nil {
 		return TickGoalResult{}, err
 	}
-	return TickGoalResult{
+	result := TickGoalResult{
 		GoalID:         goal.ID,
 		PreviousStatus: goal.Status,
 		Status:         status,
 		Action:         action,
 		Reason:         reason,
 		GoalRunID:      goalRunID,
-	}, nil
+	}
+	if workItem != nil {
+		id := workItem.ID
+		result.WorkItemID = &id
+		result.WorkItemKey = workItem.Key
+	}
+	return result, nil
+}
+
+func (service Service) materializeGoalWorkItem(ctx context.Context, goal sqlite.Goal, run sqlite.GoalRun) (*goalWorkItemRef, error) {
+	key := goalWorkItemKey(goal.ID, run.ID)
+	existing, err := service.lookupGoalWorkItem(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return nil, nil
+	}
+
+	decision := ClassifyAutoPolicy(goal)
+	project, err := service.ensureGoalProject(ctx, decision.ProjectKey)
+	if err != nil {
+		return nil, err
+	}
+	executionIntent := decision.ExecutionIntent
+	if strings.TrimSpace(executionIntent) == "" {
+		executionIntent = "mutation"
+	}
+	artifacts, err := json.Marshal(map[string]any{
+		"goal_id":       goal.ID,
+		"goal_run_id":   run.ID,
+		"goal_source":   goal.Source,
+		"goal_runner":   true,
+		"policy_reason": decision.Reason,
+	})
+	if err != nil {
+		return nil, err
+	}
+	task, err := service.Store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID: project.ID,
+		Key:       key,
+		Title:     goalWorkItemTitle(goal),
+		AcceptanceCriteria: []string{
+			fmt.Sprintf("Advance Odin Goal #%d through the canonical Work Item execution path.", goal.ID),
+			"Preserve Odin approval, audit, runtime, and executor boundaries.",
+			"Record verification evidence or a deterministic blocker before closing the work item.",
+		},
+		ActionKey:             "run_task",
+		Status:                "queued",
+		Scope:                 "project",
+		RequestedBy:           "goal_runner",
+		WorkKind:              "project",
+		ExecutionIntent:       executionIntent,
+		ExecutionIntentSource: "goal_runner:" + decision.Reason,
+		ArtifactsJSON:         string(artifacts),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := service.Store.UpdateGoalRunStatus(ctx, sqlite.UpdateGoalRunStatusParams{
+		GoalRunID: run.ID,
+		Status:    sqlite.GoalRunStatusRunning,
+		Summary:   "materialized work item " + task.Key,
+	}); err != nil {
+		return nil, err
+	}
+	if _, err := service.Store.AddGoalEvidence(ctx, sqlite.AddGoalEvidenceParams{
+		GoalID:       goal.ID,
+		GoalRunID:    &run.ID,
+		EvidenceType: "goal_work_item_materialized",
+		Summary:      "goal runner materialized canonical work item",
+		PayloadJSON:  fmt.Sprintf(`{"task_id":%d,"task_key":%q,"project_key":%q}`, task.ID, task.Key, project.Key),
+		CreatedBy:    "goal_runner",
+	}); err != nil {
+		return nil, err
+	}
+	return &goalWorkItemRef{ID: task.ID, Key: task.Key}, nil
+}
+
+func (service Service) lookupGoalWorkItem(ctx context.Context, key string) (*goalWorkItemRef, error) {
+	row := service.Store.DB().QueryRowContext(ctx, `SELECT id, key FROM tasks WHERE key = ?`, key)
+	var ref goalWorkItemRef
+	if err := row.Scan(&ref.ID, &ref.Key); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &ref, nil
+}
+
+func (service Service) ensureGoalProject(ctx context.Context, key string) (sqlite.Project, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		key = AutoPolicyDefaultProjectKey
+	}
+	project, err := service.Store.GetProjectByKey(ctx, key)
+	if err == nil {
+		return project, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return sqlite.Project{}, err
+	}
+	return service.Store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           key,
+		Name:          key,
+		Scope:         "project",
+		GitRoot:       ".",
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+}
+
+func goalWorkItemKey(goalID int64, runID int64) string {
+	return fmt.Sprintf("goal-%d-run-%d", goalID, runID)
+}
+
+func goalWorkItemTitle(goal sqlite.Goal) string {
+	title := strings.TrimSpace(goal.Title)
+	if title == "" {
+		title = fmt.Sprintf("goal-%d", goal.ID)
+	}
+	return strings.TrimSpace(fmt.Sprintf("Advance goal #%d: %s", goal.ID, truncateGoalTitle(title, 120)))
+}
+
+func truncateGoalTitle(title string, limit int) string {
+	title = regexp.MustCompile(`\s+`).ReplaceAllString(strings.TrimSpace(title), " ")
+	if len(title) <= limit {
+		return title
+	}
+	return strings.TrimSpace(title[:limit])
 }
