@@ -3748,6 +3748,29 @@ func (store *Store) ResolveApproval(ctx context.Context, params ResolveApprovalP
 			}
 
 			previousTask := task
+			var browserMutationApprovals int
+			row = tx.QueryRowContext(ctx, `
+				SELECT COUNT(*)
+				FROM browser_mutation_requests
+				WHERE approval_id = ?
+			`, current.ID)
+			if err := row.Scan(&browserMutationApprovals); err != nil {
+				return err
+			}
+			if browserMutationApprovals > 0 {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE tasks
+					SET status = ?, current_run_id = NULL, blocked_reason = ?, updated_at = ?
+					WHERE id = ?
+				`, "blocked", "approval_resolved_waiting_for_browser_continuation", formatTime(now), task.ID); err != nil {
+					return err
+				}
+				task.Status = "blocked"
+				task.CurrentRunID = nil
+				task.BlockedReason = "approval_resolved_waiting_for_browser_continuation"
+				task.UpdatedAt = now
+				return appendTaskStatusChangedEventTx(ctx, tx, previousTask, task, nil, now)
+			}
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE tasks
 				SET status = ?, current_run_id = NULL, blocked_reason = '', updated_at = ?

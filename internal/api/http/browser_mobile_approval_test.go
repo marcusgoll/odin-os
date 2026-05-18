@@ -30,7 +30,7 @@ type browserApprovalResponse struct {
 	Items []map[string]any `json:"items"`
 }
 
-func TestMobileBrowserMutationApprovalAppearsAndApproveRequeuesTask(t *testing.T) {
+func TestMobileBrowserMutationApprovalAppearsAndApproveKeepsBrowserOwnership(t *testing.T) {
 	ctx := context.Background()
 	store := openMobileBrowserStore(t)
 	readModels := store.DB()
@@ -83,7 +83,7 @@ func TestMobileBrowserMutationApprovalAppearsAndApproveRequeuesTask(t *testing.T
 	if err != nil {
 		t.Fatalf("get task: %v", err)
 	}
-	if updated.Status != "queued" || updated.BlockedReason != "" {
+	if updated.Status != "blocked" || updated.BlockedReason != "approval_resolved_waiting_for_browser_continuation" {
 		t.Fatalf("task after approval = status %q blocked_reason %q", updated.Status, updated.BlockedReason)
 	}
 }

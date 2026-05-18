@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"odin-os/internal/core/projects"
 	browserexecutor "odin-os/internal/executors/browser"
 	"odin-os/internal/runtime/browserprofileartifacts"
 	"odin-os/internal/runtime/browserprofilecrypto"
@@ -157,6 +158,13 @@ func TestRunBrowserContinueApprovedMutationRecordsEvidence(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ResolveApproval() error = %v", err)
 	}
+	approvedTask, err := app.Store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() after browser approval error = %v", err)
+	}
+	if approvedTask.Status != "blocked" || approvedTask.BlockedReason != "approval_resolved_waiting_for_browser_continuation" {
+		t.Fatalf("task after browser approval status=%q blocked_reason=%q, want browser continuation ownership", approvedTask.Status, approvedTask.BlockedReason)
+	}
 
 	driverPath := filepath.Join(t.TempDir(), "browser-mutation-driver.sh")
 	if err := os.WriteFile(driverPath, []byte(`#!/usr/bin/env bash
@@ -183,6 +191,13 @@ printf '%s' '{"status":"completed","adapter_kind":"huginn_browser_mutation_fixtu
 		if !strings.Contains(continueOut.String(), want) {
 			t.Fatalf("continue output = %s, want %s", continueOut.String(), want)
 		}
+	}
+	completedTask, err := app.Store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() after continue error = %v", err)
+	}
+	if completedTask.Status != "completed" {
+		t.Fatalf("task after browser continue status=%q, want completed", completedTask.Status)
 	}
 }
 
@@ -1334,6 +1349,113 @@ printf '{"status":"completed","tool_key":"browser_x_profile_bio_update","summary
 		if !strings.Contains(artifacts[0].DetailsJSON, want) {
 			t.Fatalf("artifact details missing %s: %s", want, artifacts[0].DetailsJSON)
 		}
+	}
+}
+
+func TestRunXBioRequestAndApplyUsesOdinApprovalSurface(t *testing.T) {
+	ctx := context.Background()
+	app := newLifecycleReviewTestApp(t, ctx)
+	app.RuntimeRoot = t.TempDir()
+	app.RepoRoot = testRepoRoot(t)
+	registry, diagnostics, err := projects.Register(filepath.Join(app.RepoRoot, "config", "projects.yaml"))
+	if err != nil {
+		t.Fatalf("projects.Register() error = %v", err)
+	}
+	if len(diagnostics) != 0 {
+		t.Fatalf("projects.Register() diagnostics = %+v", diagnostics)
+	}
+	app.Registry = registry
+	key := make([]byte, 32)
+	for index := range key {
+		key[index] = byte(index + 11)
+	}
+	t.Setenv(browserprofilekeys.EnvKeyB64, base64.StdEncoding.EncodeToString(key))
+
+	var stdout bytes.Buffer
+	if err := runBrowser(ctx, app, []string{"session", "create", "--name", "x-main", "--domain", "x.com", "--permission-tier", "authenticated_read", "--profile-path", "browser-sessions/profiles/x-main", "--json"}, &stdout); err != nil {
+		t.Fatalf("runBrowser(session create) error = %v", err)
+	}
+	session := decodeBrowserSessionEnvelope(t, stdout.Bytes())
+	stdout.Reset()
+	if err := runBrowser(ctx, app, []string{"session", "status", "--id", int64String(session.ID), "--status", "verified", "--json"}, &stdout); err != nil {
+		t.Fatalf("runBrowser(session verify) error = %v", err)
+	}
+	sourceDir := filepath.Join(t.TempDir(), "profile")
+	if err := os.MkdirAll(filepath.Join(sourceDir, "Default"), 0o700); err != nil {
+		t.Fatalf("MkdirAll profile source error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "Default", "Preferences"), []byte("saved x session"), 0o600); err != nil {
+		t.Fatalf("WriteFile profile source error = %v", err)
+	}
+	stdout.Reset()
+	if err := runBrowser(ctx, app, []string{"session", "profile", "artifact", "create-directory", "--session-id", int64String(session.ID), "--name", "x-bio-profile", "--source-dir", sourceDir, "--json"}, &stdout); err != nil {
+		t.Fatalf("runBrowser(artifact create-directory) error = %v\n%s", err, stdout.String())
+	}
+	artifact := decodeBrowserSessionProfileArtifactEnvelope(t, stdout.Bytes())
+
+	stdout.Reset()
+	if err := runX(ctx, app, []string{"bio", "request", "--session-id", int64String(session.ID), "--bio", "Daily autonomy proof via first-class Odin X command.", "--project", "odin-core", "--json"}, &stdout); err != nil {
+		t.Fatalf("runX(bio request) error = %v\n%s", err, stdout.String())
+	}
+	var request xBioRequestView
+	if err := json.Unmarshal(stdout.Bytes(), &request); err != nil {
+		t.Fatalf("decode x bio request error = %v: %s", err, stdout.String())
+	}
+	if request.Status != "approval_required" || request.TaskID <= 0 || request.ApprovalID <= 0 || request.MutationRequestID <= 0 || request.SessionID != session.ID {
+		t.Fatalf("x bio request = %+v, want approval/task/mutation request", request)
+	}
+	task, err := app.Store.GetTask(ctx, request.TaskID)
+	if err != nil {
+		t.Fatalf("GetTask() after request error = %v", err)
+	}
+	if task.Status != "blocked" || task.BlockedReason != "approval_required" {
+		t.Fatalf("task after x request status=%q blocked_reason=%q, want pending approval", task.Status, task.BlockedReason)
+	}
+	if _, err := app.Store.ResolveApproval(ctx, sqlite.ResolveApprovalParams{
+		ApprovalID: request.ApprovalID,
+		Status:     "approved",
+		DecisionBy: "operator",
+		Reason:     "approved first-class X bio proof",
+	}); err != nil {
+		t.Fatalf("ResolveApproval() error = %v", err)
+	}
+	task, err = app.Store.GetTask(ctx, request.TaskID)
+	if err != nil {
+		t.Fatalf("GetTask() after approval error = %v", err)
+	}
+	if task.Status != "blocked" || task.BlockedReason != "approval_resolved_waiting_for_browser_continuation" {
+		t.Fatalf("task after x approval status=%q blocked_reason=%q, want browser continuation ownership", task.Status, task.BlockedReason)
+	}
+
+	driverPath := writeLifecycleExecutable(t, "x-bio-driver-first-class", `#!/bin/sh
+cat >/dev/null
+test -d "$ODIN_CHROME_PROFILE_DIR" || exit 12
+printf '{"status":"completed","tool_key":"browser_x_profile_bio_update","summary":"Applied approved X profile bio change and verified it on the X profile page.","artifacts":{"target_url":"https://x.com/settings/profile","post_save_url":"https://x.com/home","profile_url":"https://x.com/marcusgoll","current_url":"https://x.com/marcusgoll","observed_title":"Marcus / X","save_clicked":true,"bio_verified":true,"bio":"Daily autonomy proof via first-class Odin X command.","settings_bio_state":{"value":"Daily autonomy proof via first-class Odin X command."},"profile_body_text_sample":"Daily autonomy proof via first-class Odin X command.","profile_bio_candidates":[{"source":"UserDescription","text":"Daily autonomy proof via first-class Odin X command."}]}}'
+`)
+	t.Setenv("ODIN_X_BIO_DRIVER", driverPath)
+	t.Setenv("ODIN_X_BIO_ALLOWED_DRIVERS", driverPath)
+
+	stdout.Reset()
+	if err := runX(ctx, app, []string{"bio", "apply", "--approval-id", int64String(request.ApprovalID), "--json"}, &stdout); err != nil {
+		t.Fatalf("runX(bio apply) error = %v\n%s", err, stdout.String())
+	}
+	result := decodeBrowserSessionXBioApplyEnvelope(t, stdout.Bytes())
+	if result.Status != "completed" || result.TaskID != request.TaskID || result.ApprovalID != request.ApprovalID || result.SessionID != session.ID || result.ArtifactID != artifact.ID {
+		t.Fatalf("x bio apply result = %+v, want completed saved-session mutation", result)
+	}
+	task, err = app.Store.GetTask(ctx, request.TaskID)
+	if err != nil {
+		t.Fatalf("GetTask() after apply error = %v", err)
+	}
+	if task.Status != "completed" {
+		t.Fatalf("task after x bio apply status=%q, want completed", task.Status)
+	}
+	artifacts, err := app.Store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{RunID: result.RunID})
+	if err != nil {
+		t.Fatalf("ListRunArtifacts() error = %v", err)
+	}
+	if len(artifacts) != 1 || !strings.Contains(artifacts[0].DetailsJSON, `"bio_verified":true`) || !strings.Contains(artifacts[0].DetailsJSON, `"profile_url":"https://x.com/marcusgoll"`) {
+		t.Fatalf("x bio apply artifacts = %+v, want public profile verification evidence", artifacts)
 	}
 }
 
