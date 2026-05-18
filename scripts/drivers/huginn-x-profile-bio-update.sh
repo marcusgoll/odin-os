@@ -104,13 +104,51 @@ fi
 # shellcheck source=/dev/null
 source "${browser_access_sh}"
 
+browser_start_diagnostics() {
+    local browser_state_dir="${BROWSER_STATE_DIR:-${ODIN_DIR:-${ODIN_ROOT:-/var/odin}}/browser-state}"
+    local log_dir="${ODIN_DIR:-${ODIN_ROOT:-/var/odin}}/logs/$(date +%Y-%m-%d)"
+    local browser_state_listing="" chrome_log_tail="" browser_log_tail="" alerts_log_tail=""
+
+    browser_state_listing="$(ls -la "${browser_state_dir}" 2>&1 || true)"
+    chrome_log_tail="$(tail -120 "${log_dir}/chrome-cdp.log" 2>&1 || true)"
+    browser_log_tail="$(tail -80 "${log_dir}/browser-runtime.log" 2>&1 || true)"
+    alerts_log_tail="$(tail -80 "${log_dir}/alerts.log" 2>&1 || true)"
+
+    jq -nc \
+        --arg browser_state_dir "${browser_state_dir}" \
+        --arg browser_state_listing "${browser_state_listing}" \
+        --arg chrome_log_tail "${chrome_log_tail}" \
+        --arg browser_log_tail "${browser_log_tail}" \
+        --arg alerts_log_tail "${alerts_log_tail}" \
+        '{browser_state_dir: $browser_state_dir, browser_state_listing: $browser_state_listing, chrome_log_tail: $chrome_log_tail, browser_log_tail: $browser_log_tail, alerts_log_tail: $alerts_log_tail}'
+}
+
 cleanup() {
     browser_server_stop >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-if ! browser_trusted_session_start --url "${target_url}" >/dev/null 2>&1; then
-    emit_json "failed" "Unable to start trusted X browser session." '{"reason":"browser_start_failed"}'
+browser_started=false
+for start_attempt in 1 2; do
+    if browser_trusted_session_start --url "${target_url}" >/dev/null 2>&1; then
+        browser_started=true
+        break
+    fi
+    browser_server_stop >/dev/null 2>&1 || true
+    sleep 1
+done
+if [[ "${browser_started}" != "true" ]]; then
+    diagnostics="$(browser_start_diagnostics)"
+    artifacts_json="$(jq -nc \
+        --arg reason "browser_start_failed" \
+        --arg target_url "${target_url}" \
+        --arg profile_url "${profile_url}" \
+        --arg task_id "${task_id}" \
+        --arg run_id "${run_id}" \
+        --arg approval_id "${approval_id}" \
+        --argjson diagnostics "${diagnostics}" \
+        '{reason: $reason, target_url: $target_url, profile_url: $profile_url, task_id: $task_id, run_id: $run_id, approval_id: $approval_id, browser_start_attempts: 2, diagnostics: $diagnostics, save_clicked: false, bio_verified: false}')"
+    emit_json "failed" "Unable to start trusted X browser session." "${artifacts_json}"
     exit 0
 fi
 
