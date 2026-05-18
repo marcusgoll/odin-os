@@ -200,13 +200,28 @@ selector, bio = sys.argv[1:3]
 print(f"""(() => {{
   const node = document.querySelector({json.dumps(selector)});
   if (!node) return {{ok: false, reason: "bio_field_missing", current_url: location.href, title: document.title}};
+  const setNativeValue = (target, value) => {{
+    const proto = target instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : target instanceof HTMLInputElement
+        ? HTMLInputElement.prototype
+        : null;
+    const setter = proto ? Object.getOwnPropertyDescriptor(proto, "value")?.set : null;
+    if (setter) {{
+      setter.call(target, value);
+      return true;
+    }}
+    target.value = value;
+    return false;
+  }};
   node.focus();
   if ("value" in node) {{
-    node.value = "";
-    node.dispatchEvent(new Event("input", {{bubbles: true}}));
-    node.value = {json.dumps(bio)};
-    node.dispatchEvent(new Event("input", {{bubbles: true}}));
+    const usedNativeSetter = setNativeValue(node, "");
+    node.dispatchEvent(new InputEvent("input", {{bubbles: true, inputType: "deleteContentBackward", data: ""}}));
+    setNativeValue(node, {json.dumps(bio)});
+    node.dispatchEvent(new InputEvent("input", {{bubbles: true, inputType: "insertText", data: {json.dumps(bio)}}}));
     node.dispatchEvent(new Event("change", {{bubbles: true}}));
+    return {{ok: true, used_native_setter: usedNativeSetter, value: node.value, value_length: node.value.length, current_url: location.href, title: document.title}};
   }} else {{
     node.textContent = {json.dumps(bio)};
     node.dispatchEvent(new InputEvent("input", {{bubbles: true, inputType: "insertText", data: {json.dumps(bio)}}}));
