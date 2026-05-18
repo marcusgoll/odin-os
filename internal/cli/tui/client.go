@@ -36,6 +36,8 @@ type Client struct {
 	PrometheusURL string
 	MetricsURL    string
 	LokiURL       string
+	OdinURL       string
+	AdminToken    string
 	HTTPClient    *http.Client
 	Provider      ModelProvider
 }
@@ -57,9 +59,11 @@ func RunWithProvider(ctx context.Context, args []string, stdout io.Writer, provi
 	prometheusURL := flags.String("prometheus-url", defaultPrometheusURL, "Prometheus base URL")
 	metricsURL := flags.String("metrics-url", defaultMetricsURL, "Odin metrics URL fallback")
 	lokiURL := flags.String("loki-url", "http://127.0.0.1:3100", "Loki base URL")
+	odinURL := flags.String("odin-url", "", "Odin base URL for operator snapshot rows")
+	adminToken := flags.String("admin-token", "", "Odin admin token for authenticated snapshot requests")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, _ = fmt.Fprintln(stdout, "usage: odin tui [--once] [--interval 5s] [--no-clear] [--prometheus-url URL] [--loki-url URL]")
+			_, _ = fmt.Fprintln(stdout, "usage: odin tui [--once] [--interval 5s] [--no-clear] [--prometheus-url URL] [--loki-url URL] [--odin-url URL] [--admin-token TOKEN]")
 		}
 		return err
 	}
@@ -74,6 +78,8 @@ func RunWithProvider(ctx context.Context, args []string, stdout io.Writer, provi
 		PrometheusURL: *prometheusURL,
 		MetricsURL:    *metricsURL,
 		LokiURL:       *lokiURL,
+		OdinURL:       *odinURL,
+		AdminToken:    *adminToken,
 		Provider:      provider,
 	}
 	if *once {
@@ -123,6 +129,11 @@ func renderFrame(ctx context.Context, client Client, stdout io.Writer, clear boo
 			TelemetryUnavailable: err.Error(),
 		}
 	}
+	if model.TelemetryAvailable && strings.TrimSpace(client.OdinURL) != "" {
+		if err := client.MergeOperatorSnapshot(ctx, &model); err != nil {
+			model.SnapshotUnavailable = err.Error()
+		}
+	}
 	logs, err := client.QueryRecentLogs(ctx)
 	if err != nil {
 		model.LogsUnavailable = err.Error()
@@ -153,6 +164,55 @@ func (c Client) QueryOverview(ctx context.Context) (Model, error) {
 		return Model{}, err
 	}
 	return model, nil
+}
+
+func (c Client) MergeOperatorSnapshot(ctx context.Context, model *Model) error {
+	snapshot, err := c.QueryOperatorSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+	model.ActionRequired = snapshot.ActionRequired
+	model.OdinHealth = snapshot.OdinHealth
+	model.LiveExecution = snapshot.LiveExecution
+	model.Activity = snapshot.Activity
+	return nil
+}
+
+func (c Client) QueryOperatorSnapshot(ctx context.Context) (operatorSnapshotResponse, error) {
+	base := strings.TrimSpace(c.OdinURL)
+	if base == "" {
+		return operatorSnapshotResponse{}, nil
+	}
+	baseURL, err := url.Parse(base)
+	if err != nil {
+		return operatorSnapshotResponse{}, fmt.Errorf("snapshot unavailable: invalid odin url: %v", err)
+	}
+	snapshotURL := baseURL.JoinPath("/mobile/operator-snapshot")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, snapshotURL.String(), nil)
+	if err != nil {
+		return operatorSnapshotResponse{}, fmt.Errorf("snapshot unavailable: request: %v", err)
+	}
+	if token := strings.TrimSpace(c.AdminToken); token != "" {
+		req.Header.Set("X-Odin-Admin-Token", token)
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return operatorSnapshotResponse{}, fmt.Errorf("snapshot unavailable: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		detail := strings.TrimSpace(string(body))
+		if detail != "" {
+			return operatorSnapshotResponse{}, fmt.Errorf("snapshot unavailable: HTTP %d: %s", resp.StatusCode, detail)
+		}
+		return operatorSnapshotResponse{}, fmt.Errorf("snapshot unavailable: HTTP %d", resp.StatusCode)
+	}
+	var decoded operatorSnapshotResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&decoded); err != nil {
+		return operatorSnapshotResponse{}, fmt.Errorf("snapshot unavailable: decode failed: %v", err)
+	}
+	return decoded, nil
 }
 
 func (c Client) queryPrometheusOverview(ctx context.Context) (Model, error) {
@@ -576,6 +636,14 @@ type prometheusQueryResponse struct {
 		ResultType string             `json:"resultType"`
 		Result     []prometheusSample `json:"result"`
 	} `json:"data"`
+}
+
+type operatorSnapshotResponse struct {
+	ActionRequired []SnapshotRow  `json:"action_required"`
+	OdinHealth     SnapshotHealth `json:"odin_health"`
+	LiveExecution  []SnapshotRow  `json:"live_execution"`
+	Activity       []SnapshotRow  `json:"activity"`
+	Browser        []SnapshotRow  `json:"browser"`
 }
 
 type prometheusSample struct {
