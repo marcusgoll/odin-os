@@ -136,6 +136,81 @@ func TestRenderOverviewShowsCommandCenterPanels(t *testing.T) {
 	}
 }
 
+func TestRenderOverviewPreservesSnapshotIDsWithLongMultiruneLabels(t *testing.T) {
+	t.Parallel()
+
+	output := RenderOverview(Model{
+		TelemetryAvailable: true,
+		Status:             "healthy",
+		HealthScore:        92,
+		ActionRequired: []SnapshotRow{
+			{
+				ID:       "approval:123456789",
+				Label:    "承認が必要な非常に長いラベル Approval alpha needs a long operator-facing description",
+				Summary:  "Approval summary",
+				Severity: "warning",
+			},
+		},
+		LiveExecution: []SnapshotRow{
+			{
+				ID:      "run:987654321",
+				Label:   "実行中の非常に長いラベル Run beta has a long operator-facing description",
+				Summary: "Run summary",
+			},
+		},
+	})
+
+	for _, want := range []string{
+		"id=approval:123456789",
+		"id=run:987654321",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want stable ID %q visible at default width", output, want)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(output, "\n"), "\n") {
+		if visibleLen(line) > defaultRenderWidth {
+			t.Fatalf("line width = %d, want <= %d: %q", visibleLen(line), defaultRenderWidth, line)
+		}
+	}
+}
+
+func TestRenderOverviewPreservesSnapshotCommandHintsWithLongLabels(t *testing.T) {
+	t.Parallel()
+
+	output := RenderOverview(Model{
+		TelemetryAvailable: true,
+		Status:             "healthy",
+		HealthScore:        92,
+		ActionRequired: []SnapshotRow{
+			{
+				ID:       "approval:2468",
+				Label:    "Long approval label that would otherwise consume nearly the entire boxed terminal row",
+				Summary:  "Approval summary",
+				Severity: "warning",
+				Command:  "odin approvals show 2468",
+			},
+		},
+		Activity: []SnapshotRow{
+			{
+				ID:      "event:1357",
+				Label:   "Long activity label that would otherwise hide the operator inspection command",
+				Summary: "Activity summary",
+				Command: "odin logs show 1357",
+			},
+		},
+	})
+
+	for _, want := range []string{
+		"inspect=odin approvals show 2468",
+		"inspect=odin logs show 1357",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want command hint %q visible at default width", output, want)
+		}
+	}
+}
+
 func TestRenderOverviewUsesBoxedCockpitLayout(t *testing.T) {
 	t.Parallel()
 

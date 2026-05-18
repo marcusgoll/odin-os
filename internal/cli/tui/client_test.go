@@ -336,6 +336,51 @@ func TestRunMergesOdinSnapshot(t *testing.T) {
 	}
 }
 
+func TestRunOmitsSnapshotAdminTokenHeaderWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writePrometheusQueryResponse(t, w, r.URL.Query().Get("query"))
+	}))
+	defer prometheus.Close()
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"result": []any{},
+			},
+		})
+	}))
+	defer loki.Close()
+
+	var sawAdminToken bool
+	odin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Odin-Admin-Token") != "" {
+			sawAdminToken = true
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"action_required": []map[string]any{
+				{"id": "approval:7", "label": "Approval alpha"},
+			},
+		})
+	}))
+	defer odin.Close()
+
+	var stdout strings.Builder
+	err := Run(context.Background(), []string{
+		"--once",
+		"--prometheus-url", prometheus.URL,
+		"--loki-url", loki.URL,
+		"--odin-url", odin.URL,
+	}, &stdout)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if sawAdminToken {
+		t.Fatalf("Run() sent X-Odin-Admin-Token despite empty --admin-token")
+	}
+}
+
 func TestRunRendersSnapshotUnavailableWhenOdinSnapshotFails(t *testing.T) {
 	t.Parallel()
 

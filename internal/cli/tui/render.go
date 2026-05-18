@@ -321,12 +321,19 @@ func snapshotPanelRows(rows []SnapshotRow) []string {
 	}
 	rendered := make([]string, 0, len(rows)*3)
 	for _, row := range rows {
-		header := valueOrNone(row.Label)
-		if row.Severity != "" {
-			header += " severity=" + row.Severity
-		}
+		headerParts := []string{}
 		if row.ID != "" {
-			header += " id=" + row.ID
+			headerParts = append(headerParts, "id="+row.ID)
+		}
+		if strings.TrimSpace(row.Severity) != "" {
+			headerParts = append(headerParts, "severity="+strings.TrimSpace(row.Severity))
+		}
+		if strings.TrimSpace(row.Label) != "" {
+			headerParts = append(headerParts, "label="+strings.TrimSpace(row.Label))
+		}
+		header := strings.Join(headerParts, " ")
+		if header == "" {
+			header = "none"
 		}
 		rendered = append(rendered, header)
 		if strings.TrimSpace(row.Summary) != "" {
