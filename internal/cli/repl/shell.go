@@ -58,6 +58,7 @@ type Environment struct {
 	CapabilityService     *capabilities.Service
 	CommandService        CommandExecutor
 	ExecutorConfig        executorrouter.Config
+	ModelRegistry         executorrouter.ModelRegistry
 	Executors             map[string]contract.Executor
 	ReviewQueueProjection func(context.Context) (reviewqueue.Projection, error)
 	TransferInvocation    invocation.Service
@@ -128,6 +129,7 @@ func New(env Environment) (*Shell, error) {
 			Registry:       env.Registry,
 			Executors:      env.Executors,
 			ExecutorConfig: env.ExecutorConfig,
+			ModelRegistry:  env.ModelRegistry,
 			Transitions:    projects.Service{Store: env.Store},
 			Leases:         leaseManager,
 			Now:            time.Now,
@@ -155,6 +157,7 @@ func New(env Environment) (*Shell, error) {
 			Registry:            env.Registry,
 			RegistryDiagnostics: env.RegistryDiagnostics,
 			ExecutorConfig:      env.ExecutorConfig,
+			ModelRegistry:       env.ModelRegistry,
 			Executors:           env.Executors,
 		},
 		worktrees: worktreeManager,

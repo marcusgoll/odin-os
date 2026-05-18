@@ -35,6 +35,7 @@ type Service struct {
 	Registry            projects.Registry
 	Executors           map[string]contract.Executor
 	ExecutorConfig      executorrouter.Config
+	ModelRegistry       executorrouter.ModelRegistry
 	PromptRenderer      prompts.Renderer
 	PromptTemplateName  string
 	Transitions         projects.Service
@@ -79,6 +80,13 @@ type DispatchOutcome struct {
 	Run        *sqlite.Run
 	Dispatched bool
 	Reason     string
+}
+
+type RoutePreview struct {
+	Task       sqlite.Task
+	ProjectKey string
+	Spec       contract.TaskSpec
+	Decision   executorrouter.Decision
 }
 
 type RunExecutionOutcome struct {
@@ -605,24 +613,26 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		return err
 	}
 	selector := executorrouter.Selector{
-		Config:    config,
-		Executors: executors,
+		Config:        config,
+		ModelRegistry: service.ModelRegistry,
+		Executors:     executors,
 	}
+	routeIntent := resolveTaskExecutionIntent(manifest, task)
 	spec := contract.TaskSpec{
-		ID:     task.Key,
-		Kind:   contract.TaskKindGeneral,
-		Scope:  task.Scope,
-		Prompt: task.Title,
-		Requirements: contract.Requirements{
-			AllowedClasses:    []contract.ExecutorClass{contract.ExecutorClassPlanBackedCLI},
-			NeedsHeadlessPlan: true,
-		},
+		ID:           task.Key,
+		Kind:         taskKindForRouting(task, routeIntent),
+		Scope:        task.Scope,
+		TaskClass:    taskClassForRouting(task.Title, routeIntent),
+		RiskClass:    riskClassForRouting(routeIntent),
+		Prompt:       task.Title,
+		Requirements: requirementsForRouting(routeIntent),
 		Metadata: map[string]string{
 			"project_key": project.Key,
 			"task_id":     fmt.Sprintf("%d", task.ID),
 		},
 	}
 	service.addRuntimeRootMetadata(spec.Metadata)
+	addRoutingSpecMetadata(spec.Metadata, spec)
 
 	decision, err := selector.Select(ctx, spec)
 	if err != nil {
@@ -631,6 +641,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 			LastError: err.Error(),
 		})
 	}
+	addRoutingDecisionMetadata(spec.Metadata, decision)
 
 	admission, err := service.admitTask(ctx, task, project, manifest, decision.ExecutorKey)
 	if err != nil {
@@ -650,6 +661,9 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 
 	run, err := service.prepareRun(ctx, task, decision.ExecutorKey, attempt)
 	if err != nil {
+		return err
+	}
+	if err := service.recordModelRoutingArtifact(ctx, run.ID, decision, spec); err != nil {
 		return err
 	}
 	if !service.dispatchAllowed() {
@@ -712,6 +726,7 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 	executor := executors[decision.ExecutorKey]
 	result, execErr := runExecutorTask(ctx, decision.ExecutorKey, executor, spec)
 	executionMetadata := executionMetadataForResult(spec.Metadata, result.Metadata, assignment, decision.ExecutorKey, result.Handle.ExternalID)
+	addRoutingDecisionMetadata(executionMetadata, decision)
 	if err := service.finalizeOutcome(ctx, task, run, admissionDecision{}, result, execErr); err != nil {
 		return err
 	}
@@ -737,6 +752,34 @@ func (service Service) DispatchNextRunAttempt(ctx context.Context) (DispatchOutc
 		return DispatchOutcome{}, err
 	}
 	return service.DispatchTaskRunAttempt(ctx, task.ID)
+}
+
+func (service Service) PreviewTaskRoute(ctx context.Context, taskID int64) (RoutePreview, error) {
+	if service.Store == nil {
+		return RoutePreview{}, fmt.Errorf("job store is required")
+	}
+	task, err := service.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return RoutePreview{}, err
+	}
+	project, err := service.Store.GetProject(ctx, task.ProjectID)
+	if err != nil {
+		return RoutePreview{}, err
+	}
+	manifest, ok := service.Registry.Lookup(project.Key)
+	if !ok {
+		return RoutePreview{}, fmt.Errorf("unknown manifest for project %q", project.Key)
+	}
+	spec, decision, err := service.routeTask(ctx, task, project, manifest)
+	if err != nil {
+		return RoutePreview{}, err
+	}
+	return RoutePreview{
+		Task:       task,
+		ProjectKey: project.Key,
+		Spec:       spec,
+		Decision:   decision,
+	}, nil
 }
 
 func (service Service) ApplyAdmissionPolicy(ctx context.Context, taskID int64) (DispatchOutcome, error) {
@@ -817,37 +860,11 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 		return DispatchOutcome{}, fmt.Errorf("unknown manifest for project %q", project.Key)
 	}
 
-	executors := service.Executors
-	if len(executors) == 0 {
-		executors = executorrouter.DefaultCatalog()
-	}
 	if service.Transitions.Store == nil {
 		service.Transitions = projects.Service{Store: service.Store}
 	}
 
-	config, err := service.executionConfig(ctx)
-	if err != nil {
-		return DispatchOutcome{}, err
-	}
-	selector := executorrouter.Selector{
-		Config:    config,
-		Executors: executors,
-	}
-	spec := contract.TaskSpec{
-		ID:     task.Key,
-		Kind:   contract.TaskKindGeneral,
-		Scope:  task.Scope,
-		Prompt: task.Title,
-		Requirements: contract.Requirements{
-			AllowedClasses:    []contract.ExecutorClass{contract.ExecutorClassPlanBackedCLI},
-			NeedsHeadlessPlan: true,
-		},
-		Metadata: map[string]string{
-			"project_key": project.Key,
-			"task_id":     fmt.Sprintf("%d", task.ID),
-		},
-	}
-	decision, err := selector.Select(ctx, spec)
+	spec, decision, err := service.routeTask(ctx, task, project, manifest)
 	if err != nil {
 		return DispatchOutcome{}, err
 	}
@@ -876,6 +893,9 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 	}
 	run, err := service.prepareRun(ctx, task, decision.ExecutorKey, attempt)
 	if err != nil {
+		return DispatchOutcome{}, err
+	}
+	if err := service.recordModelRoutingArtifact(ctx, run.ID, decision, spec); err != nil {
 		return DispatchOutcome{}, err
 	}
 
@@ -943,6 +963,43 @@ func (service Service) DispatchTaskRunAttempt(ctx context.Context, taskID int64)
 		Dispatched: true,
 		Reason:     "dispatched",
 	}, nil
+}
+
+func (service Service) routeTask(ctx context.Context, task sqlite.Task, project sqlite.Project, manifest projects.Manifest) (contract.TaskSpec, executorrouter.Decision, error) {
+	executors := service.Executors
+	if len(executors) == 0 {
+		executors = executorrouter.DefaultCatalog()
+	}
+	config, err := service.executionConfig(ctx)
+	if err != nil {
+		return contract.TaskSpec{}, executorrouter.Decision{}, err
+	}
+	selector := executorrouter.Selector{
+		Config:        config,
+		ModelRegistry: service.ModelRegistry,
+		Executors:     executors,
+	}
+	routeIntent := resolveTaskExecutionIntent(manifest, task)
+	spec := contract.TaskSpec{
+		ID:           task.Key,
+		Kind:         taskKindForRouting(task, routeIntent),
+		Scope:        task.Scope,
+		TaskClass:    taskClassForRouting(task.Title, routeIntent),
+		RiskClass:    riskClassForRouting(routeIntent),
+		Prompt:       task.Title,
+		Requirements: requirementsForRouting(routeIntent),
+		Metadata: map[string]string{
+			"project_key": project.Key,
+			"task_id":     fmt.Sprintf("%d", task.ID),
+		},
+	}
+	addRoutingSpecMetadata(spec.Metadata, spec)
+	decision, err := selector.Select(ctx, spec)
+	if err != nil {
+		return spec, executorrouter.Decision{}, err
+	}
+	addRoutingDecisionMetadata(spec.Metadata, decision)
+	return spec, decision, nil
 }
 
 func admissionReason(admission admissionDecision) string {
@@ -1247,14 +1304,13 @@ func (service Service) executeDispatchedRun(ctx context.Context, taskID int64, a
 	}
 
 	spec := contract.TaskSpec{
-		ID:     task.Key,
-		Kind:   contract.TaskKindGeneral,
-		Scope:  task.Scope,
-		Prompt: task.Title,
-		Requirements: contract.Requirements{
-			AllowedClasses:    []contract.ExecutorClass{contract.ExecutorClassPlanBackedCLI},
-			NeedsHeadlessPlan: true,
-		},
+		ID:           task.Key,
+		Kind:         taskKindForRouting(task, intent),
+		Scope:        task.Scope,
+		TaskClass:    taskClassForRouting(task.Title, intent),
+		RiskClass:    riskClassForRouting(intent),
+		Prompt:       task.Title,
+		Requirements: requirementsForRouting(intent),
 		Metadata: map[string]string{
 			"project_key":   project.Key,
 			"task_id":       fmt.Sprintf("%d", task.ID),
@@ -1265,6 +1321,13 @@ func (service Service) executeDispatchedRun(ctx context.Context, taskID int64, a
 		},
 	}
 	service.addRuntimeRootMetadata(spec.Metadata)
+	if metadata, err := service.loadModelRoutingArtifactMetadata(ctx, run.ID); err != nil {
+		return RunExecutionOutcome{}, err
+	} else {
+		for key, value := range metadata {
+			spec.Metadata[key] = value
+		}
+	}
 	if _, err := service.applyLatestTaskIntakeMetadata(ctx, task.ID, spec.Metadata); err != nil {
 		return RunExecutionOutcome{}, err
 	}
@@ -1352,18 +1415,22 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 		return ExecutionOutcome{}, err
 	}
 	selector := executorrouter.Selector{
-		Config:    config,
-		Executors: executors,
+		Config:        config,
+		ModelRegistry: service.ModelRegistry,
+		Executors:     executors,
 	}
 	prompt := strings.TrimSpace(request.PromptOverride)
 	if prompt == "" {
 		prompt = task.Title
 	}
+	routeIntent := resolveTaskExecutionIntent(manifest, task)
 	spec := contract.TaskSpec{
-		ID:     task.Key,
-		Kind:   contract.TaskKindGeneral,
-		Scope:  task.Scope,
-		Prompt: prompt,
+		ID:        task.Key,
+		Kind:      taskKindForRouting(task, routeIntent),
+		Scope:     task.Scope,
+		TaskClass: taskClassForRouting(prompt, routeIntent),
+		RiskClass: riskClassForRouting(routeIntent),
+		Prompt:    prompt,
 		Requirements: contract.Requirements{
 			AllowedClasses:    []contract.ExecutorClass{contract.ExecutorClassPlanBackedCLI},
 			NeedsHeadlessPlan: true,
@@ -1374,6 +1441,7 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 		},
 	}
 	service.addRuntimeRootMetadata(spec.Metadata)
+	addRoutingSpecMetadata(spec.Metadata, spec)
 	intakeSummary := ""
 	if hasIntake {
 		intakeSummary = applyTaskIntakeMetadata(intake, spec.Metadata)
@@ -1391,6 +1459,7 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 	if err != nil {
 		return service.failTaskBeforeRun(ctx, task, err)
 	}
+	addRoutingDecisionMetadata(spec.Metadata, decision)
 
 	admission, err := service.admitDirectTask(ctx, task, project, manifest)
 	if err != nil {
@@ -1409,6 +1478,9 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 	}
 	run, err := service.prepareRun(ctx, task, decision.ExecutorKey, attempt)
 	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+	if err := service.recordModelRoutingArtifact(ctx, run.ID, decision, spec); err != nil {
 		return ExecutionOutcome{}, err
 	}
 
@@ -1473,6 +1545,7 @@ func (service Service) ExecuteTaskWithRequest(ctx context.Context, taskID int64,
 	executor := executors[decision.ExecutorKey]
 	result, execErr := runExecutorTask(ctx, decision.ExecutorKey, executor, spec)
 	executionMetadata := executionMetadataForResult(spec.Metadata, result.Metadata, assignment, decision.ExecutorKey, result.Handle.ExternalID)
+	addRoutingDecisionMetadata(executionMetadata, decision)
 	finalizeErr := service.finalizeOutcome(ctx, task, run, admissionDecision{}, result, execErr)
 	outcome, loadErr := service.loadExecutionOutcome(ctx, task.ID, &run.ID)
 	if finalizeErr != nil {
@@ -1771,8 +1844,14 @@ func executionMetadataForResult(requestMetadata map[string]string, resultMetadat
 }
 
 func executorResultMetadataAllowed(key string) bool {
-	switch strings.TrimSpace(key) {
+	key = strings.TrimSpace(key)
+	if strings.HasPrefix(key, "openrouter_request_") {
+		return true
+	}
+	switch key {
 	case "driver_kind", "operation", "external_id", "driver_cwd", "branch_observed", "marker_path", "marker_written", "artifact_path", "artifacts_json", "failure_code":
+		return true
+	case "provider_key", "provider_model_id", "network_access", "fixture_transport", "redaction":
 		return true
 	default:
 		return false
@@ -1960,6 +2039,177 @@ func (service Service) defaultDelegationExecutor(preferred string) string {
 		}
 	}
 	return "codex_headless"
+}
+
+func taskKindForRouting(task sqlite.Task, intent executionIntent) contract.TaskKind {
+	switch strings.TrimSpace(task.WorkKind) {
+	case "build", "code", "implementation", "frontend", "backend":
+		return contract.TaskKindBuild
+	case "qa", "test", "tests":
+		return contract.TaskKindQA
+	case "research":
+		return contract.TaskKindResearch
+	case "review":
+		return contract.TaskKindReview
+	case "plan":
+		return contract.TaskKindPlan
+	}
+	return contract.TaskKindGeneral
+}
+
+func taskClassForRouting(title string, intent executionIntent) string {
+	normalized := normalizeIntentTitle(title)
+	switch {
+	case containsAny(normalized, []string{"frontend", "front end", "react", "next.js", "nextjs", "ui ", " ux", "component", "css"}):
+		return "frontend_build"
+	case containsAny(normalized, []string{"backend", "api", "database", "sqlite", "store", "service"}):
+		return "backend_build"
+	case containsAny(normalized, []string{"test", "tests", "coverage", "fixture"}):
+		return "test_writing"
+	case containsAny(normalized, []string{"refactor", "cleanup", "consolidate"}):
+		return "refactor"
+	case containsAny(normalized, []string{"summarize", "summary"}):
+		return "summarization"
+	case containsAny(normalized, []string{"format", "formatting"}):
+		return "formatting"
+	case intent.ActionClass == projects.ActionClassGovernanceMutation:
+		return "production_deploy"
+	case intent.ActionClass == projects.ActionClassDestructiveMutation:
+		return "destructive"
+	case intent.ActionClass == projects.ActionClassIsolatedMutation:
+		return "build"
+	default:
+		return "general"
+	}
+}
+
+func riskClassForRouting(intent executionIntent) string {
+	switch intent.ActionClass {
+	case projects.ActionClassGovernanceMutation, projects.ActionClassDestructiveMutation, projects.ActionClassTransitionControl:
+		return "high"
+	case projects.ActionClassIsolatedMutation:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+func requirementsForRouting(intent executionIntent) contract.Requirements {
+	if riskClassForRouting(intent) == "high" {
+		return contract.Requirements{
+			AllowedClasses:    []contract.ExecutorClass{contract.ExecutorClassPlanBackedCLI},
+			NeedsHeadlessPlan: true,
+		}
+	}
+	return contract.Requirements{
+		AllowedClasses: []contract.ExecutorClass{
+			contract.ExecutorClassPlanBackedCLI,
+			contract.ExecutorClassAPI,
+			contract.ExecutorClassBroker,
+		},
+	}
+}
+
+func addRoutingSpecMetadata(metadata map[string]string, spec contract.TaskSpec) {
+	if metadata == nil {
+		return
+	}
+	if strings.TrimSpace(spec.TaskClass) != "" {
+		metadata["task_class"] = strings.TrimSpace(spec.TaskClass)
+	}
+	if strings.TrimSpace(spec.RiskClass) != "" {
+		metadata["risk_class"] = strings.TrimSpace(spec.RiskClass)
+	}
+}
+
+func addRoutingDecisionMetadata(metadata map[string]string, decision executorrouter.Decision) {
+	if metadata == nil {
+		return
+	}
+	for key, value := range modelRoutingMetadata(decision) {
+		metadata[key] = value
+	}
+}
+
+func (service Service) recordModelRoutingArtifact(ctx context.Context, runID int64, decision executorrouter.Decision, spec contract.TaskSpec) error {
+	metadata := modelRoutingMetadata(decision)
+	if len(metadata) == 0 {
+		return nil
+	}
+	if taskClass := strings.TrimSpace(spec.TaskClass); taskClass != "" {
+		metadata["task_class"] = taskClass
+	}
+	if riskClass := strings.TrimSpace(spec.RiskClass); riskClass != "" {
+		metadata["risk_class"] = riskClass
+	}
+	detailsBytes, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	_, err = service.Store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        runID,
+		ArtifactType: "model_routing",
+		Summary:      "model routing decision",
+		DetailsJSON:  string(detailsBytes),
+	})
+	return err
+}
+
+func (service Service) loadModelRoutingArtifactMetadata(ctx context.Context, runID int64) (map[string]string, error) {
+	artifacts, err := service.Store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{
+		RunID:        runID,
+		ArtifactType: "model_routing",
+	})
+	if err != nil || len(artifacts) == 0 {
+		return nil, err
+	}
+	var metadata map[string]string
+	if err := json.Unmarshal([]byte(artifacts[len(artifacts)-1].DetailsJSON), &metadata); err != nil {
+		return nil, err
+	}
+	return metadata, nil
+}
+
+func modelRoutingMetadata(decision executorrouter.Decision) map[string]string {
+	if strings.TrimSpace(decision.ModelKey) == "" && strings.TrimSpace(decision.ProviderKey) == "" {
+		return nil
+	}
+	metadata := map[string]string{
+		"route_name":    strings.TrimSpace(decision.RouteName),
+		"executor_lane": strings.TrimSpace(decision.ExecutorKey),
+	}
+	if strings.TrimSpace(decision.ModelKey) != "" {
+		metadata["model_key"] = strings.TrimSpace(decision.ModelKey)
+	}
+	if strings.TrimSpace(decision.ProviderKey) != "" {
+		metadata["provider_key"] = strings.TrimSpace(decision.ProviderKey)
+	}
+	if strings.TrimSpace(decision.ProviderModelID) != "" {
+		metadata["provider_model_id"] = strings.TrimSpace(decision.ProviderModelID)
+	}
+	if decision.FallbackUsed {
+		metadata["fallback_used"] = "true"
+	} else {
+		metadata["fallback_used"] = "false"
+	}
+	if strings.TrimSpace(decision.PolicyReason) != "" {
+		metadata["policy_reason"] = strings.TrimSpace(decision.PolicyReason)
+	}
+	if decision.EstimatedCostUSD > 0 {
+		metadata["estimated_cost_usd"] = fmt.Sprintf("%.6f", decision.EstimatedCostUSD)
+	}
+	if decision.ContextWindowTokens > 0 {
+		metadata["context_window_tokens"] = fmt.Sprintf("%d", decision.ContextWindowTokens)
+	}
+	if strings.TrimSpace(decision.LatencyTier) != "" {
+		metadata["latency_tier"] = strings.TrimSpace(decision.LatencyTier)
+	}
+	for key, value := range metadata {
+		if strings.TrimSpace(value) == "" {
+			delete(metadata, key)
+		}
+	}
+	return metadata
 }
 
 func (service Service) renderPrompt(ctx context.Context, spec contract.TaskSpec, task sqlite.Task) (string, error) {

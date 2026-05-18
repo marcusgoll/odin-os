@@ -21,10 +21,12 @@ import (
 	clioverview "odin-os/internal/cli/overview"
 	"odin-os/internal/core/capabilities"
 	"odin-os/internal/core/initiatives"
+	"odin-os/internal/executors/openrouter_api"
 	"odin-os/internal/prompts"
 	"odin-os/internal/registry"
 	"odin-os/internal/runtime/checkpoints"
 	"odin-os/internal/runtime/jobs"
+	openroutersmoke "odin-os/internal/runtime/providers/openrouter_smoke"
 	runtimestate "odin-os/internal/runtime/state"
 	"odin-os/internal/runtime/supervision"
 	"odin-os/internal/store/sqlite"
@@ -622,6 +624,179 @@ func TestRunTUIOnceIncludesStoreBackedVisualPanels(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 		}
+	}
+}
+
+func TestRunProviderOpenRouterSmokePrepareApprovalAndCredentialGate(t *testing.T) {
+	root := testRepoRoot(t)
+	writeOpenRouterSmokeConfig(t, root)
+	t.Setenv("OPENROUTER_API_KEY", "")
+
+	var prepareOut bytes.Buffer
+	if err := Run(context.Background(), root, []string{"provider", "openrouter", "smoke", "prepare", "--model", "openrouter-kimi-k2-6", "--json"}, strings.NewReader(""), &prepareOut); err != nil {
+		t.Fatalf("Run(provider openrouter smoke prepare) error = %v", err)
+	}
+	prepareText := prepareOut.String()
+	for _, forbidden := range []string{"fixture-token", "OpenRouter live smoke. Reply", "sk-live-secret-for-test"} {
+		if strings.Contains(prepareText, forbidden) {
+			t.Fatalf("prepare output leaked %q: %s", forbidden, prepareText)
+		}
+	}
+	var prepare struct {
+		ApprovalID       int64  `json:"approval_id"`
+		PrepareRunID     int64  `json:"prepare_run_id"`
+		Status           string `json:"status"`
+		ProviderModelID  string `json:"provider_model_id"`
+		NetworkAccess    bool   `json:"network_access"`
+		FixtureTransport bool   `json:"fixture_transport"`
+		ExactRunCommand  string `json:"exact_run_command"`
+	}
+	if err := json.Unmarshal(prepareOut.Bytes(), &prepare); err != nil {
+		t.Fatalf("prepare json = %v\n%s", err, prepareOut.String())
+	}
+	if prepare.ApprovalID <= 0 || prepare.PrepareRunID <= 0 || prepare.Status != "pending" || prepare.NetworkAccess || !prepare.FixtureTransport {
+		t.Fatalf("prepare view = %+v, want pending fixture-backed approval", prepare)
+	}
+	if prepare.ProviderModelID != "moonshotai/kimi-k2-thinking" || !strings.Contains(prepare.ExactRunCommand, "--confirm-live-provider-call") {
+		t.Fatalf("prepare view = %+v, want live model id and exact command", prepare)
+	}
+
+	var showOut bytes.Buffer
+	if err := Run(context.Background(), root, []string{"approvals", "show", strconv.FormatInt(prepare.ApprovalID, 10), "--json"}, strings.NewReader(""), &showOut); err != nil {
+		t.Fatalf("Run(approvals show) error = %v", err)
+	}
+	showText := showOut.String()
+	for _, want := range []string{`"openrouter_live_smoke"`, `"provider_key": "openrouter"`, `"provider_model_id": "moonshotai/kimi-k2-thinking"`, "--confirm-live-provider-call"} {
+		if !strings.Contains(showText, want) {
+			t.Fatalf("approvals show = %s, want %s", showText, want)
+		}
+	}
+
+	var pendingRunOut bytes.Buffer
+	err := Run(context.Background(), root, []string{"provider", "openrouter", "smoke", "run", "--approval", strconv.FormatInt(prepare.ApprovalID, 10), "--model", "openrouter-kimi-k2-6", "--live", "--confirm-live-provider-call", "--json"}, strings.NewReader(""), &pendingRunOut)
+	if err == nil || !strings.Contains(err.Error(), "approval_pending") {
+		t.Fatalf("pending live smoke error = %v output=%s, want approval_pending", err, pendingRunOut.String())
+	}
+
+	var approveOut bytes.Buffer
+	if err := Run(context.Background(), root, []string{"approvals", "resolve", strconv.FormatInt(prepare.ApprovalID, 10), "approve", "approved", "for", "one", "request", "--json"}, strings.NewReader(""), &approveOut); err != nil {
+		t.Fatalf("Run(approvals resolve approve) error = %v\n%s", err, approveOut.String())
+	}
+
+	var missingCredentialOut bytes.Buffer
+	err = Run(context.Background(), root, []string{"provider", "openrouter", "smoke", "run", "--approval", strconv.FormatInt(prepare.ApprovalID, 10), "--model", "openrouter-kimi-k2-6", "--live", "--confirm-live-provider-call", "--json"}, strings.NewReader(""), &missingCredentialOut)
+	if err == nil || !strings.Contains(err.Error(), "credential_missing") {
+		t.Fatalf("approved live smoke without credential error = %v output=%s, want credential_missing", err, missingCredentialOut.String())
+	}
+}
+
+func TestRunProviderOpenRouterSmokeEvidenceReadsApprovedSmokeAndProvesRedaction(t *testing.T) {
+	root := testRepoRoot(t)
+	writeOpenRouterSmokeConfig(t, root)
+	t.Setenv("OPENROUTER_API_KEY", "")
+
+	var prepareOut bytes.Buffer
+	if err := Run(context.Background(), root, []string{"provider", "openrouter", "smoke", "prepare", "--model", "openrouter-kimi-k2-6", "--json"}, strings.NewReader(""), &prepareOut); err != nil {
+		t.Fatalf("Run(prepare) error = %v", err)
+	}
+	var prepare struct {
+		ApprovalID int64 `json:"approval_id"`
+	}
+	if err := json.Unmarshal(prepareOut.Bytes(), &prepare); err != nil {
+		t.Fatalf("prepare json = %v\n%s", err, prepareOut.String())
+	}
+	if err := Run(context.Background(), root, []string{"approvals", "resolve", strconv.FormatInt(prepare.ApprovalID, 10), "approve", "approved", "for", "one", "request", "--json"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("Run(approve) error = %v", err)
+	}
+
+	app, err := bootstrap.Load(context.Background(), root, root)
+	if err != nil {
+		t.Fatalf("bootstrap.Load() error = %v", err)
+	}
+	defer app.Store.Close()
+	live, err := (openroutersmoke.Service{
+		Store:         app.Store,
+		ModelRegistry: app.ModelRegistry,
+		ProjectKey:    "odin-core",
+		Getenv: func(key string) string {
+			if key != "OPENROUTER_API_KEY" {
+				t.Fatalf("getenv(%q), want OPENROUTER_API_KEY", key)
+			}
+			return "sk-live-secret-for-test"
+		},
+		Transport: lifecycleOpenRouterFakeTransport{},
+	}).Run(context.Background(), openroutersmoke.RunParams{
+		ApprovalID:  prepare.ApprovalID,
+		ModelKey:    "openrouter-kimi-k2-6",
+		Live:        true,
+		ConfirmLive: true,
+	})
+	if err != nil {
+		t.Fatalf("openrouter smoke service Run() error = %v", err)
+	}
+
+	var evidenceOut bytes.Buffer
+	if err := Run(context.Background(), root, []string{"provider", "openrouter", "smoke", "evidence", "--approval", strconv.FormatInt(prepare.ApprovalID, 10), "--json"}, strings.NewReader(""), &evidenceOut); err != nil {
+		t.Fatalf("Run(evidence approval) error = %v", err)
+	}
+	assertOpenRouterEvidenceJSON(t, evidenceOut.String(), prepare.ApprovalID, live.Run.ID)
+
+	var byRunOut bytes.Buffer
+	if err := Run(context.Background(), root, []string{"provider", "openrouter", "smoke", "evidence", "--run", strconv.FormatInt(live.Run.ID, 10), "--json"}, strings.NewReader(""), &byRunOut); err != nil {
+		t.Fatalf("Run(evidence run) error = %v", err)
+	}
+	assertOpenRouterEvidenceJSON(t, byRunOut.String(), prepare.ApprovalID, live.Run.ID)
+}
+
+type lifecycleOpenRouterFakeTransport struct{}
+
+func (lifecycleOpenRouterFakeTransport) Invoke(context.Context, openrouter_api.ChatCompletionRequest) (openrouter_api.ChatCompletionResponse, error) {
+	return openrouter_api.ChatCompletionResponse{
+		ID: "fake-live-response",
+		Choices: []openrouter_api.Choice{
+			{Message: openrouter_api.ChatMessage{Role: "assistant", Content: "odin-openrouter-live-smoke-ok"}},
+		},
+		Usage: openrouter_api.TokenUsage{PromptTokens: 7, CompletionTokens: 3},
+	}, nil
+}
+
+func assertOpenRouterEvidenceJSON(t *testing.T, output string, approvalID int64, liveRunID int64) {
+	t.Helper()
+	for _, forbidden := range []string{"sk-live-secret-for-test", "OpenRouter live smoke. Reply", "fixture-token"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("evidence output leaked %q: %s", forbidden, output)
+		}
+	}
+	var evidence struct {
+		ApprovalID            int64  `json:"approval_id"`
+		LiveRunID             int64  `json:"live_run_id"`
+		Status                string `json:"status"`
+		ProviderKey           string `json:"provider_key"`
+		ModelKey              string `json:"model_key"`
+		ProviderModelID       string `json:"provider_model_id"`
+		NetworkAccess         bool   `json:"network_access"`
+		FixtureTransport      bool   `json:"fixture_transport"`
+		RedactionProven       bool   `json:"redaction_proven"`
+		SecretLeakDetected    bool   `json:"secret_leak_detected"`
+		RawPromptLeakDetected bool   `json:"raw_prompt_leak_detected"`
+		RequestArtifactCount  int    `json:"request_artifact_count"`
+		ResultArtifactCount   int    `json:"result_artifact_count"`
+		EventCount            int    `json:"event_count"`
+	}
+	if err := json.Unmarshal([]byte(output), &evidence); err != nil {
+		t.Fatalf("evidence json = %v\n%s", err, output)
+	}
+	if evidence.ApprovalID != approvalID || evidence.LiveRunID != liveRunID {
+		t.Fatalf("evidence ids = %+v, want approval=%d live_run=%d", evidence, approvalID, liveRunID)
+	}
+	if evidence.Status != "completed" || evidence.ProviderKey != "openrouter" || evidence.ModelKey != "openrouter-kimi-k2-6" || evidence.ProviderModelID != "moonshotai/kimi-k2-thinking" {
+		t.Fatalf("evidence identity = %+v, want completed OpenRouter Kimi smoke", evidence)
+	}
+	if !evidence.NetworkAccess || evidence.FixtureTransport || !evidence.RedactionProven || evidence.SecretLeakDetected || evidence.RawPromptLeakDetected {
+		t.Fatalf("evidence redaction/network = %+v, want redacted live evidence", evidence)
+	}
+	if evidence.RequestArtifactCount != 1 || evidence.ResultArtifactCount != 1 || evidence.EventCount == 0 {
+		t.Fatalf("evidence counts = %+v, want request/result artifacts and events", evidence)
 	}
 }
 
@@ -4458,6 +4633,70 @@ func TestRunWorkDispatchCreatesRunAttemptFromAcceptedIntake(t *testing.T) {
 		if !strings.Contains(statusOutput.String(), want) {
 			t.Fatalf("work status output = %s, want %s", statusOutput.String(), want)
 		}
+	}
+}
+
+func TestRunWorkRoutePreviewShowsModelSelectionWithoutDispatch(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	copyRepoConfigForRoutePreviewTest(t, root)
+
+	startOutput := bytes.Buffer{}
+	if err := Run(context.Background(), root, []string{"work", "start", "--project", testProjectKey, "--title", "Backend API fixture", "--intent", "read_only"}, strings.NewReader(""), &startOutput); err != nil {
+		t.Fatalf("Run(work start) error = %v", err)
+	}
+	taskKey := parseWorkStartKey(t, startOutput.String())
+
+	var previewOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "route-preview", "--task", taskKey, "--json"}, strings.NewReader(""), &previewOutput); err != nil {
+		t.Fatalf("Run(work route-preview) error = %v", err)
+	}
+	var preview struct {
+		DryRun       bool   `json:"dry_run"`
+		RunCreated   bool   `json:"run_created"`
+		TaskKind     string `json:"task_kind"`
+		TaskClass    string `json:"task_class"`
+		RiskClass    string `json:"risk_class"`
+		RouteName    string `json:"route_name"`
+		ExecutorLane string `json:"executor_lane"`
+		ModelKey     string `json:"model_key"`
+		ProviderKey  string `json:"provider_key"`
+		Task         struct {
+			Key    string `json:"key"`
+			Status string `json:"status"`
+		} `json:"task"`
+	}
+	if err := json.Unmarshal(previewOutput.Bytes(), &preview); err != nil {
+		t.Fatalf("json.Unmarshal(route preview) error = %v\n%s", err, previewOutput.String())
+	}
+	if !preview.DryRun ||
+		preview.RunCreated ||
+		preview.Task.Key != taskKey ||
+		preview.Task.Status != "queued" ||
+		preview.TaskKind != "general" ||
+		preview.TaskClass != "backend_build" ||
+		preview.RiskClass != "low" ||
+		preview.RouteName != "low-risk-backend-build" ||
+		preview.ExecutorLane != "openrouter_api" ||
+		preview.ModelKey != "openrouter-kimi-k2-6" ||
+		preview.ProviderKey != "openrouter" {
+		t.Fatalf("route preview = %+v, want low-risk backend OpenRouter dry run", preview)
+	}
+
+	var jobsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"jobs", "--json"}, strings.NewReader(""), &jobsOutput); err != nil {
+		t.Fatalf("Run(jobs --json) error = %v", err)
+	}
+	if !strings.Contains(jobsOutput.String(), `"status": "queued"`) || strings.Contains(jobsOutput.String(), `"current_run_id"`) {
+		t.Fatalf("jobs output = %s, want queued task with no current run", jobsOutput.String())
+	}
+	var runsOutput bytes.Buffer
+	if err := Run(context.Background(), root, []string{"runs", "--json"}, strings.NewReader(""), &runsOutput); err != nil {
+		t.Fatalf("Run(runs --json) error = %v", err)
+	}
+	if !strings.Contains(runsOutput.String(), `"runs": []`) {
+		t.Fatalf("runs output = %s, want no run from route preview", runsOutput.String())
 	}
 }
 
@@ -8955,6 +9194,81 @@ The profile is loaded and counted by work status.
 	return root
 }
 
+func copyRepoConfigForRoutePreviewTest(t *testing.T, root string) {
+	t.Helper()
+
+	for _, name := range []string{"executors.yaml", "models.yaml"} {
+		src := filepath.Clean(filepath.Join("..", "..", "..", "config", name))
+		contents, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatalf("read repo config %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "config", name), contents, 0o644); err != nil {
+			t.Fatalf("write test config %s: %v", name, err)
+		}
+	}
+}
+
+func parseWorkStartKey(t *testing.T, output string) string {
+	t.Helper()
+
+	for _, field := range strings.Fields(output) {
+		if key, ok := strings.CutPrefix(field, "key="); ok && strings.TrimSpace(key) != "" {
+			return strings.TrimSpace(key)
+		}
+	}
+	t.Fatalf("work start output = %q, missing key field", output)
+	return ""
+}
+
+func writeOpenRouterSmokeConfig(t *testing.T, root string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, "config", "models.yaml"), []byte(`
+version: 1
+models:
+  - key: openrouter-kimi-k2-6
+    provider: openrouter
+    provider_model_id: fixture/openrouter-kimi-k2-6
+    live_provider_model_id: moonshotai/kimi-k2-thinking
+    access: broker
+    adapter: openrouter_api
+    capabilities: [code, frontend, backend, test_writing]
+    supported_task_classes: [provider_smoke, frontend_build, backend_build, test_writing]
+    supported_features: [cost_estimate, broker_routing]
+    context_window_tokens: 128000
+    max_input_tokens: 96000
+    max_output_tokens: 32
+    input_cost_per_million_tokens_usd: 0.25
+    output_cost_per_million_tokens_usd: 1.00
+    latency_tier: batch
+    risk_tier: external_grunt
+    blocked_task_classes: [finance, legal, medical, security_decision, approval_resolution, production_deploy, public_publish]
+`), 0o644); err != nil {
+		t.Fatalf("write models.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "executors.yaml"), []byte(`
+version: 1
+executors:
+  - key: openrouter_api
+    adapter: openrouter_api
+    class: broker_executor
+    enabled: true
+    priority: 80
+    model_ref: openrouter-kimi-k2-6
+routes:
+  - name: openrouter-smoke
+    match:
+      task_kinds: [qa]
+      scopes: [odin-core]
+      task_classes: [provider_smoke]
+      risk_classes: [low]
+    preferred: [openrouter_api]
+    fallback: []
+`), 0o644); err != nil {
+		t.Fatalf("write executors.yaml: %v", err)
+	}
+}
+
 func seedPendingApprovalRuntime(t *testing.T, root string) (int64, int64, int64) {
 	t.Helper()
 
@@ -9245,6 +9559,190 @@ func TestRunRunsShowRendersFailureAnalysis(t *testing.T) {
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("runs show output = %q, want substring %q", output, want)
+		}
+	}
+}
+
+func TestRunRunsRoutingReadsModelRoutingByRunAndTask(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	ctx := context.Background()
+	store, err := sqlite.Open(filepath.Join(root, "data", "odin.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	project, err := store.CreateProject(ctx, sqlite.CreateProjectParams{
+		Key:           "alpha-cli",
+		Name:          "Alpha CLI",
+		Scope:         "project",
+		GitRoot:       root,
+		DefaultBranch: "main",
+		ManifestPath:  "config/projects.yaml",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	frontendTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:             project.ID,
+		Key:                   "frontend-routing-task",
+		Title:                 "Frontend routing task",
+		Status:                "running",
+		Scope:                 "project",
+		RequestedBy:           "operator",
+		ExecutionIntent:       "read_only",
+		ExecutionIntentSource: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(frontend) error = %v", err)
+	}
+	frontendRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   frontendTask.ID,
+		Executor: "openrouter_api",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(frontend) error = %v", err)
+	}
+	if _, err := store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        frontendRun.ID,
+		ArtifactType: "model_routing",
+		Summary:      "model routing decision",
+		DetailsJSON:  `{"route_name":"low-risk-frontend-build","executor_lane":"openrouter_api","model_key":"openrouter-kimi-k2-6","provider_key":"openrouter","provider_model_id":"fixture/openrouter-kimi-k2-6","fallback_used":"false","policy_reason":"model_policy_allowed","task_class":"frontend_build","risk_class":"low","latency_tier":"batch"}`,
+	}); err != nil {
+		t.Fatalf("RecordRunArtifact(frontend) error = %v", err)
+	}
+	elevatedTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:             project.ID,
+		Key:                   "elevated-routing-task",
+		Title:                 "Elevated frontend routing task",
+		Status:                "running",
+		Scope:                 "project",
+		RequestedBy:           "operator",
+		ExecutionIntent:       "mutation",
+		ExecutionIntentSource: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(elevated) error = %v", err)
+	}
+	elevatedRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   elevatedTask.ID,
+		Executor: "codex_headless",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(elevated) error = %v", err)
+	}
+	if _, err := store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        elevatedRun.ID,
+		ArtifactType: "model_routing",
+		Summary:      "model routing decision",
+		DetailsJSON:  `{"route_name":"elevated-frontend-build","executor_lane":"codex_headless","model_key":"codex-latest","provider_key":"openai","fallback_used":"false","policy_reason":"model_policy_allowed","task_class":"frontend_build","risk_class":"medium","latency_tier":"interactive"}`,
+	}); err != nil {
+		t.Fatalf("RecordRunArtifact(elevated) error = %v", err)
+	}
+	backendTask, err := store.CreateTask(ctx, sqlite.CreateTaskParams{
+		ProjectID:             project.ID,
+		Key:                   "backend-routing-task",
+		Title:                 "Backend routing task",
+		Status:                "running",
+		Scope:                 "project",
+		RequestedBy:           "operator",
+		ExecutionIntent:       "read_only",
+		ExecutionIntentSource: "operator",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(backend) error = %v", err)
+	}
+	backendRun, err := store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:   backendTask.ID,
+		Executor: "openrouter_api",
+		Attempt:  1,
+		Status:   "running",
+	})
+	if err != nil {
+		t.Fatalf("StartRun(backend) error = %v", err)
+	}
+	if _, err := store.RecordRunArtifact(ctx, sqlite.RecordRunArtifactParams{
+		RunID:        backendRun.ID,
+		ArtifactType: "model_routing",
+		Summary:      "model routing decision",
+		DetailsJSON:  `{"route_name":"low-risk-backend-build","executor_lane":"openrouter_api","model_key":"openrouter-kimi-k2-6","provider_key":"openrouter","provider_model_id":"fixture/openrouter-kimi-k2-6","fallback_used":"false","policy_reason":"model_policy_allowed","task_class":"backend_build","risk_class":"low","latency_tier":"batch"}`,
+	}); err != nil {
+		t.Fatalf("RecordRunArtifact(backend) error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	var byRun bytes.Buffer
+	if err := Run(context.Background(), root, []string{"runs", "routing", "--run", strconv.FormatInt(frontendRun.ID, 10)}, strings.NewReader(""), &byRun); err != nil {
+		t.Fatalf("Run(runs routing --run) error = %v", err)
+	}
+	for _, want := range []string{
+		"run=1 task=frontend-routing-task status=running executor=openrouter_api",
+		"route_name=low-risk-frontend-build",
+		"model_key=openrouter-kimi-k2-6",
+		"provider_model_id=fixture/openrouter-kimi-k2-6",
+		"task_class=frontend_build",
+		"risk_class=low",
+	} {
+		if !strings.Contains(byRun.String(), want) {
+			t.Fatalf("runs routing --run output = %q, want %q", byRun.String(), want)
+		}
+	}
+
+	var byTask bytes.Buffer
+	if err := Run(context.Background(), root, []string{"runs", "routing", "--task", "elevated-routing-task", "--json"}, strings.NewReader(""), &byTask); err != nil {
+		t.Fatalf("Run(runs routing --task --json) error = %v", err)
+	}
+	var payload struct {
+		RunID        int64  `json:"run_id"`
+		TaskKey      string `json:"task_key"`
+		RouteName    string `json:"route_name"`
+		ExecutorLane string `json:"executor_lane"`
+		ModelKey     string `json:"model_key"`
+		ProviderKey  string `json:"provider_key"`
+		TaskClass    string `json:"task_class"`
+		RiskClass    string `json:"risk_class"`
+		Source       string `json:"source"`
+	}
+	if err := json.Unmarshal(byTask.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(routing) error = %v\n%s", err, byTask.String())
+	}
+	if payload.RunID != elevatedRun.ID ||
+		payload.TaskKey != "elevated-routing-task" ||
+		payload.RouteName != "elevated-frontend-build" ||
+		payload.ExecutorLane != "codex_headless" ||
+		payload.ModelKey != "codex-latest" ||
+		payload.ProviderKey != "openai" ||
+		payload.TaskClass != "frontend_build" ||
+		payload.RiskClass != "medium" ||
+		payload.Source != "run_artifact:model_routing" {
+		t.Fatalf("routing payload = %+v, want elevated Premium Codex fallback evidence", payload)
+	}
+	if strings.Contains(byTask.String(), "OPENROUTER_API_KEY") || strings.Contains(byTask.String(), "Bearer ") {
+		t.Fatalf("routing payload leaked secret-looking data: %s", byTask.String())
+	}
+
+	var backend bytes.Buffer
+	if err := Run(context.Background(), root, []string{"runs", "routing", "--task", "backend-routing-task"}, strings.NewReader(""), &backend); err != nil {
+		t.Fatalf("Run(runs routing --task backend) error = %v", err)
+	}
+	for _, want := range []string{
+		"route_name=low-risk-backend-build",
+		"executor_lane=openrouter_api",
+		"model_key=openrouter-kimi-k2-6",
+		"task_class=backend_build",
+		"risk_class=low",
+	} {
+		if !strings.Contains(backend.String(), want) {
+			t.Fatalf("backend routing output = %q, want %q", backend.String(), want)
 		}
 	}
 }

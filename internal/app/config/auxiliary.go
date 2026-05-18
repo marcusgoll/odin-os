@@ -2,7 +2,6 @@ package config
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 
@@ -10,15 +9,8 @@ import (
 )
 
 type ModelsFile struct {
-	Version int           `yaml:"version"`
-	Models  []ModelConfig `yaml:"models"`
-}
-
-type ModelConfig struct {
-	Key      string `yaml:"key"`
-	Provider string `yaml:"provider"`
-	Access   string `yaml:"access"`
-	Adapter  string `yaml:"adapter"`
+	Version int                          `yaml:"version"`
+	Models  []executorrouter.ModelConfig `yaml:"models"`
 }
 
 // TelemetryFile is intentionally narrow: runtime telemetry behavior comes from
@@ -66,28 +58,14 @@ func ValidateRepo(repoRoot string) error {
 }
 
 func LoadModels(path string) (ModelsFile, error) {
-	var raw ModelsFile
-	if err := decodeYAMLFile(path, &raw); err != nil {
+	registry, err := executorrouter.LoadModelRegistry(path)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ModelsFile{Version: 1}, nil
 		}
 		return ModelsFile{}, err
 	}
-	if raw.Version == 0 {
-		raw.Version = 1
-	}
-
-	bootstrapExecutors := executorrouter.BootstrapCatalogEntries()
-	for _, model := range raw.Models {
-		if model.Adapter == "" {
-			return ModelsFile{}, fmt.Errorf("model %q is missing adapter", model.Key)
-		}
-		if _, ok := bootstrapExecutors[model.Adapter]; !ok {
-			return ModelsFile{}, fmt.Errorf("model %q references unknown adapter %q", model.Key, model.Adapter)
-		}
-	}
-
-	return raw, nil
+	return ModelsFile{Version: registry.Version, Models: registry.Models}, nil
 }
 
 func LoadTelemetry(path string) (TelemetryFile, error) {

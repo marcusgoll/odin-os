@@ -34,6 +34,18 @@ _Avoid_: worker, provider
 An ephemeral execution unit spawned to advance one bounded step of work under Companion, policy, and scope constraints.
 _Avoid_: companion, persona
 
+**Provider Adapter**:
+The Odin executor edge that translates a governed TaskSpec to one external model provider, broker, or plan-backed CLI without owning policy or workflow state.
+_Avoid_: model authority, provider workflow, parallel executor
+
+**Model Route**:
+The deterministic routing decision that selects an executor/model candidate for a Work Item from Odin-owned task class, risk, capability, budget, health, and policy facts.
+_Avoid_: model preference, provider choice, prompt hint
+
+**Model Registry**:
+The authored Odin inventory of provider/model metadata used by executor routing, including provider identity, model key, access class, capability, budget, and policy constraints.
+_Avoid_: provider marketplace, executor registry, pricing spreadsheet
+
 **Intake Inbox**:
 The global intake surface where raw signals such as alerts, logs, prompts, and external events arrive before classification.
 _Avoid_: queue, backlog
@@ -192,6 +204,10 @@ _Avoid_: analytics scrape, crawler result
 - A **Managed Domain** is one kind of **Initiative**
 - A **Companion** is a durable role that may supervise or request **Worker** effort
 - A **Worker** performs bounded execution and does not own durable responsibility
+- A **Provider Adapter** belongs to the executor edge and must not bypass **Approval Request**, **Work Item**, **Run Attempt**, or policy state
+- A **Model Route** is chosen by deterministic Odin policy before execution; model output may advise but does not decide approvals, risk class, or external mutation authority
+- A **Model Registry** informs executor routing but does not count as runtime-proof by itself unless a real **Operator Surface** invokes the selected route and records audit evidence
+- Non-smoke OpenRouter **Model Routes** are limited to low-risk `frontend_build` and low-risk bounded `backend_build`; any elevated frontend or backend risk deterministically returns to the Premium Codex plan-backed lane with no external-model fallback
 - An **Operator Surface** is the human-facing entrypoint for governed state transitions over existing runtime authority
 - The **Intake Inbox** receives raw signals as durable **Intake Items** that belong to a **Workspace** first, before final **Initiative** or **Scope** resolution
 - **Initiative Intake** sits above project-specific intake workflows and decides whether an **Intake Item** belongs in **Managed Project** or **Managed Domain** handling

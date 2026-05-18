@@ -51,12 +51,48 @@ executors:
     model_ref: broker-default
 
 routes:
+  - name: low-risk-frontend-build
+    match:
+      task_kinds: [general, build]
+      scopes: [project, new-project]
+      task_classes: [frontend_build]
+      risk_classes: [low]
+    preferred: [openrouter_api]
+    fallback: [codex_headless]
+    model_ref_overrides:
+      openrouter_api: openrouter-kimi-k2-6
+  - name: elevated-frontend-build
+    match:
+      task_kinds: [general, build]
+      scopes: [project, new-project]
+      task_classes: [frontend_build]
+      risk_classes: [medium, high]
+    preferred: [codex_headless]
+    fallback: []
+  - name: low-risk-backend-build
+    match:
+      task_kinds: [general, build]
+      scopes: [project, new-project]
+      task_classes: [backend_build]
+      risk_classes: [low]
+    preferred: [openrouter_api]
+    fallback: [codex_headless]
+    model_ref_overrides:
+      openrouter_api: openrouter-kimi-k2-6
+  - name: elevated-backend-build
+    match:
+      task_kinds: [general, build]
+      scopes: [project, new-project]
+      task_classes: [backend_build]
+      risk_classes: [medium, high]
+    preferred: [codex_headless]
+    fallback: []
   - name: default
     match:
       task_kinds: [general, plan, build, review, qa]
       scopes: [global, odin-core, project, new-project]
     preferred: [codex_headless, claude_code_headless]
-    fallback: [anthropic_api, openrouter_api]
+    fallback: [anthropic_api]
   - name: research
     match:
       task_kinds: [research]

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"odin-os/internal/executors/contract"
 	integrationproviders "odin-os/internal/integrations/providers"
@@ -16,19 +17,28 @@ var (
 )
 
 type Selector struct {
-	Config    Config
-	Executors map[string]contract.Executor
+	Config        Config
+	ModelRegistry ModelRegistry
+	Executors     map[string]contract.Executor
 }
 
 type Decision struct {
-	RouteName    string
-	ExecutorKey  string
-	FallbackUsed bool
-	Considered   []CandidateDecision
+	RouteName           string
+	ExecutorKey         string
+	ModelKey            string
+	ProviderKey         string
+	ProviderModelID     string
+	FallbackUsed        bool
+	PolicyReason        string
+	EstimatedCostUSD    float64
+	ContextWindowTokens int
+	LatencyTier         string
+	Considered          []CandidateDecision
 }
 
 type CandidateDecision struct {
 	ExecutorKey string
+	ModelKey    string
 	Reason      string
 }
 
@@ -56,6 +66,11 @@ func (selector Selector) Select(ctx context.Context, spec contract.TaskSpec) (De
 		}
 		if !executorConfig.Enabled {
 			decision.Considered = append(decision.Considered, CandidateDecision{ExecutorKey: key, Reason: "disabled"})
+			continue
+		}
+		model, modelDecision, ok := selector.modelAllowed(route, executorConfig, spec)
+		if !ok {
+			decision.Considered = append(decision.Considered, modelDecision)
 			continue
 		}
 
@@ -90,7 +105,14 @@ func (selector Selector) Select(ctx context.Context, spec contract.TaskSpec) (De
 		}
 
 		decision.ExecutorKey = key
+		decision.ModelKey = model.Key
+		decision.ProviderKey = model.Provider
+		decision.ProviderModelID = model.ProviderModelID
 		decision.FallbackUsed = index >= len(route.Preferred)
+		decision.PolicyReason = "model_policy_allowed"
+		decision.EstimatedCostUSD = model.EstimatedCostUSD(spec.Budget.MaxInputTokens, spec.Budget.MaxOutputTokens)
+		decision.ContextWindowTokens = model.ContextWindowTokens
+		decision.LatencyTier = model.LatencyTier
 		return decision, nil
 	}
 
@@ -105,9 +127,158 @@ func (selector Selector) matchRoute(spec contract.TaskSpec) (RouteConfig, bool) 
 		if len(route.Match.Scopes) > 0 && !hasString(route.Match.Scopes, spec.Scope) {
 			continue
 		}
+		if len(route.Match.TaskClasses) > 0 && !hasNormalizedString(route.Match.TaskClasses, normalizedTaskClass(spec)) {
+			continue
+		}
+		if len(route.Match.RiskClasses) > 0 && !hasNormalizedString(route.Match.RiskClasses, normalizedRiskClass(spec)) {
+			continue
+		}
 		return route, true
 	}
 	return RouteConfig{}, false
+}
+
+func (selector Selector) modelAllowed(route RouteConfig, executor ExecutorConfig, spec contract.TaskSpec) (ModelConfig, CandidateDecision, bool) {
+	if !selector.ModelRegistry.HasModels() {
+		return ModelConfig{}, CandidateDecision{ExecutorKey: executor.Key, Reason: "model_registry_not_configured"}, true
+	}
+	decision := CandidateDecision{ExecutorKey: executor.Key}
+	modelRef := routeModelRef(route, executor)
+	if strings.TrimSpace(modelRef) == "" {
+		decision.Reason = "missing_model_ref"
+		return ModelConfig{}, decision, false
+	}
+	model, ok := selector.ModelRegistry.ModelByKey(modelRef)
+	if !ok {
+		decision.ModelKey = modelRef
+		decision.Reason = "missing_model_config"
+		return ModelConfig{}, decision, false
+	}
+	decision.ModelKey = model.Key
+	if !model.IsEnabled() {
+		decision.Reason = "model_disabled"
+		return ModelConfig{}, decision, false
+	}
+	if model.Adapter != executor.Adapter {
+		decision.Reason = "model_adapter_mismatch"
+		return ModelConfig{}, decision, false
+	}
+	if blockedByModelTaskClass(model, spec) {
+		decision.Reason = "blocked_task_class"
+		return ModelConfig{}, decision, false
+	}
+	if !modelSupportsTaskClass(model, spec) {
+		decision.Reason = "unsupported_task_class"
+		return ModelConfig{}, decision, false
+	}
+	if !modelSupportsCapabilities(model, spec.Requirements.CapabilityNeeds) {
+		decision.Reason = "model_capability_mismatch"
+		return ModelConfig{}, decision, false
+	}
+	if exceedsModelContext(model, spec) {
+		decision.Reason = "context_limit_exceeded"
+		return ModelConfig{}, decision, false
+	}
+	if spec.Budget.MaxCostUSD > 0 && model.EstimatedCostUSD(spec.Budget.MaxInputTokens, spec.Budget.MaxOutputTokens) > spec.Budget.MaxCostUSD {
+		decision.Reason = "budget_exceeded"
+		return ModelConfig{}, decision, false
+	}
+	if isHighRiskSpec(spec) && !model.AllowHighRisk && strings.TrimSpace(model.Access) != string(contract.ExecutorClassPlanBackedCLI) {
+		decision.Reason = "high_risk_model_blocked"
+		return ModelConfig{}, decision, false
+	}
+	return model, decision, true
+}
+
+func routeModelRef(route RouteConfig, executor ExecutorConfig) string {
+	if route.ModelRefOverrides != nil {
+		if override := strings.TrimSpace(route.ModelRefOverrides[executor.Key]); override != "" {
+			return override
+		}
+	}
+	return strings.TrimSpace(executor.ModelRef)
+}
+
+func blockedByModelTaskClass(model ModelConfig, spec contract.TaskSpec) bool {
+	taskClass := normalizedTaskClass(spec)
+	if taskClass == "" {
+		return false
+	}
+	return hasNormalizedString(model.BlockedTaskClasses, taskClass)
+}
+
+func modelSupportsTaskClass(model ModelConfig, spec contract.TaskSpec) bool {
+	taskClass := normalizedTaskClass(spec)
+	if taskClass == "" {
+		taskClass = strings.ToLower(strings.TrimSpace(string(spec.Kind)))
+	}
+	if len(normalizeTokens(model.SupportedTaskClasses)) == 0 {
+		return true
+	}
+	return hasNormalizedString(model.SupportedTaskClasses, taskClass)
+}
+
+func modelSupportsCapabilities(model ModelConfig, needs []string) bool {
+	for _, need := range normalizeTokens(needs) {
+		if !hasNormalizedString(model.Capabilities, need) && !hasNormalizedString(model.SupportedFeatures, need) {
+			return false
+		}
+	}
+	return true
+}
+
+func exceedsModelContext(model ModelConfig, spec contract.TaskSpec) bool {
+	if spec.Budget.MaxInputTokens > 0 && model.MaxInputTokens > 0 && spec.Budget.MaxInputTokens > model.MaxInputTokens {
+		return true
+	}
+	if spec.Budget.MaxOutputTokens > 0 && model.MaxOutputTokens > 0 && spec.Budget.MaxOutputTokens > model.MaxOutputTokens {
+		return true
+	}
+	total := spec.Budget.MaxInputTokens + spec.Budget.MaxOutputTokens
+	return total > 0 && model.ContextWindowTokens > 0 && total > model.ContextWindowTokens
+}
+
+func isHighRiskSpec(spec contract.TaskSpec) bool {
+	riskClass := normalizedRiskClass(spec)
+	switch riskClass {
+	case "high", "high_risk", "consequential", "external_world", "governance", "destructive":
+		return true
+	}
+	switch normalizedTaskClass(spec) {
+	case "finance", "legal", "medical", "security_decision", "approval_resolution", "production_deploy", "public_publish":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizedRiskClass(spec contract.TaskSpec) string {
+	riskClass := strings.ToLower(strings.TrimSpace(spec.RiskClass))
+	if riskClass == "" && spec.Metadata != nil {
+		riskClass = strings.ToLower(strings.TrimSpace(spec.Metadata["risk_class"]))
+	}
+	return riskClass
+}
+
+func normalizedTaskClass(spec contract.TaskSpec) string {
+	taskClass := strings.ToLower(strings.TrimSpace(spec.TaskClass))
+	if taskClass == "" && spec.Metadata != nil {
+		taskClass = strings.ToLower(strings.TrimSpace(spec.Metadata["task_class"]))
+	}
+	return taskClass
+}
+
+func hasNormalizedString(values []string, value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return false
+	}
+	for _, candidate := range values {
+		if strings.ToLower(strings.TrimSpace(candidate)) == value {
+			return true
+		}
+	}
+	return false
 }
 
 func hasTaskKind(values []contract.TaskKind, value contract.TaskKind) bool {

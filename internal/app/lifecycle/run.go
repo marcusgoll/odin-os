@@ -57,6 +57,7 @@ import (
 	runtimenotifications "odin-os/internal/runtime/notifications"
 	runtimeoverview "odin-os/internal/runtime/overview"
 	"odin-os/internal/runtime/projections"
+	openroutersmoke "odin-os/internal/runtime/providers/openrouter_smoke"
 	"odin-os/internal/runtime/recovery"
 	"odin-os/internal/runtime/reviewqueue"
 	"odin-os/internal/runtime/runs"
@@ -75,7 +76,8 @@ import (
 
 var errRuntimeNotReady = errors.New("runtime not ready")
 
-const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal mobile browser x task initiative companion profile followup trigger scheduler transition skills design e2e\n\nRun detail: odin runs show <id>"
+const rootUsageBanner = "Usage: odin <command> [args]\n\nCommands: help repl overview capabilities tui doctor healthcheck serve backup restore verify-backup status legacy project workspace work scope jobs runs leases approvals review intake agenda logs knowledge memory goal mobile browser x task initiative companion profile followup trigger scheduler transition skills design provider e2e\n\nRun detail: odin runs show <id>"
+const runsUsage = "usage: odin runs [--json] | odin runs show <run-id> | odin runs routing (--run <run-id>|--task <id|key>) [--json]"
 
 const schedulerUsage = "usage: odin scheduler tick [now=<RFC3339>] [recovery=<true|false>] [--dry-run|dry_run=<true|false>] [--json]"
 const capabilitiesUsage = "usage: odin capabilities list [--kind agent|skill|workflow|command|tool] [--scope <scope>] [--json]\n       odin capabilities show <id> [--version <version>] [--json]"
@@ -332,6 +334,7 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 				Registry:           app.Registry,
 				Executors:          app.Executors,
 				ExecutorConfig:     app.ExecutorConfig,
+				ModelRegistry:      app.ModelRegistry,
 				PromptRenderer:     app.PromptRenderer,
 				PromptTemplateName: app.PromptTemplateName,
 				Transitions:        projects.Service{Store: app.Store},
@@ -397,6 +400,8 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return runSkills(ctx, app, args[1:], stdout)
 	case "design":
 		return runDesign(ctx, app, args[1:], stdout)
+	case "provider":
+		return runProvider(ctx, app, args[1:], stdout)
 	case "doctor":
 		return runDoctor(ctx, app, cfg, args[1:], stdout)
 	case "healthcheck":
@@ -1340,7 +1345,7 @@ func runRuns(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 	if len(remaining) > 0 {
 		if strings.EqualFold(remaining[0], "show") {
 			if jsonOutput || len(remaining) != 2 {
-				return fmt.Errorf("usage: odin runs [--json] | odin runs show <run-id>")
+				return fmt.Errorf(runsUsage)
 			}
 			runID, err := strconv.ParseInt(remaining[1], 10, 64)
 			if err != nil || runID <= 0 {
@@ -1357,7 +1362,10 @@ func runRuns(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 			_, err = fmt.Fprint(stdout, clirender.RenderRunDetail(detail))
 			return err
 		}
-		return fmt.Errorf("usage: odin runs [--json] | odin runs show <run-id>")
+		if strings.EqualFold(remaining[0], "routing") {
+			return runRunsRouting(ctx, app, remaining[1:], jsonOutput, stdout)
+		}
+		return fmt.Errorf(runsUsage)
 	}
 
 	state, err := loadCLIState(app)
@@ -1399,6 +1407,41 @@ func runRuns(ctx context.Context, app bootstrap.App, args []string, stdout io.Wr
 		}
 	}
 	return nil
+}
+
+func runRunsRouting(ctx context.Context, app bootstrap.App, args []string, jsonOutput bool, stdout io.Writer) error {
+	if len(args) != 2 {
+		return fmt.Errorf(runsUsage)
+	}
+	state, err := loadCLIState(app)
+	if err != nil {
+		return err
+	}
+	service := runs.Service{DB: app.Store.DB(), Store: app.Store}
+	var readback runs.ModelRoutingReadback
+	switch args[0] {
+	case "--run":
+		runID, err := strconv.ParseInt(args[1], 10, 64)
+		if err != nil || runID <= 0 {
+			return fmt.Errorf("run id must be a positive integer")
+		}
+		readback, err = service.ModelRoutingForRun(ctx, state.Scope, runID)
+		if err != nil {
+			return err
+		}
+	case "--task":
+		readback, err = service.ModelRoutingForTask(ctx, state.Scope, args[1])
+		if err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf(runsUsage)
+	}
+	if jsonOutput {
+		return commands.WriteJSON(stdout, readback)
+	}
+	_, err = fmt.Fprint(stdout, clirender.RenderModelRouting(readback))
+	return err
 }
 
 func runLeases(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
@@ -1469,6 +1512,323 @@ func runLeasesCleanup(ctx context.Context, app bootstrap.App, args []string, std
 	return err
 }
 
+func runProvider(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
+	if len(args) < 3 || !strings.EqualFold(args[0], "openrouter") || !strings.EqualFold(args[1], "smoke") {
+		return fmt.Errorf(openRouterSmokeUsage)
+	}
+	if manifest, ok := app.Registry.Lookup("odin-core"); ok {
+		if _, err := (projects.Service{Store: app.Store}).RegisterManagedProject(ctx, manifest); err != nil {
+			return err
+		}
+	}
+	service := openroutersmoke.Service{
+		Store:         app.Store,
+		ModelRegistry: app.ModelRegistry,
+		ProjectKey:    "odin-core",
+		Getenv:        os.Getenv,
+	}
+	switch strings.ToLower(strings.TrimSpace(args[2])) {
+	case "prepare":
+		modelKey, jsonOutput, err := parseOpenRouterSmokePrepareArgs(args[3:])
+		if err != nil {
+			return err
+		}
+		result, err := service.Prepare(ctx, openroutersmoke.PrepareParams{ModelKey: modelKey})
+		if err != nil {
+			return err
+		}
+		view := openRouterSmokePrepareView{
+			TaskID:           result.Task.ID,
+			TaskKey:          result.Task.Key,
+			PrepareRunID:     result.Run.ID,
+			ApprovalID:       result.Approval.ID,
+			Status:           result.Approval.Status,
+			ProviderKey:      openroutersmoke.ProviderKey,
+			ModelKey:         modelKeyOrDefault(modelKey),
+			ProviderModelID:  result.ProviderModelID,
+			RequestSHA256:    result.RequestSHA256,
+			NetworkAccess:    false,
+			FixtureTransport: true,
+			ApprovalRequired: true,
+			ExactRunCommand:  result.ExactRunCommand,
+			MaxOutputTokens:  result.MaxOutputTokens,
+		}
+		if jsonOutput {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "approval=%d task=%s run=%d provider=openrouter model=%s network_access=false fixture_transport=true next=\"%s\"\n", result.Approval.ID, result.Task.Key, result.Run.ID, view.ModelKey, result.ExactRunCommand)
+		return err
+	case "run":
+		parsed, err := parseOpenRouterSmokeRunArgs(args[3:])
+		if err != nil {
+			return err
+		}
+		result, err := service.Run(ctx, openroutersmoke.RunParams{
+			ApprovalID:  parsed.ApprovalID,
+			ModelKey:    parsed.ModelKey,
+			Live:        parsed.Live,
+			ConfirmLive: parsed.ConfirmLive,
+		})
+		if err != nil {
+			return err
+		}
+		view := openRouterSmokeRunView{
+			TaskID:           result.Task.ID,
+			TaskKey:          result.Task.Key,
+			RunID:            result.Run.ID,
+			ApprovalID:       result.Approval.ID,
+			Status:           result.Run.Status,
+			ProviderKey:      openroutersmoke.ProviderKey,
+			ModelKey:         modelKeyOrDefault(parsed.ModelKey),
+			ProviderModelID:  result.ProviderModelID,
+			RequestSHA256:    result.RequestSHA256,
+			ResponseID:       result.ResponseID,
+			PromptTokens:     result.PromptTokens,
+			CompletionTokens: result.OutputTokens,
+			NetworkAccess:    result.NetworkAccess,
+			FixtureTransport: false,
+			Redaction:        "applied",
+		}
+		if parsed.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "run=%d approval=%d provider=openrouter model=%s status=%s network_access=true redaction=applied\n", result.Run.ID, result.Approval.ID, view.ModelKey, result.Run.Status)
+		return err
+	case "evidence":
+		parsed, err := parseOpenRouterSmokeEvidenceArgs(args[3:])
+		if err != nil {
+			return err
+		}
+		result, err := service.Evidence(ctx, openroutersmoke.EvidenceParams{
+			ApprovalID: parsed.ApprovalID,
+			RunID:      parsed.RunID,
+		})
+		if err != nil {
+			return err
+		}
+		if parsed.JSON {
+			return commands.WriteJSON(stdout, result)
+		}
+		liveRun := "none"
+		if result.LiveRunID != nil {
+			liveRun = strconv.FormatInt(*result.LiveRunID, 10)
+		}
+		_, err = fmt.Fprintf(stdout, "approval=%d prepare_run=%d live_run=%s status=%s provider=%s model=%s network_access=%t redaction_proven=%t secret_leak_detected=%t raw_prompt_leak_detected=%t events=%d\n",
+			result.ApprovalID,
+			result.PrepareRunID,
+			liveRun,
+			result.Status,
+			result.ProviderKey,
+			result.ModelKey,
+			result.NetworkAccess,
+			result.RedactionProven,
+			result.SecretLeakDetected,
+			result.RawPromptLeakDetected,
+			result.EventCount,
+		)
+		return err
+	default:
+		return fmt.Errorf(openRouterSmokeUsage)
+	}
+}
+
+const openRouterSmokeUsage = "usage: odin provider openrouter smoke prepare --model <model-key> [--json] | odin provider openrouter smoke run --approval <approval-id> --model <model-key> --live --confirm-live-provider-call [--json] | odin provider openrouter smoke evidence (--approval <approval-id>|--run <run-id>) [--json]"
+
+type openRouterSmokePrepareView struct {
+	TaskID           int64  `json:"task_id"`
+	TaskKey          string `json:"task_key"`
+	PrepareRunID     int64  `json:"prepare_run_id"`
+	ApprovalID       int64  `json:"approval_id"`
+	Status           string `json:"status"`
+	ProviderKey      string `json:"provider_key"`
+	ModelKey         string `json:"model_key"`
+	ProviderModelID  string `json:"provider_model_id"`
+	RequestSHA256    string `json:"request_sha256"`
+	NetworkAccess    bool   `json:"network_access"`
+	FixtureTransport bool   `json:"fixture_transport"`
+	ApprovalRequired bool   `json:"approval_required"`
+	ExactRunCommand  string `json:"exact_run_command"`
+	MaxOutputTokens  int    `json:"max_output_tokens"`
+}
+
+type openRouterSmokeRunView struct {
+	TaskID           int64  `json:"task_id"`
+	TaskKey          string `json:"task_key"`
+	RunID            int64  `json:"run_id"`
+	ApprovalID       int64  `json:"approval_id"`
+	Status           string `json:"status"`
+	ProviderKey      string `json:"provider_key"`
+	ModelKey         string `json:"model_key"`
+	ProviderModelID  string `json:"provider_model_id"`
+	RequestSHA256    string `json:"request_sha256"`
+	ResponseID       string `json:"response_id"`
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens"`
+	NetworkAccess    bool   `json:"network_access"`
+	FixtureTransport bool   `json:"fixture_transport"`
+	Redaction        string `json:"redaction"`
+}
+
+type openRouterSmokeRunArgs struct {
+	ApprovalID  int64
+	ModelKey    string
+	Live        bool
+	ConfirmLive bool
+	JSON        bool
+}
+
+type openRouterSmokeEvidenceArgs struct {
+	ApprovalID int64
+	RunID      int64
+	JSON       bool
+}
+
+func parseOpenRouterSmokePrepareArgs(args []string) (string, bool, error) {
+	modelKey := "openrouter-kimi-k2-6"
+	jsonOutput := false
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--json":
+			jsonOutput = true
+		case "--model":
+			index++
+			if index >= len(args) || strings.TrimSpace(args[index]) == "" {
+				return "", false, fmt.Errorf("usage: odin provider openrouter smoke prepare --model <model-key> [--json]")
+			}
+			modelKey = strings.TrimSpace(args[index])
+		default:
+			return "", false, fmt.Errorf("unknown provider openrouter smoke prepare argument: %s", args[index])
+		}
+	}
+	return modelKey, jsonOutput, nil
+}
+
+func parseOpenRouterSmokeRunArgs(args []string) (openRouterSmokeRunArgs, error) {
+	parsed := openRouterSmokeRunArgs{ModelKey: "openrouter-kimi-k2-6"}
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--json":
+			parsed.JSON = true
+		case "--live":
+			parsed.Live = true
+		case "--confirm-live-provider-call":
+			parsed.ConfirmLive = true
+		case "--model":
+			index++
+			if index >= len(args) || strings.TrimSpace(args[index]) == "" {
+				return openRouterSmokeRunArgs{}, fmt.Errorf("usage: odin provider openrouter smoke run --approval <approval-id> --model <model-key> --live --confirm-live-provider-call [--json]")
+			}
+			parsed.ModelKey = strings.TrimSpace(args[index])
+		case "--approval":
+			index++
+			if index >= len(args) {
+				return openRouterSmokeRunArgs{}, fmt.Errorf("usage: odin provider openrouter smoke run --approval <approval-id> --model <model-key> --live --confirm-live-provider-call [--json]")
+			}
+			approvalID, err := strconv.ParseInt(args[index], 10, 64)
+			if err != nil || approvalID <= 0 {
+				return openRouterSmokeRunArgs{}, fmt.Errorf("approval id must be a positive integer")
+			}
+			parsed.ApprovalID = approvalID
+		default:
+			return openRouterSmokeRunArgs{}, fmt.Errorf("unknown provider openrouter smoke run argument: %s", args[index])
+		}
+	}
+	if parsed.ApprovalID <= 0 || !parsed.Live || !parsed.ConfirmLive {
+		return openRouterSmokeRunArgs{}, fmt.Errorf("usage: odin provider openrouter smoke run --approval <approval-id> --model <model-key> --live --confirm-live-provider-call [--json]")
+	}
+	return parsed, nil
+}
+
+func parseOpenRouterSmokeEvidenceArgs(args []string) (openRouterSmokeEvidenceArgs, error) {
+	parsed := openRouterSmokeEvidenceArgs{}
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--json":
+			parsed.JSON = true
+		case "--approval":
+			index++
+			if index >= len(args) {
+				return openRouterSmokeEvidenceArgs{}, fmt.Errorf("usage: odin provider openrouter smoke evidence (--approval <approval-id>|--run <run-id>) [--json]")
+			}
+			approvalID, err := strconv.ParseInt(args[index], 10, 64)
+			if err != nil || approvalID <= 0 {
+				return openRouterSmokeEvidenceArgs{}, fmt.Errorf("approval id must be a positive integer")
+			}
+			parsed.ApprovalID = approvalID
+		case "--run":
+			index++
+			if index >= len(args) {
+				return openRouterSmokeEvidenceArgs{}, fmt.Errorf("usage: odin provider openrouter smoke evidence (--approval <approval-id>|--run <run-id>) [--json]")
+			}
+			runID, err := strconv.ParseInt(args[index], 10, 64)
+			if err != nil || runID <= 0 {
+				return openRouterSmokeEvidenceArgs{}, fmt.Errorf("run id must be a positive integer")
+			}
+			parsed.RunID = runID
+		default:
+			return openRouterSmokeEvidenceArgs{}, fmt.Errorf("unknown provider openrouter smoke evidence argument: %s", args[index])
+		}
+	}
+	if (parsed.ApprovalID <= 0 && parsed.RunID <= 0) || (parsed.ApprovalID > 0 && parsed.RunID > 0) {
+		return openRouterSmokeEvidenceArgs{}, fmt.Errorf("usage: odin provider openrouter smoke evidence (--approval <approval-id>|--run <run-id>) [--json]")
+	}
+	return parsed, nil
+}
+
+func modelKeyOrDefault(modelKey string) string {
+	if strings.TrimSpace(modelKey) == "" {
+		return "openrouter-kimi-k2-6"
+	}
+	return strings.TrimSpace(modelKey)
+}
+
+type openRouterSmokeApprovalView struct {
+	ProviderKey      string `json:"provider_key"`
+	ModelKey         string `json:"model_key"`
+	ProviderModelID  string `json:"provider_model_id"`
+	RequestSHA256    string `json:"request_sha256"`
+	NetworkAccess    bool   `json:"network_access"`
+	FixtureTransport bool   `json:"fixture_transport"`
+	ApprovalRequired bool   `json:"approval_required"`
+	ExactRunCommand  string `json:"exact_run_command"`
+	MaxOutputTokens  int    `json:"max_output_tokens"`
+}
+
+func openRouterSmokeApprovalContext(ctx context.Context, store *sqlite.Store, approval sqlite.Approval) *openRouterSmokeApprovalView {
+	if store == nil || approval.RunID == nil {
+		return nil
+	}
+	artifacts, err := store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{RunID: *approval.RunID, ArtifactType: openroutersmoke.RequestType})
+	if err != nil || len(artifacts) == 0 {
+		return nil
+	}
+	var details struct {
+		ProviderKey      string `json:"provider_key"`
+		ModelKey         string `json:"model_key"`
+		ProviderModelID  string `json:"provider_model_id"`
+		RequestSHA256    string `json:"request_sha256"`
+		NetworkAccess    bool   `json:"network_access"`
+		FixtureTransport bool   `json:"fixture_transport"`
+		ApprovalRequired bool   `json:"approval_required"`
+		ExactRunCommand  string `json:"exact_run_command"`
+		MaxOutputTokens  int    `json:"max_output_tokens"`
+	}
+	if err := json.Unmarshal([]byte(artifacts[len(artifacts)-1].DetailsJSON), &details); err != nil {
+		return nil
+	}
+	return &openRouterSmokeApprovalView{
+		ProviderKey:      details.ProviderKey,
+		ModelKey:         details.ModelKey,
+		ProviderModelID:  details.ProviderModelID,
+		RequestSHA256:    details.RequestSHA256,
+		NetworkAccess:    true,
+		FixtureTransport: details.FixtureTransport,
+		ApprovalRequired: details.ApprovalRequired,
+		ExactRunCommand:  strings.Replace(details.ExactRunCommand, "<approval-id>", strconv.FormatInt(approval.ID, 10), 1),
+		MaxOutputTokens:  details.MaxOutputTokens,
+	}
+}
+
 func renderLeaseCleanupPreview(ctx context.Context, app bootstrap.App, preview worktrees.CleanupPreview, stdout io.Writer) error {
 	if len(preview.Leases) == 0 {
 		_, err := fmt.Fprintln(stdout, "no worktree leases")
@@ -1524,6 +1884,7 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 		if err != nil {
 			return err
 		}
+		smokeContext := openRouterSmokeApprovalContext(ctx, app.Store, detail.Approval)
 		if jsonOutput {
 			resolverSupport := string(detail.ResolverSupport)
 			reason := approvalOperatorReason(detail.Approval.Status, resolverSupport)
@@ -1534,20 +1895,21 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 			nextSteps := approvalOperatorNextSteps(detail.Approval.ID, detail.Approval.Status, resolverSupport)
 			onApprove := approvalOperatorOnApprove(resolverSupport)
 			return commands.WriteJSON(stdout, struct {
-				ID              int64    `json:"id"`
-				Status          string   `json:"status"`
-				TaskID          int64    `json:"task_id"`
-				TaskKey         string   `json:"task_key"`
-				TaskStatus      string   `json:"task_status"`
-				RunID           *int64   `json:"run_id,omitempty"`
-				DecisionBy      string   `json:"decision_by,omitempty"`
-				Reason          string   `json:"reason,omitempty"`
-				ResolverSupport string   `json:"resolver_support"`
-				Source          string   `json:"source,omitempty"`
-				Risk            string   `json:"risk,omitempty"`
-				AllowedActions  []string `json:"allowed_actions,omitempty"`
-				NextSteps       string   `json:"next_steps,omitempty"`
-				OnApprove       string   `json:"on_approve,omitempty"`
+				ID              int64                        `json:"id"`
+				Status          string                       `json:"status"`
+				TaskID          int64                        `json:"task_id"`
+				TaskKey         string                       `json:"task_key"`
+				TaskStatus      string                       `json:"task_status"`
+				RunID           *int64                       `json:"run_id,omitempty"`
+				DecisionBy      string                       `json:"decision_by,omitempty"`
+				Reason          string                       `json:"reason,omitempty"`
+				ResolverSupport string                       `json:"resolver_support"`
+				Source          string                       `json:"source,omitempty"`
+				Risk            string                       `json:"risk,omitempty"`
+				AllowedActions  []string                     `json:"allowed_actions,omitempty"`
+				NextSteps       string                       `json:"next_steps,omitempty"`
+				OnApprove       string                       `json:"on_approve,omitempty"`
+				OpenRouterSmoke *openRouterSmokeApprovalView `json:"openrouter_live_smoke,omitempty"`
 			}{
 				ID:              detail.Approval.ID,
 				Status:          detail.Approval.Status,
@@ -1563,6 +1925,7 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 				AllowedActions:  allowedActions,
 				NextSteps:       nextSteps,
 				OnApprove:       onApprove,
+				OpenRouterSmoke: smokeContext,
 			})
 		}
 		resolverSupport := string(detail.ResolverSupport)
@@ -1586,6 +1949,11 @@ func runApprovals(ctx context.Context, app bootstrap.App, args []string, stdout 
 		}
 		if _, err := fmt.Fprintf(stdout, "next_steps=%s\n", approvalOperatorNextSteps(detail.Approval.ID, detail.Approval.Status, resolverSupport)); err != nil {
 			return err
+		}
+		if smokeContext != nil {
+			if _, err := fmt.Fprintf(stdout, "openrouter_live_smoke provider=%s model=%s provider_model_id=%s network_access=true request_sha256=%s max_output_tokens=%d exact_run_command=%s\n", smokeContext.ProviderKey, smokeContext.ModelKey, smokeContext.ProviderModelID, smokeContext.RequestSHA256, smokeContext.MaxOutputTokens, smokeContext.ExactRunCommand); err != nil {
+				return err
+			}
 		}
 		_, err = fmt.Fprintf(stdout, "on_approve=%s\n", approvalOperatorOnApprove(resolverSupport))
 		return err
@@ -1761,10 +2129,11 @@ func runIntake(ctx context.Context, app bootstrap.App, stdin io.Reader, args []s
 	})
 
 	jobService := jobs.Service{
-		Store:       app.Store,
-		Registry:    app.Registry,
-		Transitions: projects.Service{Store: app.Store},
-		Now:         time.Now,
+		Store:         app.Store,
+		Registry:      app.Registry,
+		ModelRegistry: app.ModelRegistry,
+		Transitions:   projects.Service{Store: app.Store},
+		Now:           time.Now,
 	}
 	task, err := jobService.CreateTaskFromActWithAction(ctx, resolved, command.Title, command.ActionKey)
 	if err != nil {
@@ -5802,6 +6171,7 @@ func newJobService(app bootstrap.App) servedJobService {
 			Registry:           app.Registry,
 			Executors:          app.Executors,
 			ExecutorConfig:     app.ExecutorConfig,
+			ModelRegistry:      app.ModelRegistry,
 			PromptRenderer:     app.PromptRenderer,
 			PromptTemplateName: app.PromptTemplateName,
 			Transitions:        projects.Service{Store: app.Store},
@@ -5895,6 +6265,7 @@ func newShell(app bootstrap.App, nowOverride ...func() time.Time) (*repl.Shell, 
 		SessionStore:        app.SessionStore,
 		CommandService:      servedCommandService{app: app},
 		ExecutorConfig:      app.ExecutorConfig,
+		ModelRegistry:       app.ModelRegistry,
 		Executors:           app.Executors,
 		ReviewQueueProjection: func(ctx context.Context) (reviewqueue.Projection, error) {
 			return readReviewQueueProjection(ctx, app)
@@ -6595,6 +6966,7 @@ func runServe(ctx context.Context, app bootstrap.App, cfg appconfig.Config, stdo
 		Registry:           app.Registry,
 		Executors:          app.Executors,
 		ExecutorConfig:     app.ExecutorConfig,
+		ModelRegistry:      app.ModelRegistry,
 		PromptRenderer:     app.PromptRenderer,
 		PromptTemplateName: app.PromptTemplateName,
 		Transitions:        projects.Service{Store: app.Store},

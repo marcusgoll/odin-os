@@ -21,7 +21,7 @@ import (
 	trackerintake "odin-os/internal/tracker/intake"
 )
 
-const workUsage = "usage: odin work status [--json]|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
+const workUsage = "usage: odin work status [--json]|profiles|start --project <key> --title <text> [--intent <read_only|mutation|governance|destructive>]|intake --project <key> [--dry-run]|reconcile --project <key>|route-preview --task <id|key> [--json]|dispatch [--task <id|key>] [--json]|execute --task <id|key> [--json]|retry --task <id|key> [--json]"
 
 var newIntakeTracker = trackerintake.NewGitHubTracker
 
@@ -54,6 +54,34 @@ type workDispatchRunView struct {
 	Status   string `json:"status"`
 	Attempt  int    `json:"attempt"`
 	Summary  string `json:"summary,omitempty"`
+}
+
+type workRoutePreviewView struct {
+	DryRun              bool                  `json:"dry_run"`
+	RunCreated          bool                  `json:"run_created"`
+	Task                workDispatchTaskView  `json:"task"`
+	ProjectKey          string                `json:"project_key"`
+	TaskKind            string                `json:"task_kind"`
+	TaskClass           string                `json:"task_class"`
+	RiskClass           string                `json:"risk_class"`
+	Requirements        workRouteRequirements `json:"requirements"`
+	RouteName           string                `json:"route_name"`
+	ExecutorLane        string                `json:"executor_lane"`
+	ModelKey            string                `json:"model_key,omitempty"`
+	ProviderKey         string                `json:"provider_key,omitempty"`
+	ProviderModelID     string                `json:"provider_model_id,omitempty"`
+	FallbackUsed        bool                  `json:"fallback_used"`
+	PolicyReason        string                `json:"policy_reason,omitempty"`
+	EstimatedCostUSD    float64               `json:"estimated_cost_usd,omitempty"`
+	ContextWindowTokens int                   `json:"context_window_tokens,omitempty"`
+	LatencyTier         string                `json:"latency_tier,omitempty"`
+}
+
+type workRouteRequirements struct {
+	AllowedClasses    []string `json:"allowed_classes,omitempty"`
+	CapabilityNeeds   []string `json:"capability_needs,omitempty"`
+	NeedsTools        bool     `json:"needs_tools,omitempty"`
+	NeedsHeadlessPlan bool     `json:"needs_headless_plan,omitempty"`
 }
 
 type workStatusView struct {
@@ -92,6 +120,8 @@ func RunWork(ctx context.Context, store *sqlite.Store, projectRegistry projects.
 		return runWorkIntake(ctx, store, projectRegistry, args[1:], stdout)
 	case "reconcile":
 		return runWorkReconcile(ctx, store, projectRegistry, args[1:], stdout)
+	case "route-preview":
+		return runWorkRoutePreview(ctx, store, projectRegistry, args[1:], stdout, options...)
 	case "dispatch":
 		return runWorkDispatch(ctx, store, projectRegistry, args[1:], stdout, options...)
 	case "execute":
@@ -218,6 +248,58 @@ func runWorkStatus(ctx context.Context, store *sqlite.Store, projectRegistry pro
 		view.LegacyFallbackWorkItems,
 		view.Dispatch,
 		view.Intake,
+	)
+	return err
+}
+
+func runWorkRoutePreview(ctx context.Context, store *sqlite.Store, projectRegistry projects.Registry, args []string, stdout io.Writer, options ...WorkOptions) error {
+	params := parseWorkStartArgs(args)
+	jsonOutput := parseBoolFlag(params, "json")
+	if _, ok := params["help"]; ok {
+		_, err := fmt.Fprintln(stdout, "usage: odin work route-preview --task <id|key> [--json]")
+		return err
+	}
+	if err := rejectUnknownWorkArgs(params, "task", "json"); err != nil {
+		return err
+	}
+	taskRef := strings.TrimSpace(params["task"])
+	if taskRef == "" {
+		return fmt.Errorf("usage: odin work route-preview --task <id|key> [--json]")
+	}
+
+	jobService := jobs.Service{Store: store, Registry: projectRegistry}
+	if len(options) > 0 && options[0].JobService.Store != nil {
+		jobService = options[0].JobService
+	}
+	task, err := findWorkTask(ctx, store, taskRef)
+	if err != nil {
+		return err
+	}
+	preview, err := jobService.PreviewTaskRoute(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	view := workRoutePreviewOutcomeView(preview)
+	if jsonOutput {
+		return WriteJSON(stdout, view)
+	}
+	_, err = fmt.Fprintf(
+		stdout,
+		"dry_run=%t run_created=%t task=%s status=%s task_kind=%s task_class=%s risk_class=%s route_name=%s executor_lane=%s model_key=%s provider_key=%s provider_model_id=%s fallback_used=%t policy_reason=%s\n",
+		view.DryRun,
+		view.RunCreated,
+		view.Task.Key,
+		view.Task.Status,
+		view.TaskKind,
+		noneIfEmpty(view.TaskClass),
+		noneIfEmpty(view.RiskClass),
+		view.RouteName,
+		view.ExecutorLane,
+		noneIfEmpty(view.ModelKey),
+		noneIfEmpty(view.ProviderKey),
+		noneIfEmpty(view.ProviderModelID),
+		view.FallbackUsed,
+		noneIfEmpty(view.PolicyReason),
 	)
 	return err
 }
@@ -464,6 +546,47 @@ func workDispatchOutcomeView(outcome jobs.DispatchOutcome) workDispatchView {
 		}
 	}
 	return view
+}
+
+func workRoutePreviewOutcomeView(preview jobs.RoutePreview) workRoutePreviewView {
+	allowedClasses := make([]string, 0, len(preview.Spec.Requirements.AllowedClasses))
+	for _, class := range preview.Spec.Requirements.AllowedClasses {
+		allowedClasses = append(allowedClasses, string(class))
+	}
+	return workRoutePreviewView{
+		DryRun:     true,
+		RunCreated: false,
+		Task: workDispatchTaskView{
+			ID:                    preview.Task.ID,
+			ProjectID:             preview.Task.ProjectID,
+			Key:                   preview.Task.Key,
+			Status:                preview.Task.Status,
+			CurrentRunID:          preview.Task.CurrentRunID,
+			ExecutionIntent:       preview.Task.ExecutionIntent,
+			ExecutionIntentSource: preview.Task.ExecutionIntentSource,
+			BlockedReason:         preview.Task.BlockedReason,
+		},
+		ProjectKey: preview.ProjectKey,
+		TaskKind:   string(preview.Spec.Kind),
+		TaskClass:  preview.Spec.TaskClass,
+		RiskClass:  preview.Spec.RiskClass,
+		Requirements: workRouteRequirements{
+			AllowedClasses:    allowedClasses,
+			CapabilityNeeds:   append([]string{}, preview.Spec.Requirements.CapabilityNeeds...),
+			NeedsTools:        preview.Spec.Requirements.NeedsTools,
+			NeedsHeadlessPlan: preview.Spec.Requirements.NeedsHeadlessPlan,
+		},
+		RouteName:           preview.Decision.RouteName,
+		ExecutorLane:        preview.Decision.ExecutorKey,
+		ModelKey:            preview.Decision.ModelKey,
+		ProviderKey:         preview.Decision.ProviderKey,
+		ProviderModelID:     preview.Decision.ProviderModelID,
+		FallbackUsed:        preview.Decision.FallbackUsed,
+		PolicyReason:        preview.Decision.PolicyReason,
+		EstimatedCostUSD:    preview.Decision.EstimatedCostUSD,
+		ContextWindowTokens: preview.Decision.ContextWindowTokens,
+		LatencyTier:         preview.Decision.LatencyTier,
+	}
 }
 
 type workExecutionView struct {

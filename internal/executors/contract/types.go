@@ -49,6 +49,7 @@ type ToolPolicy struct {
 
 type Requirements struct {
 	AllowedClasses      []ExecutorClass `json:"allowed_classes"`
+	CapabilityNeeds     []string        `json:"capability_needs"`
 	NeedsResume         bool            `json:"needs_resume"`
 	NeedsCancel         bool            `json:"needs_cancel"`
 	NeedsTools          bool            `json:"needs_tools"`
@@ -62,6 +63,8 @@ type TaskSpec struct {
 	ID           string            `json:"id"`
 	Kind         TaskKind          `json:"kind"`
 	Scope        string            `json:"scope"`
+	TaskClass    string            `json:"task_class,omitempty"`
+	RiskClass    string            `json:"risk_class,omitempty"`
 	Prompt       string            `json:"prompt"`
 	Budget       BudgetHints       `json:"budget"`
 	Tools        ToolPolicy        `json:"tools"`

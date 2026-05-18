@@ -25,6 +25,7 @@ type Service struct {
 	Registry            projects.Registry
 	RegistryDiagnostics []projects.Diagnostic
 	ExecutorConfig      executorrouter.Config
+	ModelRegistry       executorrouter.ModelRegistry
 	Executors           map[string]contract.Executor
 	Now                 func() time.Time
 	StalledTimeout      time.Duration
@@ -446,8 +447,9 @@ func (service Service) executorAnswer(ctx context.Context, request Request, prom
 	}
 
 	selector := executorrouter.Selector{
-		Config:    service.ExecutorConfig,
-		Executors: service.Executors,
+		Config:        service.ExecutorConfig,
+		ModelRegistry: service.ModelRegistry,
+		Executors:     service.Executors,
 	}
 	decision, err := selector.Select(ctx, spec)
 	if err != nil {

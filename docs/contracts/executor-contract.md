@@ -26,6 +26,8 @@ Required intent fields:
 - task id
 - task kind
 - scope
+- optional task class
+- optional risk class
 - prompt
 - metadata
 - budget hints
@@ -50,12 +52,23 @@ Capability matching is explicit and portable.
 Requirements may express:
 
 - allowed executor classes
+- model capability needs
 - resume support
 - cancel support
 - tool support
 - cost estimate support
 - headless plan support
 - broker fallback support
+
+Task class and risk class are deterministic Odin inputs. They may be derived
+from Work Item execution intent, operator metadata, or route-specific policy,
+but they are never delegated to model judgment. Models may advise; Odin policy
+decides route eligibility, approval requirements, and external mutation
+authority.
+
+`odin work route-preview --task <task-id-or-key> [--json]` exposes these
+deterministic routing inputs and the selected executor/model before dispatch.
+It is read-only and must not create a Run Attempt or invoke an executor.
 
 ## Harness-driver rules
 
@@ -196,3 +209,55 @@ Cleanup is explicit and local-only through the Huginn browser worker cleanup hel
 ## Important rule
 
 Subscription-backed CLIs, APIs, and broker routes share one executor contract but remain distinct by class and capability metadata. They are not interchangeable by default.
+
+## OpenRouter invocation seam
+
+`openrouter_api` may construct an OpenRouter-compatible chat-completions
+request from the routed `TaskSpec` and selected model metadata. Normal executor
+use remains fixture-backed only: it must not read provider credentials, make
+network calls, or infer live availability from environment variables.
+
+The first non-smoke OpenRouter task classes are deliberately narrow:
+`frontend_build` and `backend_build` with `risk_class=low`. Low-risk backend
+work is bounded to implementation grunt work such as local service/API wiring,
+fixtures, tests, and deterministic scaffolding. Medium or higher risk,
+governance, destructive, credential-bearing, approval-resolution,
+production-deploy, public-publish, live-data migration, security-decision,
+finance, legal, or medical work must route deterministically to the Premium
+Codex plan-backed lane rather than using OpenRouter or another external model.
+
+The fixture seam records executor evidence with:
+
+- selected provider/model metadata
+- a request payload hash
+- a redacted request proof containing the model, message roles, message content
+  hashes and byte counts, max token settings, streaming flag, and redacted
+  headers
+- `network_access=false`
+
+The redacted proof must not include raw prompt text, bearer tokens, API keys,
+credential-looking metadata, or provider-private request payloads.
+
+Live OpenRouter smoke testing is allowed only through the explicit
+approval-gated operator path:
+
+```bash
+./bin/odin provider openrouter smoke prepare --model openrouter-kimi-k2-6 --json
+OPENROUTER_API_KEY=<local-secret> ./bin/odin provider openrouter smoke run --approval <approval-id> --model openrouter-kimi-k2-6 --live --confirm-live-provider-call --json
+```
+
+The live command validates the approved matching Approval Request before reading
+`OPENROUTER_API_KEY`. The design for that slice is
+`docs/plans/2026-05-18-openrouter-live-smoke-design.md`. A fixture passing
+locally is not live-provider readiness.
+
+Live-smoke evidence readback is read-only:
+
+```bash
+./bin/odin provider openrouter smoke evidence --approval <approval-id> --json
+./bin/odin provider openrouter smoke evidence --run <live-run-id> --json
+```
+
+The evidence command reads existing Approval Requests, Run Attempts, run
+artifacts, and runtime events. It must not create approvals, start runs, read
+`OPENROUTER_API_KEY`, or grant non-smoke OpenRouter execution authority.
