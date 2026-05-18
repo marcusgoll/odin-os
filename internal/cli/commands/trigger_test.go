@@ -245,7 +245,7 @@ func TestRunTriggerSeedCFIProsCEODayRoutineCreatesCEOAgentRoutineSchedules(t *te
 		return stdout.String()
 	}
 
-	output := run("seed", "cfipros-ceo-day-routine", "start=2026-05-18", "--json")
+	output := run("seed", "cfipros-ceo-day-routine", "start=2026-05-18", "kpi_export_path=/tmp/cfipros-ceo-kpis.json", "--json")
 	var seed struct {
 		Seed       string `json:"seed"`
 		Workspace  string `json:"workspace"`
@@ -289,6 +289,7 @@ func TestRunTriggerSeedCFIProsCEODayRoutineCreatesCEOAgentRoutineSchedules(t *te
 					AgentKey         string `json:"agent_key"`
 					WorkflowKey      string `json:"workflow_key"`
 					ApprovalBoundary string `json:"approval_boundary"`
+					KPIExportPath    string `json:"kpi_export_path"`
 				} `json:"input_json"`
 			} `json:"skill_invocation"`
 		}
@@ -303,6 +304,9 @@ func TestRunTriggerSeedCFIProsCEODayRoutineCreatesCEOAgentRoutineSchedules(t *te
 		}
 		if !strings.Contains(rule.SkillInvocation.InputJSON.ApprovalBoundary, "customer contact") || !strings.Contains(rule.SkillInvocation.InputJSON.ApprovalBoundary, "billing") {
 			t.Fatalf("approval boundary = %q, want customer and billing limits", rule.SkillInvocation.InputJSON.ApprovalBoundary)
+		}
+		if rule.SkillInvocation.InputJSON.KPIExportPath != "/tmp/cfipros-ceo-kpis.json" {
+			t.Fatalf("kpi_export_path = %q, want configured CFIPros KPI export path", rule.SkillInvocation.InputJSON.KPIExportPath)
 		}
 	}
 	if got, ok := rulesByKey["cfipros-ceo-morning-launch-health"]; !ok || !strings.Contains(got, `"agent_key":"cfipros-ceo-operator-agent"`) {

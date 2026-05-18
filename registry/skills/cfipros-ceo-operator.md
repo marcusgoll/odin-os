@@ -46,6 +46,10 @@ input_schema:
       type: string
     kpi_evidence:
       type: object
+    kpi_export:
+      type: object
+    kpi_export_path:
+      type: string
 output_schema:
   type: object
   properties:
@@ -81,8 +85,9 @@ closeout, or CEO packet preparation.
 
 The skill receives the checkpoint request, project key, `cfipros-ceo-operator-agent`
 handoff key, workflow key, launch document path, review window, approval
-boundary, optional CFIPros repo root, and optional operator-supplied KPI
-evidence.
+boundary, optional CFIPros repo root, optional operator-supplied KPI evidence,
+and optional CFIPros KPI export evidence either inline or via a read-only file
+path.
 
 ## Procedure
 
@@ -92,9 +97,10 @@ return structured evidence that the CFIPros CEO operator agent is the intended
 reviewer for the scheduled Work Item.
 
 KPI values must be marked `unmeasured` unless a read-only value is supplied as
-KPI evidence. Missing KPI data is not zero. Production DB, PostHog, Stripe,
-customer, billing, deploy, and merge actions remain outside this skill unless
-the operator supplies explicit read-only evidence for the packet.
+KPI evidence or by the CFIPros-owned KPI export. Missing KPI data is not zero.
+Production DB, PostHog, Stripe, customer, billing, deploy, and merge actions
+remain outside this skill unless the operator supplies explicit read-only
+evidence for the packet.
 
 ## Outputs
 

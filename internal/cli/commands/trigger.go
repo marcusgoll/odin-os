@@ -21,7 +21,7 @@ func RunTrigger(ctx context.Context, service triggers.Service, args []string, st
 		return fmt.Errorf("usage: odin %s", TriggerUsage)
 	}
 	if args[0] == "--help" || args[0] == "help" {
-		_, err := fmt.Fprintf(stdout, "usage: odin %s\n\nScheduled triggers:\n  odin trigger create <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger upsert <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger seed marcus-brand-os [initiative=marcusgoll] [workspace=default] [status=enabled] [start=<YYYY-MM-DD>] [timezone=America/New_York] [--json]\n  odin trigger seed cfipros-ceo-day-routine [initiative=cfipros] [workspace=default] [status=enabled] [start=<YYYY-MM-DD>] [timezone=America/New_York] [--json]\n  odin trigger test <key> now=<RFC3339> [--json]\n  odin trigger evaluate now=<RFC3339> [--json]\n\nManual trigger fire:\n  odin trigger materialize <key> [reason=<reason>] [--json]\n  odin trigger fire <key> [reason=<reason>] [--json]\n\nAudit:\n  odin trigger audit <key> [--json]\n\nEvent triggers:\n  odin trigger create <key> initiative=<project> kind=event event=external.github.issue [match_status=<status>] [match_previous_status=<status>] [match_task_id=<id>] [match_scope=<scope>] [match_provider=<provider>] [match_repo=<owner/repo>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger test <key> source=events [--json]\n  odin trigger evaluate source=events [--json]\n\nExternal event ingest:\n  odin trigger ingest github-issue project=<project> repo=<owner/repo> number=<n> action=<opened> title=<text> [body=<text>] [url=<url>] [labels=a,b] [--json]\n", TriggerUsage)
+		_, err := fmt.Fprintf(stdout, "usage: odin %s\n\nScheduled triggers:\n  odin trigger create <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger upsert <key> initiative=<project> kind=schedule status=enabled next=<RFC3339> [cadence=<duration>] [cron=<expr>] [quiet=<HH:MM-HH:MM>] [batch=<key> batch_window=<duration>] [title=<text>] [summary=<text>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger seed marcus-brand-os [initiative=marcusgoll] [workspace=default] [status=enabled] [start=<YYYY-MM-DD>] [timezone=America/New_York] [--json]\n  odin trigger seed cfipros-ceo-day-routine [initiative=cfipros] [workspace=default] [status=enabled] [start=<YYYY-MM-DD>] [timezone=America/New_York] [kpi_export_path=<path>] [--json]\n  odin trigger test <key> now=<RFC3339> [--json]\n  odin trigger evaluate now=<RFC3339> [--json]\n\nManual trigger fire:\n  odin trigger materialize <key> [reason=<reason>] [--json]\n  odin trigger fire <key> [reason=<reason>] [--json]\n\nAudit:\n  odin trigger audit <key> [--json]\n\nEvent triggers:\n  odin trigger create <key> initiative=<project> kind=event event=external.github.issue [match_status=<status>] [match_previous_status=<status>] [match_task_id=<id>] [match_scope=<scope>] [match_provider=<provider>] [match_repo=<owner/repo>] [intent=<read_only|mutation|governance|destructive>] [--json]\n  odin trigger test <key> source=events [--json]\n  odin trigger evaluate source=events [--json]\n\nExternal event ingest:\n  odin trigger ingest github-issue project=<project> repo=<owner/repo> number=<n> action=<opened> title=<text> [body=<text>] [url=<url>] [labels=a,b] [--json]\n", TriggerUsage)
 		return err
 	}
 	jsonOutput, args, err := consumeTriggerJSONFlag(args)
@@ -604,6 +604,7 @@ func runTriggerSeedCFIProsCEODayRoutine(ctx context.Context, service triggers.Se
 	if err != nil {
 		return err
 	}
+	kpiExportPath := strings.TrimSpace(options["kpi_export_path"])
 
 	views := make([]automationTriggerView, 0, len(cfiprosCEORoutines))
 	for _, routine := range cfiprosCEORoutines {
@@ -611,7 +612,7 @@ func runTriggerSeedCFIProsCEODayRoutine(ctx context.Context, service triggers.Se
 		if err != nil {
 			return err
 		}
-		ruleJSON, err := cfiprosCEORuleJSON(routine, initiativeKey)
+		ruleJSON, err := cfiprosCEORuleJSON(routine, initiativeKey, kpiExportPath)
 		if err != nil {
 			return err
 		}
@@ -700,7 +701,22 @@ func marcusBrandOSRuleJSON(routine marcusBrandOSRoutine, projectKey string) (str
 	return string(encoded), nil
 }
 
-func cfiprosCEORuleJSON(routine cfiprosCEORoutine, projectKey string) (string, error) {
+func cfiprosCEORuleJSON(routine cfiprosCEORoutine, projectKey string, kpiExportPath string) (string, error) {
+	inputJSON := map[string]any{
+		"request":              routine.Request,
+		"agent_key":            "cfipros-ceo-operator-agent",
+		"workflow_key":         "cfipros-ceo-operating-routine",
+		"source":               "cfipros-ceo-day-routine-trigger",
+		"checkpoint":           routine.Checkpoint,
+		"project_key":          projectKey,
+		"review_window":        "current_operating_day",
+		"launch_doc_path":      "docs/project/CEO_OPERATOR_LAUNCH_PLAN.md",
+		"approval_boundary":    "internal CEO review, drafting, prioritization, and follow-up planning only; customer contact, publishing, spend, pricing, billing, deploys, and merges require explicit human approval",
+		"external_side_effect": "none",
+	}
+	if strings.TrimSpace(kpiExportPath) != "" {
+		inputJSON["kpi_export_path"] = strings.TrimSpace(kpiExportPath)
+	}
 	payload := map[string]any{
 		"summary":          routine.Summary,
 		"kind":             "schedule",
@@ -715,18 +731,7 @@ func cfiprosCEORuleJSON(routine cfiprosCEORoutine, projectKey string) (string, e
 			"execution_intent":        "read_only",
 			"execution_intent_source": "trigger",
 			"review_state":            "review_required",
-			"input_json": map[string]any{
-				"request":              routine.Request,
-				"agent_key":            "cfipros-ceo-operator-agent",
-				"workflow_key":         "cfipros-ceo-operating-routine",
-				"source":               "cfipros-ceo-day-routine-trigger",
-				"checkpoint":           routine.Checkpoint,
-				"project_key":          projectKey,
-				"review_window":        "current_operating_day",
-				"launch_doc_path":      "docs/project/CEO_OPERATOR_LAUNCH_PLAN.md",
-				"approval_boundary":    "internal CEO review, drafting, prioritization, and follow-up planning only; customer contact, publishing, spend, pricing, billing, deploys, and merges require explicit human approval",
-				"external_side_effect": "none",
-			},
+			"input_json":              inputJSON,
 		},
 	}
 	encoded, err := json.Marshal(payload)

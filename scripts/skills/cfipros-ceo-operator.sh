@@ -58,7 +58,94 @@ def normalize_evidence(raw_evidence):
                 normalized[str(item["key"])] = item
     return normalized
 
+def load_kpi_export(input_data):
+    inline_export = input_data.get("kpi_export") or input_data.get("cfipros_kpi_export")
+    if isinstance(inline_export, dict):
+        return inline_export
+    export_path = input_data.get("kpi_export_path") or input_data.get("cfipros_kpi_export_path")
+    if not export_path:
+        return {}
+    try:
+        loaded = json.loads(Path(str(export_path)).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "status": "unavailable",
+            "source": str(export_path),
+            "error": "kpi_export_path_unreadable",
+        }
+    return loaded if isinstance(loaded, dict) else {}
+
+def normalize_kpi_export(raw_export):
+    if not raw_export:
+        return {}
+    raw_metrics = raw_export.get("metrics")
+    if not isinstance(raw_metrics, list):
+        return {}
+    metrics_by_key = {
+        str(item.get("key")): item
+        for item in raw_metrics
+        if isinstance(item, dict) and item.get("key")
+    }
+    export_source = raw_export.get("source") or "cfipros-kpi-export"
+    export_as_of = raw_export.get("as_of_utc")
+    approval_required = raw_export.get("approval_required")
+    external_side_effect = raw_export.get("external_side_effect")
+
+    def measured(metric_key):
+        metric = metrics_by_key.get(metric_key)
+        if not metric or metric.get("status") != "measured":
+            return None
+        value = metric.get("value")
+        if value in (None, "", "unmeasured"):
+            return None
+        unit = metric.get("unit") or "count"
+        return f"{metric_key}={value} {unit}".strip()
+
+    def grouped_value(keys):
+        parts = [part for key in keys if (part := measured(key))]
+        return "; ".join(parts) if parts else None
+
+    def evidence_entry(value, mapped_from):
+        if not value:
+            return None
+        return {
+            "value": value,
+            "source": export_source,
+            "as_of_utc": export_as_of,
+            "approval_required": approval_required,
+            "external_side_effect": external_side_effect,
+            "mapped_from": mapped_from,
+        }
+
+    mapped = {}
+    group_specs = {
+        "activation_students": [
+            "users_created_today",
+            "users_onboarded_today",
+            "students_created_today",
+        ],
+        "product_value_aktr": [
+            "aktr_uploads_today",
+            "aktr_codes_today",
+        ],
+        "paid_conversion": [
+            "paid_subscribers_total",
+            "estimated_mrr_cents",
+        ],
+        "quality_operations": [
+            "failed_extractions_today",
+        ],
+    }
+    for kpi_key, export_keys in group_specs.items():
+        entry = evidence_entry(grouped_value(export_keys), export_keys)
+        if entry:
+            mapped[kpi_key] = entry
+    return mapped
+
 kpi_evidence = normalize_evidence(input_data.get("kpi_evidence") or input_data.get("kpi_values"))
+kpi_export = load_kpi_export(input_data)
+for key, value in normalize_kpi_export(kpi_export).items():
+    kpi_evidence.setdefault(key, value)
 
 metric_specs = [
     {
@@ -166,6 +253,7 @@ kpi_truth = {
     "collection_status": collection_status,
     "collection_mode": "read_only",
     "repo_root": repo_root_display,
+    "kpi_export_source": kpi_export.get("source") if isinstance(kpi_export, dict) else None,
     "metrics": metrics,
     "unmeasured_policy": "missing KPI values are reported as unmeasured, never zero",
     "live_collection_boundary": "skill remains repo.read/runtime.read; production DB, PostHog, Stripe, customer, billing, deploy, and merge actions require explicit human approval or operator-supplied read-only evidence",
