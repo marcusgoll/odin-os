@@ -224,6 +224,183 @@ func TestRunFactoryHelpUsesTopLevelDispatcher(t *testing.T) {
 	}
 }
 
+func TestRunFactoryStartCreatesFactoryWorkItem(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var stdout bytes.Buffer
+
+	err := Run(context.Background(), root, []string{"factory", "start", "--project", testProjectKey, "--title", "Implement factory status", "--json"}, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatalf("Run(factory start) error = %v", err)
+	}
+
+	var payload struct {
+		FactoryLane bool   `json:"factory_lane"`
+		Trigger     string `json:"trigger"`
+		Autonomy    string `json:"autonomy"`
+		Phase       string `json:"phase"`
+		Created     bool   `json:"created"`
+		WorkItem    struct {
+			ID                    int64  `json:"id"`
+			Key                   string `json:"key"`
+			Status                string `json:"status"`
+			WorkKind              string `json:"work_kind"`
+			ExecutionIntent       string `json:"execution_intent"`
+			ExecutionIntentSource string `json:"execution_intent_source"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json unmarshal error = %v\nstdout=%s", err, stdout.String())
+	}
+	if !payload.FactoryLane || payload.Trigger != "operator" || payload.Autonomy != "merge_when_green" || payload.Phase != "admitted" {
+		t.Fatalf("factory lane fields = %+v", payload)
+	}
+	if !payload.Created {
+		t.Fatal("created = false, want true")
+	}
+	if payload.WorkItem.ID == 0 || payload.WorkItem.Key == "" || payload.WorkItem.Status != "queued" {
+		t.Fatalf("work item = %+v, want queued task with id/key", payload.WorkItem)
+	}
+	if payload.WorkItem.WorkKind != "factory_lane" || payload.WorkItem.ExecutionIntent != "mutation" || payload.WorkItem.ExecutionIntentSource != "factory_lane:operator" {
+		t.Fatalf("work item intent = %+v, want factory mutation", payload.WorkItem)
+	}
+}
+
+func TestRunFactoryStatusReadsFactoryWorkItem(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var startStdout bytes.Buffer
+
+	if err := Run(context.Background(), root, []string{"factory", "start", "--project", testProjectKey, "--title", "Read factory status", "--json"}, strings.NewReader(""), &startStdout); err != nil {
+		t.Fatalf("Run(factory start) error = %v", err)
+	}
+	var start struct {
+		WorkItem struct {
+			ID  int64  `json:"id"`
+			Key string `json:"key"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(startStdout.Bytes(), &start); err != nil {
+		t.Fatalf("start json unmarshal error = %v\nstdout=%s", err, startStdout.String())
+	}
+
+	var statusStdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"factory", "status", "--task", start.WorkItem.Key, "--json"}, strings.NewReader(""), &statusStdout); err != nil {
+		t.Fatalf("Run(factory status) error = %v", err)
+	}
+	var status struct {
+		FactoryLane bool   `json:"factory_lane"`
+		Trigger     string `json:"trigger"`
+		Autonomy    string `json:"autonomy"`
+		Phase       string `json:"phase"`
+		WorkItem    struct {
+			ID     int64  `json:"id"`
+			Key    string `json:"key"`
+			Status string `json:"status"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(statusStdout.Bytes(), &status); err != nil {
+		t.Fatalf("status json unmarshal error = %v\nstdout=%s", err, statusStdout.String())
+	}
+	if status.WorkItem.ID != start.WorkItem.ID || status.WorkItem.Key != start.WorkItem.Key || status.WorkItem.Status != "queued" {
+		t.Fatalf("status work item = %+v, want start item id=%d key=%s", status.WorkItem, start.WorkItem.ID, start.WorkItem.Key)
+	}
+	if !status.FactoryLane || status.Trigger != "operator" || status.Autonomy != "merge_when_green" || status.Phase != "admitted" {
+		t.Fatalf("status lane fields = %+v", status)
+	}
+}
+
+func TestRunFactoryStatusRejectsNormalWorkItem(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var startStdout bytes.Buffer
+
+	if err := Run(context.Background(), root, []string{"work", "start", "--project", testProjectKey, "--title", "Normal delivery work", "--intent", "mutation"}, strings.NewReader(""), &startStdout); err != nil {
+		t.Fatalf("Run(work start) error = %v", err)
+	}
+	taskID := parseWorkItemIDFromOutput(t, startStdout.String())
+
+	var statusStdout bytes.Buffer
+	err := Run(context.Background(), root, []string{"factory", "status", "--task", strconv.FormatInt(taskID, 10), "--json"}, strings.NewReader(""), &statusStdout)
+	if err == nil {
+		t.Fatal("Run(factory status normal work item) error = nil, want invalid factory task")
+	}
+	if !strings.Contains(err.Error(), "invalid factory task") || !strings.Contains(err.Error(), "is not \"factory_lane\"") {
+		t.Fatalf("Run(factory status normal work item) error = %q, want invalid factory task", err.Error())
+	}
+	if strings.Contains(statusStdout.String(), `"factory_lane"`) {
+		t.Fatalf("stdout = %q, should not emit factory JSON", statusStdout.String())
+	}
+}
+
+func TestRunFactoryStartBlocksHighRiskWork(t *testing.T) {
+	t.Parallel()
+
+	root := testRepoRoot(t)
+	var startStdout bytes.Buffer
+
+	if err := Run(context.Background(), root, []string{"factory", "start", "--project", testProjectKey, "--title", "Force push branch", "--json"}, strings.NewReader(""), &startStdout); err != nil {
+		t.Fatalf("Run(factory start) error = %v", err)
+	}
+	var start struct {
+		WorkItem struct {
+			ID int64 `json:"id"`
+		} `json:"work_item"`
+	}
+	if err := json.Unmarshal(startStdout.Bytes(), &start); err != nil {
+		t.Fatalf("start json unmarshal error = %v\nstdout=%s", err, startStdout.String())
+	}
+
+	var dispatchStdout bytes.Buffer
+	if err := Run(context.Background(), root, []string{"work", "dispatch", "--task", strconv.FormatInt(start.WorkItem.ID, 10), "--json"}, strings.NewReader(""), &dispatchStdout); err != nil {
+		t.Fatalf("Run(work dispatch) error = %v", err)
+	}
+	var dispatch struct {
+		Dispatched bool   `json:"dispatched"`
+		Reason     string `json:"reason"`
+		Task       struct {
+			ID                    int64  `json:"id"`
+			Status                string `json:"status"`
+			ExecutionIntent       string `json:"execution_intent"`
+			ExecutionIntentSource string `json:"execution_intent_source"`
+			BlockedReason         string `json:"blocked_reason"`
+		} `json:"task"`
+	}
+	if err := json.Unmarshal(dispatchStdout.Bytes(), &dispatch); err != nil {
+		t.Fatalf("dispatch json unmarshal error = %v\nstdout=%s", err, dispatchStdout.String())
+	}
+	if dispatch.Dispatched || dispatch.Reason != "approval_required" {
+		t.Fatalf("dispatch = %+v, want approval_required without dispatch", dispatch)
+	}
+	if dispatch.Task.ID != start.WorkItem.ID || dispatch.Task.Status != "blocked" || dispatch.Task.BlockedReason != "approval_required" {
+		t.Fatalf("dispatch task = %+v, want blocked approval_required", dispatch.Task)
+	}
+	if dispatch.Task.ExecutionIntent != "destructive" || dispatch.Task.ExecutionIntentSource != "safety_classifier" {
+		t.Fatalf("dispatch intent = %q/%q, want destructive/safety_classifier", dispatch.Task.ExecutionIntent, dispatch.Task.ExecutionIntentSource)
+	}
+}
+
+func parseWorkItemIDFromOutput(t *testing.T, output string) int64 {
+	t.Helper()
+
+	for _, field := range strings.Fields(output) {
+		value, ok := strings.CutPrefix(field, "work_item_id=")
+		if !ok {
+			continue
+		}
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			t.Fatalf("parse work_item_id from %q: %v", output, err)
+		}
+		return id
+	}
+	t.Fatalf("stdout = %q, want work_item_id field", output)
+	return 0
+}
+
 func TestRunLeasesCleanupDryRunUsesCanonicalCommandPath(t *testing.T) {
 	t.Parallel()
 

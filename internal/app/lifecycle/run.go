@@ -50,6 +50,7 @@ import (
 	conversationsvc "odin-os/internal/runtime/conversation"
 	delegationsvc "odin-os/internal/runtime/delegations"
 	runtimeevents "odin-os/internal/runtime/events"
+	factorysvc "odin-os/internal/runtime/factory"
 	goalruntime "odin-os/internal/runtime/goals"
 	healthsvc "odin-os/internal/runtime/health"
 	"odin-os/internal/runtime/jobs"
@@ -433,17 +434,114 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 }
 
 func runFactory(ctx context.Context, app bootstrap.App, args []string, stdout io.Writer) error {
-	_ = ctx
-	_ = app
 	if len(args) == 0 || isHelpArgs(args) {
 		_, err := fmt.Fprintln(stdout, commands.FactoryUsage)
 		return err
 	}
-	if _, err := commands.ParseFactory(args); err != nil {
+	command, err := commands.ParseFactory(args)
+	if err != nil {
 		return err
 	}
-	_, err := fmt.Fprintln(stdout, commands.FactoryUsage)
-	return err
+	service := factorysvc.Service{
+		Store: app.Store,
+		Jobs: jobs.Service{
+			Store:              app.Store,
+			RuntimeRoot:        app.RuntimeRoot,
+			Registry:           app.Registry,
+			Executors:          app.Executors,
+			ExecutorConfig:     app.ExecutorConfig,
+			PromptRenderer:     app.PromptRenderer,
+			PromptTemplateName: app.PromptTemplateName,
+			Transitions:        projects.Service{Store: app.Store},
+			Leases: leases.Manager{
+				Store:        app.Store,
+				Git:          gitadapter.Adapter{},
+				WorktreeRoot: worktrees.DefaultRoot(),
+			},
+			Now: time.Now,
+		},
+	}
+	switch command.Action {
+	case "start":
+		result, err := service.AdmitOperatorStart(ctx, factorysvc.AdmitOperatorInput{
+			ProjectKey:  command.Project,
+			Title:       command.Title,
+			RequestedBy: "operator",
+		})
+		if err != nil {
+			return err
+		}
+		view := newFactoryAdmissionView(result)
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "factory_lane=%t trigger=%s autonomy=%s phase=%s work_item=%s status=%s created=%t\n", view.FactoryLane, view.Trigger, view.Autonomy, view.Phase, view.WorkItem.Key, view.WorkItem.Status, view.Created)
+		return err
+	case "status":
+		result, err := service.Status(ctx, command.Task)
+		if err != nil {
+			return err
+		}
+		view := newFactoryStatusView(result)
+		if command.JSON {
+			return commands.WriteJSON(stdout, view)
+		}
+		_, err = fmt.Fprintf(stdout, "factory_lane=%t trigger=%s autonomy=%s phase=%s work_item=%s status=%s\n", view.FactoryLane, view.Trigger, view.Autonomy, view.Phase, view.WorkItem.Key, view.WorkItem.Status)
+		return err
+	default:
+		_, err := fmt.Fprintln(stdout, commands.FactoryUsage)
+		return err
+	}
+}
+
+type factoryCommandView struct {
+	FactoryLane bool                `json:"factory_lane"`
+	Trigger     string              `json:"trigger"`
+	Autonomy    string              `json:"autonomy"`
+	Phase       string              `json:"phase"`
+	Created     bool                `json:"created,omitempty"`
+	WorkItem    factoryWorkItemView `json:"work_item"`
+}
+
+type factoryWorkItemView struct {
+	ID                    int64  `json:"id"`
+	Key                   string `json:"key"`
+	Status                string `json:"status"`
+	WorkKind              string `json:"work_kind,omitempty"`
+	ExecutionIntent       string `json:"execution_intent,omitempty"`
+	ExecutionIntentSource string `json:"execution_intent_source,omitempty"`
+}
+
+func newFactoryAdmissionView(result factorysvc.AdmissionResult) factoryCommandView {
+	return factoryCommandView{
+		FactoryLane: true,
+		Trigger:     result.Trigger,
+		Autonomy:    result.Autonomy,
+		Phase:       result.Phase,
+		Created:     result.Created,
+		WorkItem:    newFactoryWorkItemView(result.Task),
+	}
+}
+
+func newFactoryStatusView(result factorysvc.StatusResult) factoryCommandView {
+	return factoryCommandView{
+		FactoryLane: true,
+		Trigger:     result.Trigger,
+		Autonomy:    result.Autonomy,
+		Phase:       result.Phase,
+		WorkItem:    newFactoryWorkItemView(result.Task),
+	}
+}
+
+func newFactoryWorkItemView(task sqlite.Task) factoryWorkItemView {
+	return factoryWorkItemView{
+		ID:                    task.ID,
+		Key:                   task.Key,
+		Status:                task.Status,
+		WorkKind:              task.WorkKind,
+		ExecutionIntent:       task.ExecutionIntent,
+		ExecutionIntentSource: task.ExecutionIntentSource,
+	}
 }
 
 func isOperationalHelpCommand(command string) bool {
