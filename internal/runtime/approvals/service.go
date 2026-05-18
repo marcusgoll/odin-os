@@ -57,9 +57,10 @@ type Detail struct {
 }
 
 type ResolveResult struct {
-	Approval        sqlite.Approval
-	SubmitRun       *sqlite.Run
-	ResolverSupport ResolverSupport
+	Approval         sqlite.Approval
+	SubmitRun        *sqlite.Run
+	ResolverSupport  ResolverSupport
+	ContinuationKind string
 }
 
 type Receipt struct {
@@ -207,6 +208,8 @@ func (service Service) Resolve(ctx context.Context, params ResolveParams) (Resol
 				if _, err := service.Store.RequeueTaskAt(ctx, sqlite.RequeueTaskAtParams{TaskID: detail.Task.ID, NextEligibleAt: time.Now().UTC()}); err != nil {
 					return ResolveResult{}, err
 				}
+			} else {
+				result.ContinuationKind = "browser_mutation"
 			}
 		}
 		return result, nil
@@ -530,6 +533,12 @@ func FormatReceipt(result ResolveResult) (Receipt, error) {
 			return Receipt{
 				Line:    line,
 				Summary: "summary=approval granted; submit continuation started",
+			}, nil
+		}
+		if result.ContinuationKind == "browser_mutation" {
+			return Receipt{
+				Line:    line,
+				Summary: "summary=approval granted; browser continuation required",
 			}, nil
 		}
 		return Receipt{
