@@ -2190,6 +2190,38 @@ func (store *Store) UpdateTaskExecutionIntent(ctx context.Context, params Update
 	return task, err
 }
 
+func (store *Store) UpdateTaskFactoryProfile(ctx context.Context, params UpdateTaskFactoryProfileParams) (Task, error) {
+	var task Task
+	err := store.withTx(ctx, func(tx *sql.Tx) error {
+		current, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		workKind := strings.TrimSpace(params.WorkKind)
+		artifactsJSON := normalizeArtifactsJSON(params.ArtifactsJSON)
+		intent := strings.TrimSpace(params.ExecutionIntent)
+		source := strings.TrimSpace(params.ExecutionIntentSource)
+		now := store.now()
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tasks
+			SET work_kind = ?, artifacts_json = ?, execution_intent = ?, execution_intent_source = ?, updated_at = ?
+			WHERE id = ?
+		`, nullIfEmpty(workKind), artifactsJSON, intent, source, formatTime(now), params.TaskID); err != nil {
+			return err
+		}
+		updated, err := store.getTaskTx(ctx, tx, params.TaskID)
+		if err != nil {
+			return err
+		}
+		if err := appendTaskQueueStateChangedEventTx(ctx, tx, current, updated, now); err != nil {
+			return err
+		}
+		task = updated
+		return nil
+	})
+	return task, err
+}
+
 func (store *Store) updateTaskQueueStateTx(ctx context.Context, tx *sql.Tx, params UpdateTaskQueueStateParams) (Task, error) {
 	current, err := store.getTaskTx(ctx, tx, params.TaskID)
 	if err != nil {

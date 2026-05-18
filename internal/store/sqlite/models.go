@@ -815,6 +815,14 @@ type UpdateTaskExecutionIntentParams struct {
 	ExecutionIntentSource string
 }
 
+type UpdateTaskFactoryProfileParams struct {
+	TaskID                int64
+	WorkKind              string
+	ArtifactsJSON         string
+	ExecutionIntent       string
+	ExecutionIntentSource string
+}
+
 type BlockTaskParams struct {
 	TaskID int64
 	Reason string

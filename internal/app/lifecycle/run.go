@@ -3051,6 +3051,19 @@ func runIntakeReviewDecision(ctx context.Context, app bootstrap.App, command com
 					existing = loaded
 				}
 			}
+			if command.Factory && strings.TrimSpace(existing.WorkKind) != factorysvc.WorkKindFactoryLane {
+				promoted, createdNow, err := promoteAcceptedIntakeToFactoryLane(ctx, app, item)
+				if err != nil {
+					return err
+				}
+				task = &promoted
+				workCreated = createdNow
+				decision = "accepted"
+				eventType = runtimeevents.EventIntakeReviewAccepted
+				status = "accepted"
+				summary = "Draft task accepted by operator and promoted to factory lane work item"
+				break
+			}
 			task = &existing
 			workCreated = false
 			decision = "accepted"

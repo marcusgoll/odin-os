@@ -229,6 +229,29 @@ func (service Service) PromoteAcceptedIntake(ctx context.Context, item sqlite.In
 	if err != nil {
 		return AdmissionResult{}, err
 	}
+	if !result.Created && strings.TrimSpace(result.Task.WorkKind) != WorkKindFactoryLane && result.Task.Key == "intake-review-"+strconv.FormatInt(item.ID, 10) {
+		upgradeIntent := executionIntent
+		upgradeIntentSource := executionIntentSource
+		if upgradeIntent == "" {
+			upgradeIntent, upgradeIntentSource = jobs.TitleExecutionIntent(manifest, title)
+		}
+		result.Task, err = service.Store.UpdateTaskFactoryProfile(ctx, sqlite.UpdateTaskFactoryProfileParams{
+			TaskID:                result.Task.ID,
+			WorkKind:              WorkKindFactoryLane,
+			ArtifactsJSON:         artifactsJSON,
+			ExecutionIntent:       upgradeIntent,
+			ExecutionIntentSource: upgradeIntentSource,
+		})
+		if err != nil {
+			return AdmissionResult{}, err
+		}
+		if len(acceptance) > 0 {
+			result.Task, err = service.Store.UpdateTaskAcceptanceCriteria(ctx, result.Task.ID, acceptance)
+			if err != nil {
+				return AdmissionResult{}, err
+			}
+		}
+	}
 	return AdmissionResult{
 		Task:     result.Task,
 		Created:  result.Created,

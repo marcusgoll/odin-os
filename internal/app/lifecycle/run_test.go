@@ -2986,7 +2986,6 @@ func TestRunIntakeReviewAcceptFactoryPromotesToFactoryLane(t *testing.T) {
 	accepted := run("intake", "review", "accept", "intake-1", "--factory", "--json")
 	for _, want := range []string{
 		`"decision": "accepted"`,
-		`"work_created": true`,
 		`"key": "intake-review-1"`,
 	} {
 		if !strings.Contains(accepted, want) {
@@ -3047,8 +3046,8 @@ func TestRunIntakeReviewAcceptFactoryIsIdempotent(t *testing.T) {
 	run("intake", "process", "--id", "intake-1", "--json")
 
 	first := run("intake", "review", "accept", "intake-1", "--factory", "--json")
-	if !strings.Contains(first, `"work_created": true`) || !strings.Contains(first, `"key": "intake-review-1"`) {
-		t.Fatalf("first accept output = %s, want created intake-review-1", first)
+	if !strings.Contains(first, `"decision": "accepted"`) || !strings.Contains(first, `"key": "intake-review-1"`) {
+		t.Fatalf("first accept output = %s, want accepted intake-review-1", first)
 	}
 	second := run("intake", "review", "accept", "intake-1", "--factory", "--json")
 	if !strings.Contains(second, `"work_created": false`) || !strings.Contains(second, `"key": "intake-review-1"`) {
@@ -3131,8 +3130,8 @@ func TestRunIntakeReviewAcceptFactoryDefersForcePushToJobsApprovalGate(t *testin
 	)
 	run("intake", "process", "--id", "intake-1", "--json")
 	accepted := run("intake", "review", "accept", "intake-1", "--factory", "--json")
-	if !strings.Contains(accepted, `"work_created": true`) || !strings.Contains(accepted, `"key": "intake-review-1"`) {
-		t.Fatalf("accept output = %s, want factory work item creation", accepted)
+	if !strings.Contains(accepted, `"decision": "accepted"`) || !strings.Contains(accepted, `"key": "intake-review-1"`) {
+		t.Fatalf("accept output = %s, want accepted factory work item", accepted)
 	}
 
 	jobsOutput := run("jobs", "--json")
