@@ -42,6 +42,29 @@ type Detail struct {
 	Artifacts       []sqlite.RunArtifact
 }
 
+type ModelRoutingReadback struct {
+	RunID               int64  `json:"run_id"`
+	TaskID              int64  `json:"task_id"`
+	TaskKey             string `json:"task_key"`
+	ProjectKey          string `json:"project_key"`
+	RunStatus           string `json:"run_status"`
+	RunExecutor         string `json:"run_executor"`
+	ArtifactID          int64  `json:"artifact_id"`
+	RouteName           string `json:"route_name"`
+	ExecutorLane        string `json:"executor_lane"`
+	ModelKey            string `json:"model_key,omitempty"`
+	ProviderKey         string `json:"provider_key,omitempty"`
+	ProviderModelID     string `json:"provider_model_id,omitempty"`
+	FallbackUsed        string `json:"fallback_used"`
+	PolicyReason        string `json:"policy_reason,omitempty"`
+	EstimatedCostUSD    string `json:"estimated_cost_usd,omitempty"`
+	ContextWindowTokens string `json:"context_window_tokens,omitempty"`
+	LatencyTier         string `json:"latency_tier,omitempty"`
+	TaskClass           string `json:"task_class,omitempty"`
+	RiskClass           string `json:"risk_class,omitempty"`
+	Source              string `json:"source"`
+}
+
 type FailureAnalysisDetail struct {
 	Category            string   `json:"category"`
 	SuggestedFix        string   `json:"suggested_fix"`
@@ -52,6 +75,111 @@ type FailureAnalysisDetail struct {
 	FollowUpTitle       string   `json:"follow_up_title,omitempty"`
 	FollowUpReason      string   `json:"follow_up_reason,omitempty"`
 	FollowUpLabels      []string `json:"follow_up_labels,omitempty"`
+}
+
+func (service Service) ModelRoutingForRun(ctx context.Context, resolved scope.Resolution, runID int64) (ModelRoutingReadback, error) {
+	if runID <= 0 {
+		return ModelRoutingReadback{}, fmt.Errorf("run id must be a positive integer")
+	}
+	detail, err := service.Show(ctx, resolved, runID)
+	if err != nil {
+		return ModelRoutingReadback{}, err
+	}
+	return service.modelRoutingForDetail(detail)
+}
+
+func (service Service) ModelRoutingForTask(ctx context.Context, resolved scope.Resolution, taskRef string) (ModelRoutingReadback, error) {
+	taskRef = strings.TrimSpace(taskRef)
+	if taskRef == "" {
+		return ModelRoutingReadback{}, fmt.Errorf("task reference is required")
+	}
+	db := service.DB
+	if db == nil && service.Store != nil {
+		db = service.Store.DB()
+	}
+	if db == nil {
+		return ModelRoutingReadback{}, fmt.Errorf("run store is required")
+	}
+
+	var rows *sql.Rows
+	var err error
+	if taskID, parseErr := strconv.ParseInt(taskRef, 10, 64); parseErr == nil && taskID > 0 {
+		rows, err = db.QueryContext(ctx, modelRoutingTaskRunsQuery()+` WHERE t.id = ? ORDER BY r.id DESC`, taskID)
+	} else {
+		rows, err = db.QueryContext(ctx, modelRoutingTaskRunsQuery()+` WHERE t.key = ? ORDER BY r.id DESC`, taskRef)
+	}
+	if err != nil {
+		return ModelRoutingReadback{}, err
+	}
+	var matched Detail
+	var found bool
+	for rows.Next() {
+		detail, taskScope, err := scanModelRoutingDetail(rows)
+		if err != nil {
+			rows.Close()
+			return ModelRoutingReadback{}, err
+		}
+		if !matchesRunScope(detail.ProjectKey, taskScope, resolved) {
+			continue
+		}
+		matched = detail
+		found = true
+		break
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return ModelRoutingReadback{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return ModelRoutingReadback{}, err
+	}
+	if !found {
+		return ModelRoutingReadback{}, sql.ErrNoRows
+	}
+	if service.Store != nil {
+		artifacts, err := service.Store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{RunID: matched.RunID})
+		if err != nil {
+			return ModelRoutingReadback{}, err
+		}
+		matched.Artifacts = artifacts
+	}
+	return service.modelRoutingForDetail(matched)
+}
+
+func (service Service) modelRoutingForDetail(detail Detail) (ModelRoutingReadback, error) {
+	for index := len(detail.Artifacts) - 1; index >= 0; index-- {
+		artifact := detail.Artifacts[index]
+		if artifact.ArtifactType != "model_routing" {
+			continue
+		}
+		var fields map[string]string
+		if err := json.Unmarshal([]byte(artifact.DetailsJSON), &fields); err != nil {
+			return ModelRoutingReadback{}, fmt.Errorf("model_routing artifact %d: %w", artifact.ID, err)
+		}
+		return ModelRoutingReadback{
+			RunID:               detail.RunID,
+			TaskID:              detail.TaskID,
+			TaskKey:             detail.TaskKey,
+			ProjectKey:          detail.ProjectKey,
+			RunStatus:           detail.Status,
+			RunExecutor:         detail.Executor,
+			ArtifactID:          artifact.ID,
+			RouteName:           strings.TrimSpace(fields["route_name"]),
+			ExecutorLane:        strings.TrimSpace(fields["executor_lane"]),
+			ModelKey:            strings.TrimSpace(fields["model_key"]),
+			ProviderKey:         strings.TrimSpace(fields["provider_key"]),
+			ProviderModelID:     strings.TrimSpace(fields["provider_model_id"]),
+			FallbackUsed:        strings.TrimSpace(fields["fallback_used"]),
+			PolicyReason:        strings.TrimSpace(fields["policy_reason"]),
+			EstimatedCostUSD:    strings.TrimSpace(fields["estimated_cost_usd"]),
+			ContextWindowTokens: strings.TrimSpace(fields["context_window_tokens"]),
+			LatencyTier:         strings.TrimSpace(fields["latency_tier"]),
+			TaskClass:           strings.TrimSpace(fields["task_class"]),
+			RiskClass:           strings.TrimSpace(fields["risk_class"]),
+			Source:              "run_artifact:model_routing",
+		}, nil
+	}
+	return ModelRoutingReadback{}, fmt.Errorf("run %d has no model_routing artifact", detail.RunID)
 }
 
 func (service Service) List(ctx context.Context, resolved scope.Resolution) ([]projections.RunSummaryView, error) {
@@ -216,6 +344,48 @@ func (service Service) Show(ctx context.Context, resolved scope.Resolution, runI
 	}
 
 	return detail, nil
+}
+
+func modelRoutingTaskRunsQuery() string {
+	return `
+		SELECT
+			r.id,
+			r.task_id,
+			t.key,
+			p.key,
+			r.executor,
+			r.status,
+			r.attempt,
+			r.summary,
+			r.artifacts_json,
+			t.scope
+		FROM runs r
+		JOIN tasks t ON t.id = r.task_id
+		JOIN projects p ON p.id = t.project_id
+	`
+}
+
+func scanModelRoutingDetail(scanner interface {
+	Scan(dest ...any) error
+}) (Detail, string, error) {
+	var detail Detail
+	var taskScope string
+	err := scanner.Scan(
+		&detail.RunID,
+		&detail.TaskID,
+		&detail.TaskKey,
+		&detail.ProjectKey,
+		&detail.Executor,
+		&detail.Status,
+		&detail.Attempt,
+		&detail.Summary,
+		&detail.ArtifactsJSON,
+		&taskScope,
+	)
+	if err != nil {
+		return Detail{}, "", err
+	}
+	return detail, taskScope, nil
 }
 
 func failureAnalysisFromArtifactJSON(raw string) *FailureAnalysisDetail {

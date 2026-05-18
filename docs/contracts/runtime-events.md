@@ -126,6 +126,78 @@ Phase 03 replay support must be able to reconstruct:
 
 This replay is a correctness requirement for lifecycle auditing and restart safety.
 
+## Model routing evidence
+
+Executor selection may record a `model_routing` run artifact alongside normal
+run and executor evidence. This artifact is evidence attached to the existing
+Run Attempt; it is not a separate event stream, scheduler, approval system, or
+provider authority.
+
+Stable fields may include:
+
+- `route_name`
+- `executor_lane`
+- `provider_key`
+- `model_key`
+- `provider_model_id`
+- `fallback_used`
+- `policy_reason`
+- `estimated_cost_usd`
+- `context_window_tokens`
+- `latency_tier`
+- `task_class`
+- `risk_class`
+
+The artifact must not include API keys, provider credentials, token cache
+values, or provider-private request payloads.
+
+Operators can read the latest recorded routing decision without inspecting raw
+artifact JSON:
+
+```bash
+odin runs routing --run <run-id> [--json]
+odin runs routing --task <task-id-or-key> [--json]
+```
+
+This command reads existing Task, Run Attempt, and `model_routing` artifact
+records. It must not rerun selector policy, read provider credentials, make
+network calls, or create a new provider authority.
+
+Operators can also inspect the selector output before dispatching a run:
+
+```bash
+odin work route-preview --task <task-id-or-key> [--json]
+```
+
+Route preview reads existing Task and project policy state, derives the same
+portable routing fields dispatch would use, and returns the selected route,
+executor lane, provider, model, fallback flag, policy reason, and deterministic
+requirement inputs. It must not append runtime events, create a Run Attempt,
+record artifacts, prepare leases, read provider credentials, or make network
+calls.
+
+OpenRouter fixture execution may also record `executor_evidence` fields that
+prove request construction without network access. Stable fields include
+`openrouter_request_constructed`, `openrouter_request_sha256`,
+`openrouter_request_json_redacted`, `network_access`, and `fixture_transport`.
+The redacted request proof must preserve only non-secret request shape such as
+model id, message roles, message content hashes and byte counts, max token
+settings, streaming flag, and redacted headers.
+
+The approval-gated live smoke path records `openrouter_live_smoke_request` on
+the prepare Run Attempt with `network_access=false`, then records
+`openrouter_live_smoke_result` on the live Run Attempt only after the matching
+Approval Request is approved and `--live --confirm-live-provider-call` are
+present. These artifacts may record provider/model ids, request hash, response
+id, latency, and token counts, but must not record `OPENROUTER_API_KEY`, bearer
+tokens, raw prompt content, or raw provider error bodies.
+
+`odin provider openrouter smoke evidence` is a read-only projection over those
+same artifacts and events. It may summarize approval id, prepare/live run ids,
+artifact counts, event counts, token counts, latency, and redaction scan booleans
+such as `secret_leak_detected=false`, but it must not persist new evidence or
+replay provider calls.
+
 ## Provenance trail expectation
 
 The SQLite event stream is also the canonical source for operator-facing provenance trails. `odin logs` remains the raw event listing surface. `odin logs show <event-id>` and `odin logs trail --task <id|key>`, `--run <id>`, or `--approval <id>` are read-only projections over the same events table.

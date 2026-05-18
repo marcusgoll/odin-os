@@ -19,6 +19,7 @@ type Service struct {
 	Registry       projects.Registry
 	Executors      map[string]contract.Executor
 	ExecutorConfig executorrouter.Config
+	ModelRegistry  executorrouter.ModelRegistry
 	Governance     projects.Service
 	WorkItems      workitems.Service
 	Leases         leases.Preparer
@@ -57,8 +58,9 @@ func (service Service) ExecuteNextQueued(ctx context.Context) error {
 		return err
 	}
 	selector := executorrouter.Selector{
-		Config:    config,
-		Executors: executors,
+		Config:        config,
+		ModelRegistry: service.ModelRegistry,
+		Executors:     executors,
 	}
 	spec := contract.TaskSpec{
 		ID:     task.Key,

@@ -34,6 +34,7 @@ type App struct {
 	RegistryDiagnostics []projects.Diagnostic
 	SessionStore        clistate.SessionStore
 	ExecutorConfig      executorrouter.Config
+	ModelRegistry       executorrouter.ModelRegistry
 	Executors           map[string]contract.Executor
 	PromptRenderer      prompts.Renderer
 	PromptTemplateName  string
@@ -171,7 +172,7 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 		return App{}, err
 	}
 
-	executorConfig, err := executorrouter.LoadConfig(filepath.Join(repoRoot, "config", "executors.yaml"))
+	executorConfig, modelRegistry, err := executorrouter.LoadConfigWithModelRegistry(filepath.Join(repoRoot, "config", "executors.yaml"), filepath.Join(repoRoot, "config", "models.yaml"))
 	if err != nil {
 		if failureErr := recordBootstrapFailure(ctx, store, runtimeState, bootID, err); failureErr != nil {
 			err = failureErr
@@ -203,6 +204,7 @@ func Load(ctx context.Context, repoRoot string, runtimeRoot string) (App, error)
 			Path: filepath.Join(runtimeRoot, "state", "cache", "cli-session.json"),
 		},
 		ExecutorConfig:     executorConfig,
+		ModelRegistry:      modelRegistry,
 		Executors:          executors,
 		PromptRenderer:     promptRenderer,
 		PromptTemplateName: promptTemplateName,

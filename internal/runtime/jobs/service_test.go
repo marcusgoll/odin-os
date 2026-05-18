@@ -16,6 +16,7 @@ import (
 	"odin-os/internal/cli/scope"
 	"odin-os/internal/core/projects"
 	"odin-os/internal/executors/contract"
+	"odin-os/internal/executors/openrouter_api"
 	"odin-os/internal/executors/router"
 	"odin-os/internal/prompts"
 	"odin-os/internal/runtime/checkpoints"
@@ -2222,6 +2223,213 @@ func TestExecuteDispatchedRunUsesActiveWorktreeLeaseMetadata(t *testing.T) {
 	}
 }
 
+func TestDispatchTaskRunAttemptRecordsModelRoutingArtifact(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		ModelRegistry:  mustLoadModelRegistry(t),
+		Executors: map[string]contract.Executor{
+			"codex_headless": jobTestExecutor{
+				key: "codex_headless",
+				result: contract.ExecutionResult{
+					Status: "completed",
+					Output: "unused",
+				},
+			},
+			"openrouter_api": openrouter_api.New(),
+		},
+		Transitions: projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	task, err := service.CreateTask(ctx, CreateTaskParams{
+		Resolved: scope.Resolution{
+			Kind:       scope.ScopeProject,
+			ProjectKey: "alpha",
+		},
+		Title:                 "Backend API fixture cleanup",
+		RequestedBy:           "test",
+		WorkKind:              "build",
+		ExecutionIntent:       "read_only",
+		ExecutionIntentSource: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	outcome, err := service.DispatchTaskRunAttempt(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("DispatchTaskRunAttempt() error = %v", err)
+	}
+	if outcome.Run == nil {
+		t.Fatal("DispatchTaskRunAttempt().Run = nil")
+	}
+	if outcome.Run.Executor != "openrouter_api" {
+		t.Fatalf("Run.Executor = %q, want openrouter_api", outcome.Run.Executor)
+	}
+
+	artifacts, err := store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{RunID: outcome.Run.ID, ArtifactType: "model_routing"})
+	if err != nil {
+		t.Fatalf("ListRunArtifacts(model_routing) error = %v", err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("model_routing artifacts = %d, want 1", len(artifacts))
+	}
+	var details map[string]string
+	if err := json.Unmarshal([]byte(artifacts[0].DetailsJSON), &details); err != nil {
+		t.Fatalf("json.Unmarshal(model_routing details) error = %v", err)
+	}
+	if details["model_key"] != "openrouter-kimi-k2-6" || details["provider_key"] != "openrouter" {
+		t.Fatalf("model routing details = %+v, want OpenRouter Kimi metadata", details)
+	}
+	if details["provider_model_id"] != "fixture/openrouter-kimi-k2-6" {
+		t.Fatalf("provider_model_id = %q, want fixture/openrouter-kimi-k2-6", details["provider_model_id"])
+	}
+	if details["fallback_used"] != "false" {
+		t.Fatalf("fallback_used = %q, want false", details["fallback_used"])
+	}
+	if details["route_name"] != "low-risk-backend-build" || details["task_class"] != "backend_build" || details["risk_class"] != "low" {
+		t.Fatalf("model routing details = %+v, want low-risk backend route evidence", details)
+	}
+
+	executed, err := service.ExecuteDispatchedRun(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("ExecuteDispatchedRun() error = %v", err)
+	}
+	if !executed.Executed || executed.Reason != "completed" {
+		t.Fatalf("ExecuteDispatchedRun() = %+v, want completed execution", executed)
+	}
+	evidence, err := store.ListRunArtifacts(ctx, sqlite.ListRunArtifactsParams{RunID: outcome.Run.ID, ArtifactType: "executor_evidence"})
+	if err != nil {
+		t.Fatalf("ListRunArtifacts(executor_evidence) error = %v", err)
+	}
+	if len(evidence) != 1 {
+		t.Fatalf("executor_evidence artifacts = %d, want 1", len(evidence))
+	}
+	var executionDetails map[string]string
+	if err := json.Unmarshal([]byte(evidence[0].DetailsJSON), &executionDetails); err != nil {
+		t.Fatalf("json.Unmarshal(executor_evidence details) error = %v", err)
+	}
+	proof := executionDetails["openrouter_request_json_redacted"]
+	if executionDetails["openrouter_request_constructed"] != "true" || executionDetails["network_access"] != "false" {
+		t.Fatalf("execution metadata = %+v, want constructed no-network proof", executionDetails)
+	}
+	if !strings.Contains(proof, "fixture/openrouter-kimi-k2-6") || !strings.Contains(proof, "[REDACTED]") {
+		t.Fatalf("openrouter_request_json_redacted = %s, want fixture model and redactions", proof)
+	}
+	if !strings.Contains(proof, `"fixture_prompt_shape":"low_risk_backend_build"`) {
+		t.Fatalf("openrouter_request_json_redacted = %s, want backend fixture prompt shape", proof)
+	}
+	if strings.Contains(proof, "Backend API fixture cleanup") {
+		t.Fatalf("openrouter_request_json_redacted leaked prompt: %s", proof)
+	}
+}
+
+func TestPreviewTaskRouteReturnsModelDecisionWithoutCreatingRun(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := openJobStore(t)
+	defer store.Close()
+
+	registry := writeRegistry(t)
+	service := Service{
+		Store:          store,
+		Registry:       registry,
+		ExecutorConfig: mustLoadExecutorConfig(t),
+		ModelRegistry:  mustLoadModelRegistry(t),
+		Executors: map[string]contract.Executor{
+			"codex_headless": jobTestExecutor{key: "codex_headless"},
+			"openrouter_api": openrouter_api.New(),
+		},
+		Transitions: projects.Service{Store: store},
+		Leases: leases.Manager{
+			Store:        store,
+			Git:          &jobTestGit{},
+			WorktreeRoot: t.TempDir(),
+		},
+		Now: time.Now,
+	}
+
+	lowRiskTask, err := service.CreateTask(ctx, CreateTaskParams{
+		Resolved: scope.Resolution{
+			Kind:       scope.ScopeProject,
+			ProjectKey: "alpha",
+		},
+		Title:                 "Backend API fixture",
+		RequestedBy:           "test",
+		ExecutionIntent:       "read_only",
+		ExecutionIntentSource: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(low risk) error = %v", err)
+	}
+	preview, err := service.PreviewTaskRoute(ctx, lowRiskTask.ID)
+	if err != nil {
+		t.Fatalf("PreviewTaskRoute(low risk) error = %v", err)
+	}
+	if preview.Decision.RouteName != "low-risk-backend-build" ||
+		preview.Decision.ExecutorKey != "openrouter_api" ||
+		preview.Decision.ModelKey != "openrouter-kimi-k2-6" ||
+		preview.Spec.TaskClass != "backend_build" ||
+		preview.Spec.RiskClass != "low" {
+		t.Fatalf("low risk preview = %+v / spec %+v, want OpenRouter backend route", preview.Decision, preview.Spec)
+	}
+
+	elevatedTask, err := service.CreateTask(ctx, CreateTaskParams{
+		Resolved: scope.Resolution{
+			Kind:       scope.ScopeProject,
+			ProjectKey: "alpha",
+		},
+		Title:                 "Backend API mutation fixture",
+		RequestedBy:           "test",
+		ExecutionIntent:       "mutation",
+		ExecutionIntentSource: "test",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask(elevated) error = %v", err)
+	}
+	elevated, err := service.PreviewTaskRoute(ctx, elevatedTask.ID)
+	if err != nil {
+		t.Fatalf("PreviewTaskRoute(elevated) error = %v", err)
+	}
+	if elevated.Decision.RouteName != "elevated-backend-build" ||
+		elevated.Decision.ExecutorKey != "codex_headless" ||
+		elevated.Decision.ModelKey != "codex-latest" ||
+		elevated.Spec.TaskClass != "backend_build" ||
+		elevated.Spec.RiskClass != "medium" {
+		t.Fatalf("elevated preview = %+v / spec %+v, want Premium Codex backend route", elevated.Decision, elevated.Spec)
+	}
+
+	var runCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM runs`).Scan(&runCount); err != nil {
+		t.Fatalf("count runs: %v", err)
+	}
+	if runCount != 0 {
+		t.Fatalf("runs count = %d, want 0 after dry-run previews", runCount)
+	}
+	var artifactCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM run_artifacts`).Scan(&artifactCount); err != nil {
+		t.Fatalf("count run artifacts: %v", err)
+	}
+	if artifactCount != 0 {
+		t.Fatalf("run artifact count = %d, want 0 after dry-run previews", artifactCount)
+	}
+}
+
 func TestExecuteNextQueuedRequeuesWhenBlockedWakePacketCompactionFails(t *testing.T) {
 	t.Parallel()
 
@@ -2987,6 +3195,16 @@ func mustLoadExecutorConfig(t *testing.T) router.Config {
 		t.Fatalf("LoadConfig(executors) error = %v", err)
 	}
 	return cfg
+}
+
+func mustLoadModelRegistry(t *testing.T) router.ModelRegistry {
+	t.Helper()
+
+	registry, err := router.LoadModelRegistry(filepath.Clean(filepath.Join("..", "..", "..", "config", "models.yaml")))
+	if err != nil {
+		t.Fatalf("LoadModelRegistry(models) error = %v", err)
+	}
+	return registry
 }
 
 func latestRunForTask(ctx context.Context, store *sqlite.Store, taskID int64) (sqlite.Run, error) {

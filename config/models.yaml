@@ -6,31 +6,151 @@ models:
     provider: openai
     access: plan_backed_cli
     adapter: codex_headless
+    capabilities: [judgment, code, frontend, backend, review, planning, tools]
+    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research, security_decision, production_deploy]
+    supported_features: [headless_plan, tools, resume]
+    context_window_tokens: 200000
+    max_input_tokens: 160000
+    max_output_tokens: 40000
+    input_cost_per_million_tokens_usd: 0
+    output_cost_per_million_tokens_usd: 0
+    latency_tier: interactive
+    risk_tier: premium_judgment
+    allow_high_risk: true
   - key: claude-code-latest
     provider: anthropic
     access: plan_backed_cli
     adapter: claude_code_headless
+    capabilities: [judgment, code, frontend, backend, review, planning, tools]
+    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research, security_decision]
+    supported_features: [headless_plan, tools, resume]
+    context_window_tokens: 200000
+    max_input_tokens: 160000
+    max_output_tokens: 40000
+    input_cost_per_million_tokens_usd: 0
+    output_cost_per_million_tokens_usd: 0
+    latency_tier: interactive
+    risk_tier: premium_judgment
+    allow_high_risk: true
   - key: gemini-cli-latest
     provider: google
     access: plan_backed_cli
     adapter: gemini_cli_headless
+    capabilities: [code, review, planning, tools]
+    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research]
+    supported_features: [headless_plan, tools, resume]
+    context_window_tokens: 1000000
+    max_input_tokens: 900000
+    max_output_tokens: 64000
+    input_cost_per_million_tokens_usd: 0
+    output_cost_per_million_tokens_usd: 0
+    latency_tier: interactive
+    risk_tier: plan_backed_general
   - key: gpt-5.4
     provider: openai
     access: api
     adapter: openai_api
+    capabilities: [judgment, code, review, planning]
+    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research]
+    supported_features: [cost_estimate, streaming, tools]
+    context_window_tokens: 200000
+    max_input_tokens: 160000
+    max_output_tokens: 40000
+    input_cost_per_million_tokens_usd: 0
+    output_cost_per_million_tokens_usd: 0
+    latency_tier: interactive
+    risk_tier: api_general
+    blocked_task_classes: [finance, legal, medical, approval_resolution, production_deploy, public_publish]
   - key: claude-sonnet
     provider: anthropic
     access: api
     adapter: anthropic_api
+    capabilities: [judgment, code, review, planning]
+    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research]
+    supported_features: [cost_estimate, streaming, tools]
+    context_window_tokens: 200000
+    max_input_tokens: 160000
+    max_output_tokens: 40000
+    input_cost_per_million_tokens_usd: 0
+    output_cost_per_million_tokens_usd: 0
+    latency_tier: interactive
+    risk_tier: api_general
+    blocked_task_classes: [finance, legal, medical, approval_resolution, production_deploy, public_publish]
   - key: gemini-pro
     provider: google
     access: api
     adapter: google_api
+    capabilities: [code, review, planning, research]
+    supported_task_classes: [general, plan, build, frontend_build, backend_build, review, qa, research]
+    supported_features: [cost_estimate, streaming, tools]
+    context_window_tokens: 1000000
+    max_input_tokens: 900000
+    max_output_tokens: 64000
+    input_cost_per_million_tokens_usd: 0
+    output_cost_per_million_tokens_usd: 0
+    latency_tier: batch
+    risk_tier: api_general
+    blocked_task_classes: [finance, legal, medical, security_decision, approval_resolution, production_deploy, public_publish]
   - key: grok-latest
     provider: xai
     access: api
     adapter: xai_api
+    capabilities: [research, drafting]
+    supported_task_classes: [general, research]
+    supported_features: [cost_estimate, streaming]
+    context_window_tokens: 128000
+    max_input_tokens: 96000
+    max_output_tokens: 32000
+    input_cost_per_million_tokens_usd: 0
+    output_cost_per_million_tokens_usd: 0
+    latency_tier: batch
+    risk_tier: api_general
+    blocked_task_classes: [finance, legal, medical, security_decision, approval_resolution, production_deploy, public_publish]
   - key: broker-default
     provider: openrouter
     access: broker
     adapter: openrouter_api
+    capabilities: [code, backend, drafting, summarization]
+    supported_task_classes: [frontend_build, backend_build, provider_smoke]
+    supported_features: [cost_estimate, broker_routing, tools]
+    context_window_tokens: 128000
+    max_input_tokens: 96000
+    max_output_tokens: 32000
+    input_cost_per_million_tokens_usd: 0.25
+    output_cost_per_million_tokens_usd: 0.75
+    latency_tier: batch
+    risk_tier: external_grunt
+    blocked_task_classes: [finance, legal, medical, security_decision, approval_resolution, production_deploy, public_publish]
+  - key: openrouter-kimi-k2-6
+    provider: openrouter
+    provider_model_id: fixture/openrouter-kimi-k2-6
+    live_provider_model_id: moonshotai/kimi-k2-thinking
+    access: broker
+    adapter: openrouter_api
+    capabilities: [code, frontend, backend]
+    supported_task_classes: [frontend_build, backend_build, provider_smoke]
+    supported_features: [cost_estimate, broker_routing, tools]
+    context_window_tokens: 128000
+    max_input_tokens: 96000
+    max_output_tokens: 32000
+    input_cost_per_million_tokens_usd: 0.25
+    output_cost_per_million_tokens_usd: 1.00
+    latency_tier: batch
+    risk_tier: external_grunt
+    blocked_task_classes: [finance, legal, medical, security_decision, approval_resolution, production_deploy, public_publish]
+  - key: openrouter-cheap-general
+    provider: openrouter
+    provider_model_id: fixture/openrouter-cheap-general
+    access: broker
+    adapter: openrouter_api
+    capabilities: [summarization, formatting, inventory, drafting]
+    supported_task_classes: [provider_smoke]
+    supported_features: [cost_estimate, broker_routing]
+    context_window_tokens: 64000
+    max_input_tokens: 48000
+    max_output_tokens: 16000
+    input_cost_per_million_tokens_usd: 0.05
+    output_cost_per_million_tokens_usd: 0.10
+    latency_tier: batch
+    risk_tier: cheap_grunt
+    blocked_task_classes: [finance, legal, medical, security_decision, approval_resolution, production_deploy, public_publish]

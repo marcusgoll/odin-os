@@ -30,6 +30,34 @@ func RenderRunDetail(detail runsvc.Detail) string {
 	return builder.String()
 }
 
+func RenderModelRouting(readback runsvc.ModelRoutingReadback) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "run=%d task=%s status=%s executor=%s\n", readback.RunID, readback.TaskKey, readback.RunStatus, readback.RunExecutor)
+	for _, field := range []struct {
+		key   string
+		value string
+	}{
+		{"route_name", readback.RouteName},
+		{"executor_lane", readback.ExecutorLane},
+		{"model_key", readback.ModelKey},
+		{"provider_key", readback.ProviderKey},
+		{"provider_model_id", readback.ProviderModelID},
+		{"fallback_used", readback.FallbackUsed},
+		{"policy_reason", readback.PolicyReason},
+		{"estimated_cost_usd", readback.EstimatedCostUSD},
+		{"context_window_tokens", readback.ContextWindowTokens},
+		{"latency_tier", readback.LatencyTier},
+		{"task_class", readback.TaskClass},
+		{"risk_class", readback.RiskClass},
+		{"source", readback.Source},
+	} {
+		if value := strings.TrimSpace(field.value); value != "" {
+			fmt.Fprintf(&builder, "%s=%s\n", field.key, value)
+		}
+	}
+	return builder.String()
+}
+
 func renderFailureAnalysis(builder *strings.Builder, analysis *runsvc.FailureAnalysisDetail) {
 	if value := strings.TrimSpace(analysis.Category); value != "" {
 		fmt.Fprintf(builder, "failure_analysis_category=%s\n", value)
