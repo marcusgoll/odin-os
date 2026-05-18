@@ -1,0 +1,41 @@
+name: software-factory-lane
+description: Fixture-backed Software Factory Lane proof with fake merge evidence.
+project:
+  key: actual-use-demo
+  name: Actual Use Demo
+  github_repo: acme/actual-use-demo
+github:
+  mode: fixture
+codex:
+  mode: disabled
+commands:
+  - odin factory start --project actual-use-demo --title "Implement fixture change" --json
+  - odin factory status --task task-1 --json
+  - odin intake raw create --source github --title "Factory issue" --type issue --project actual-use-demo --dedup-key factory-issue-1 --json
+  - odin intake process --id intake-1 --json
+  - odin intake review accept intake-1 --factory --json
+  - odin work status --json
+  - odin jobs --json
+  - odin runs --json
+  - odin review list --json
+steps:
+  - name: validate_factory_commands
+    expect: pass
+  - name: factory_operator_start
+    expect: pass
+  - name: factory_status_operator
+    expect: pass
+  - name: intake_raw_create
+    expect: pass
+  - name: intake_review_accept_factory
+    expect: pass
+  - name: runs_readback
+    expect: pass
+  - name: review_pr_handoff
+    expect: pass
+  - name: factory_merge_gate
+    expect: pass
+  - name: work_status_readback
+    expect: pass
+  - name: review_list_readback
+    expect: pass

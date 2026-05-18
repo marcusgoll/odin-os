@@ -22,6 +22,7 @@ import (
 	"odin-os/internal/review"
 	"odin-os/internal/runtime/approvals"
 	runtimeevents "odin-os/internal/runtime/events"
+	factorysvc "odin-os/internal/runtime/factory"
 	"odin-os/internal/runtime/jobs"
 	"odin-os/internal/store/sqlite"
 	"odin-os/internal/tracker"
@@ -154,6 +155,8 @@ func (runner *runner) run(ctx context.Context) error {
 		err = runner.runPromptRenderingBrownfield(ctx)
 	case "failure-analysis":
 		err = runner.runFailureAnalysis(ctx)
+	case "software-factory-lane":
+		err = runner.runSoftwareFactoryLane(ctx, registry)
 	default:
 		err = fmt.Errorf("unsupported e2e scenario %q", runner.scenario.Name)
 	}
@@ -1001,6 +1004,149 @@ func (runner *runner) runTrackerDryRunLifecycle(ctx context.Context) error {
 	return nil
 }
 
+func (runner *runner) runSoftwareFactoryLane(ctx context.Context, registry projects.Registry) error {
+	if len(runner.scenario.Commands) == 0 {
+		return runner.failStage("validate_factory_commands", errors.New("software factory lane scenario requires commands"))
+	}
+	runner.passStage("validate_factory_commands", fmt.Sprintf("commands=%d", len(runner.scenario.Commands)))
+
+	service := factorysvc.Service{
+		Store: runner.store,
+		Jobs:  jobs.Service{Store: runner.store, Registry: registry},
+	}
+	operator, err := service.AdmitOperatorStart(ctx, factorysvc.AdmitOperatorInput{
+		ProjectKey:  runner.scenario.Project.Key,
+		Title:       "Implement fixture change",
+		RequestedBy: "e2e",
+	})
+	if err != nil {
+		return runner.failStage("factory_operator_start", err)
+	}
+	if operator.Task.WorkKind != factorysvc.WorkKindFactoryLane || operator.Task.ExecutionIntentSource != "factory_lane:operator" {
+		return runner.failStage("factory_operator_start", fmt.Errorf("operator task kind/source = %s/%s", operator.Task.WorkKind, operator.Task.ExecutionIntentSource))
+	}
+	runner.report.Delivery.WorkItemKey = operator.Task.Key
+	runner.passStage("factory_operator_start", fmt.Sprintf("work_item=%s", operator.Task.Key))
+
+	if status, err := service.Status(ctx, operator.Task.Key); err != nil {
+		return runner.failStage("factory_status_operator", err)
+	} else if status.Phase != string(factorysvc.PhaseAdmitted) {
+		return runner.failStage("factory_status_operator", fmt.Errorf("phase = %s, want admitted", status.Phase))
+	}
+	runner.passStage("factory_status_operator", "phase=admitted")
+
+	intake, err := runner.store.CreateIntakeItem(ctx, sqlite.CreateIntakeItemParams{
+		WorkspaceID:         "default",
+		SourceFamily:        "github",
+		ExternalObjectID:    "factory-issue-1",
+		EventKind:           "issue",
+		Subject:             "Factory issue",
+		DedupeKey:           "factory-issue-1",
+		DedupeRecipeVersion: "fixture",
+		SourceFactsJSON:     `{"type":"issue","project":"` + runner.scenario.Project.Key + `"}`,
+		Status:              "review_ready",
+		Scope:               "project",
+		ScopeKey:            runner.scenario.Project.Key,
+		Summary:             "Factory issue",
+	})
+	if err != nil {
+		return runner.failStage("intake_raw_create", err)
+	}
+	runner.passStage("intake_raw_create", fmt.Sprintf("intake=intake-%d", intake.ID))
+
+	intakeTask, err := service.PromoteAcceptedIntake(ctx, intake, "Factory issue", []string{"factory issue accepted"})
+	if err != nil {
+		return runner.failStage("intake_review_accept_factory", err)
+	}
+	if intakeTask.Task.WorkKind != factorysvc.WorkKindFactoryLane || intakeTask.Task.ExecutionIntentSource != "factory_lane:intake_review" {
+		return runner.failStage("intake_review_accept_factory", fmt.Errorf("intake task kind/source = %s/%s", intakeTask.Task.WorkKind, intakeTask.Task.ExecutionIntentSource))
+	}
+	runner.passStage("intake_review_accept_factory", fmt.Sprintf("work_item=%s", intakeTask.Task.Key))
+
+	run, err := runner.store.StartRun(ctx, sqlite.StartRunParams{
+		TaskID:     operator.Task.ID,
+		Executor:   "fixture_factory",
+		Attempt:    1,
+		Status:     "completed",
+		TaskStatus: "queued",
+	})
+	if err != nil {
+		return runner.failStage("runs_readback", err)
+	}
+	runner.report.Delivery.RunID = run.ID
+	runner.passStage("runs_readback", fmt.Sprintf("run=%d", run.ID))
+
+	handoff, err := runner.store.UpsertPullRequestHandoff(ctx, sqlite.UpsertPullRequestHandoffParams{
+		ProjectID:     operator.Task.ProjectID,
+		Provider:      "github",
+		Repo:          runner.scenario.Project.GitHubRepo,
+		Number:        42,
+		URL:           "https://github.test/" + runner.scenario.Project.GitHubRepo + "/pull/42",
+		State:         "open",
+		IssueURL:      "https://github.test/" + runner.scenario.Project.GitHubRepo + "/issues/42",
+		Branch:        "factory/fixture-change",
+		Title:         "Implement fixture change",
+		Summary:       "Fixture PR handoff",
+		Tests:         []string{"checks:green", "branch_protection:satisfied", "mergeable:true"},
+		ReviewState:   "review_selected",
+		SelectedRoles: []string{"code"},
+	})
+	if err != nil {
+		return runner.failStage("review_pr_handoff", err)
+	}
+	if _, err := service.RecordPhaseEvidence(ctx, factorysvc.PhaseEvidenceInput{
+		TaskID:  operator.Task.ID,
+		RunID:   &run.ID,
+		Phase:   factorysvc.PhasePRHandoff,
+		Summary: "fixture PR handoff recorded",
+		Details: map[string]string{"pr_handoff_id": fmt.Sprintf("%d", handoff.ID)},
+	}); err != nil {
+		return runner.failStage("review_pr_handoff", err)
+	}
+	runner.report.Delivery.PRReadyBranch = handoff.Branch
+	runner.passStage("review_pr_handoff", fmt.Sprintf("handoff=%d", handoff.ID))
+
+	merge, err := service.EvaluateMergeGate(ctx, operator.Task.Key)
+	if err != nil {
+		return runner.failStage("factory_merge_gate", err)
+	}
+	if !merge.Merged || merge.DeployHandoffID == "" {
+		return runner.failStage("factory_merge_gate", fmt.Errorf("merge = %+v, want merged with deploy handoff", merge))
+	}
+	runner.passStage("factory_merge_gate", fmt.Sprintf("commit=%s deploy_handoff=%s", merge.CommitSHA, merge.DeployHandoffID))
+
+	rows, err := runner.store.DB().QueryContext(ctx, `SELECT COUNT(*) FROM tasks`)
+	if err != nil {
+		return runner.failStage("work_status_readback", err)
+	}
+	var taskCount int
+	if !rows.Next() {
+		_ = rows.Close()
+		return runner.failStage("work_status_readback", errors.New("task count returned no rows"))
+	}
+	if err := rows.Scan(&taskCount); err != nil {
+		_ = rows.Close()
+		return runner.failStage("work_status_readback", err)
+	}
+	if err := rows.Close(); err != nil {
+		return runner.failStage("work_status_readback", err)
+	}
+	if taskCount < 2 {
+		return runner.failStage("work_status_readback", fmt.Errorf("tasks = %d, want operator and intake tasks", taskCount))
+	}
+	runner.passStage("work_status_readback", fmt.Sprintf("tasks=%d", taskCount))
+
+	handoffs, err := runner.store.ListPullRequestHandoffs(ctx, sqlite.ListPullRequestHandoffsParams{ProjectID: &operator.Task.ProjectID})
+	if err != nil {
+		return runner.failStage("review_list_readback", err)
+	}
+	if len(handoffs) == 0 {
+		return runner.failStage("review_list_readback", errors.New("no pull request handoff review records"))
+	}
+	runner.passStage("review_list_readback", fmt.Sprintf("handoffs=%d", len(handoffs)))
+	return nil
+}
+
 func (runner *runner) runWorkspaceSafeCreation(ctx context.Context) error {
 	project, task, run, err := runner.createRuntimeWork(ctx, runner.step("create_workspace").IssueTitle)
 	if err != nil {
@@ -1354,6 +1500,7 @@ type scenario struct {
 	Project     scenarioProject `yaml:"project"`
 	GitHub      scenarioGitHub  `yaml:"github"`
 	Codex       scenarioCodex   `yaml:"codex"`
+	Commands    []string        `yaml:"commands"`
 	Steps       []scenarioStep  `yaml:"steps"`
 }
 
